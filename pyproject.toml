@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "contremaitre"
+version = "0.1.0"
+description = "Deterministic orchestration shell for architecture-agent PR runs."
+requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "Proprietary"}
+authors = [{name = "Contremaitre"}]
+dependencies = []
+
+[project.scripts]
+contremaitre = "contremaitre.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["contremaitre*"]
+
