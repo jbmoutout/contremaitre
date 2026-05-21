@@ -62,8 +62,8 @@ class RunConfig:
     branch_prefix: str = "refactor"
     fork: str | None = None
     upstream: str | None = None
-    agent_model: str = "fake-agent"
-    sim_model: str = "fake-sim"
+    agent_model: str = "openrouter/qwen/qwen3.6-27b"
+    sim_model: str = "openrouter/qwen/qwen3.6-27b"
     check_cmds: tuple[str, ...] = ()
     actor_mode: ActorMode = ActorMode.FAKE
     sim_scenario: str = "approved"

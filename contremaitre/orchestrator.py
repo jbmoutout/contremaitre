@@ -16,8 +16,8 @@ WORK is one multi-turn opencode session: the agent runs the
 tooled SWE) responds turn by turn. The loop terminates when the agent writes
 `.contremaitre/IMPLEMENTATION_COMPLETE` in the worktree.
 
-The hand-rolled turn loop is vendored from
-``references/evals/scripts/run_grilling_openevals.py::run_tooled_simulation``.
+The hand-rolled turn loop is a self-contained copy — Contremaitre does not
+import any external orchestration substrate at runtime.
 """
 
 from __future__ import annotations

@@ -12,3 +12,5 @@ dist/
 .contremaitre/runs/
 
 .env
+
+AGENTS.local.md

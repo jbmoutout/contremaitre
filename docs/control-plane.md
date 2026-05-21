@@ -17,7 +17,7 @@ INIT  →  WORK  →  REVIEW  →  APPROVED   (PR opened)
 - **Revision** is not a separate state. A `CHANGES_REQUESTED` verdict clears the marker file, sends the required changes to the agent's WORK session (same opencode session, resumed via `--session`), and re-enters WORK.
 - **APPROVED** runs hard gates (diff-scan, diff-hash match, clean worktree), executable checks, then the publisher.
 
-The multi-turn loop pattern is vendored from `references/evals/scripts/run_grilling_openevals.py::run_tooled_simulation`.
+The multi-turn loop is self-contained; Contremaitre does not import any external orchestration substrate at runtime.
 
 ## Module Map
 
@@ -96,7 +96,7 @@ Every run writes:
 - `eval/cost_report.json`
 - `eval/preflight_report.json`
 
-These are product artifacts, not the workbench eval substrate. `score.json` and the old weighted composite are intentionally absent.
+These are product artifacts. The eval-style `score.json` / weighted composite shapes some readers may expect are intentionally absent — Contremaitre uses a gate-first verdict (`READY_FOR_DRAFT_PR` / `NO_PR_*` / `FAILED_INFRA`) with an explanatory scorecard, not a single score.
 
 ## Terminal signal
 

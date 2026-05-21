@@ -14,8 +14,7 @@ Protocol (multi-turn WORK session + single-shot REVIEW pass):
 
 The hand-rolled multi-turn loop in the orchestrator drives these by
 alternating agent_turn / sim_turn until `.contremaitre/IMPLEMENTATION_COMPLETE`
-appears in the worktree. Vendored from
-``references/evals/scripts/run_grilling_openevals.py::run_tooled_simulation``.
+appears in the worktree.
 """
 
 from __future__ import annotations

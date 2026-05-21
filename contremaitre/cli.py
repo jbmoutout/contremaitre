@@ -28,8 +28,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--upstream", default=None, help="Canonical (read-only) remote, mounted as `upstream`.")
     run_p.add_argument("--base", default="main", help="Base branch for worktree and diff")
     run_p.add_argument("--branch-prefix", default="refactor")
-    run_p.add_argument("--agent-model", default="fake-agent")
-    run_p.add_argument("--sim-model", default="fake-sim")
+    run_p.add_argument(
+        "--agent-model",
+        default="openrouter/qwen/qwen3.6-27b",
+        help="OpenRouter model string for the agent (ignored in --actor fake)",
+    )
+    run_p.add_argument(
+        "--sim-model",
+        default="openrouter/qwen/qwen3.6-27b",
+        help="OpenRouter model string for the SIM (ignored in --actor fake)",
+    )
     run_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value)
     run_p.add_argument("--run-slug", default="run")
     run_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
@@ -141,8 +149,8 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         branch_prefix=getattr(args, "branch_prefix", "refactor"),
         fork=getattr(args, "fork", None),
         upstream=getattr(args, "upstream", None),
-        agent_model=getattr(args, "agent_model", "fake-agent"),
-        sim_model=getattr(args, "sim_model", "fake-sim"),
+        agent_model=getattr(args, "agent_model", "openrouter/qwen/qwen3.6-27b"),
+        sim_model=getattr(args, "sim_model", "openrouter/qwen/qwen3.6-27b"),
         actor_mode=ActorMode(args.actor),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),

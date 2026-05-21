@@ -11,11 +11,10 @@ What is NOT yet measured (PENDING — needs focused judge passes):
   - L3 architecture delta — a judge assessing caller-knowledge reduction,
     shallow-path deletion, behavior preservation
 
-The plan calls for L2/L3 as separate focused-judge LLM calls per axis. Until
-those exist, the scorecard reports only what we actually measure and marks
-the rest `PENDING`. The eval substrate at `references/evals/scripts/` has the
-patterns to vendor when implementing them (`grade_judge.py`,
-`grade_constraints.py`, `grade_run.py`).
+L2/L3 belong as separate focused-judge LLM calls per axis. Until those exist,
+the scorecard reports only what is actually measured and marks the rest
+`PENDING`. We do not import an external grading substrate at runtime; any
+patterns we adopt are copied in.
 """
 
 from __future__ import annotations
