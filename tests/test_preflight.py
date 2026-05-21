@@ -32,7 +32,10 @@ class PreflightTest(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertIn("openrouter_key", self._fail_names(report))
 
-    def test_openrouter_remaining_above_cap_fails(self):
+    def test_openrouter_remaining_above_cap_warns_but_passes(self):
+        # Provider-side limit and orchestrator cap enforce different things:
+        # the orchestrator cap is the per-run budget, the provider limit is
+        # the daily backstop. A looser daily limit warns, doesn't block.
         config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}), self._mock_docker_ok(), patch(
             "contremaitre.preflight._fetch_openrouter_key",
@@ -47,8 +50,8 @@ class PreflightTest(unittest.TestCase):
         ):
             report = run_preflight(config)
 
-        self.assertFalse(report.passed)
-        self.assertIn("openrouter_key", self._fail_names(report))
+        self.assertTrue(report.passed, report.failure_summary())
+        self.assertEqual("WARN", self._status_by_name(report)["openrouter_key"])
 
     def test_bounded_openrouter_key_and_explicit_proxy_pass(self):
         config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))

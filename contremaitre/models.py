@@ -83,7 +83,6 @@ class RunConfig:
     allow_open_egress: bool = False
     skip_openrouter_key_check: bool = False
     allow_unlimited_openrouter_key: bool = False
-    allow_openrouter_limit_above_cap: bool = False
     openrouter_key_url: str = "https://openrouter.ai/api/v1/key"
     agent_timeout_seconds: int = 1800
     sim_timeout_seconds: int = 900

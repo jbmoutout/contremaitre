@@ -78,7 +78,7 @@ python3 -m contremaitre doctor \
 
 Verifies: target repo + base ref, Docker daemon + image, opencode binary inside the image, `:ro` mount enforcement, explicit network/proxy posture, OpenRouter key bounded via `GET /api/v1/key`.
 
-Bypass flags exist but are noisy on purpose: `--skip-preflight`, `--skip-openrouter-key-check`, `--allow-unlimited-openrouter-key`, `--allow-openrouter-limit-above-cap`, `--allow-open-egress`.
+Bypass flags exist but are noisy on purpose: `--skip-preflight`, `--skip-openrouter-key-check`, `--allow-unlimited-openrouter-key`, `--allow-open-egress`.
 
 ## Prompts
 

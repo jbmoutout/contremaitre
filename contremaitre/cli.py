@@ -69,7 +69,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--allow-open-egress", action="store_true", help="Allow opencode containers without explicit network/proxy policy")
     run_p.add_argument("--skip-openrouter-key-check", action="store_true", help="Do not query OpenRouter key metadata")
     run_p.add_argument("--allow-unlimited-openrouter-key", action="store_true", help="Allow OpenRouter keys with no provider-side credit limit")
-    run_p.add_argument("--allow-openrouter-limit-above-cap", action="store_true", help="Allow key remaining limit above --max-cost-usd")
     run_p.add_argument("--openrouter-key-url", default="https://openrouter.ai/api/v1/key")
     run_p.add_argument("--agent-timeout-seconds", type=int, default=1800)
     run_p.add_argument("--sim-timeout-seconds", type=int, default=900)
@@ -100,7 +99,6 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_p.add_argument("--allow-open-egress", action="store_true")
     doctor_p.add_argument("--skip-openrouter-key-check", action="store_true")
     doctor_p.add_argument("--allow-unlimited-openrouter-key", action="store_true")
-    doctor_p.add_argument("--allow-openrouter-limit-above-cap", action="store_true")
     doctor_p.add_argument("--openrouter-key-url", default="https://openrouter.ai/api/v1/key")
     doctor_p.add_argument("--max-cost-usd", type=float, default=30.0)
     doctor_p.set_defaults(func=_doctor_cmd)
@@ -170,7 +168,6 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         allow_open_egress=args.allow_open_egress,
         skip_openrouter_key_check=args.skip_openrouter_key_check,
         allow_unlimited_openrouter_key=args.allow_unlimited_openrouter_key,
-        allow_openrouter_limit_above_cap=args.allow_openrouter_limit_above_cap,
         openrouter_key_url=args.openrouter_key_url,
         agent_timeout_seconds=getattr(args, "agent_timeout_seconds", 1800),
         sim_timeout_seconds=getattr(args, "sim_timeout_seconds", 900),

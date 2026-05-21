@@ -207,10 +207,15 @@ def _check_openrouter_key(config: RunConfig) -> PreflightCheck:
         return _fail("openrouter_key", "OpenRouter limit_remaining is not numeric", _safe_key_details(data))
     if remaining <= 0:
         return _fail("openrouter_key", "OpenRouter key has no remaining limited credit", _safe_key_details(data))
-    if remaining > config.caps.max_cost_usd and not config.allow_openrouter_limit_above_cap:
-        return _fail(
+    if remaining > config.caps.max_cost_usd:
+        # Provider-side limit is the anti-runaway backstop; orchestrator
+        # --max-cost-usd is the per-run budget. The two layers don't have to
+        # be ordered — they enforce different things. Warn so operators can
+        # see the gap, but don't fail.
+        return _warn(
             "openrouter_key",
-            "OpenRouter remaining key limit exceeds Contremaitre max cost cap",
+            "OpenRouter remaining key limit exceeds Contremaitre max cost cap "
+            "(orchestrator cap is the per-run limit; provider limit is the daily backstop)",
             {**_safe_key_details(data), "max_cost_usd": config.caps.max_cost_usd},
         )
     if include_byok is False:
