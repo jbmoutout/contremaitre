@@ -30,13 +30,28 @@ class PublishOutcomeKind(str, Enum):
 
 @dataclass(frozen=True)
 class PublishOutcome:
+    """Tagged result for every terminal of the publication path.
+
+    Two hash fields by design:
+      - `approved_diff_hash`: what the SIM signed off on. Stable across the
+        BLOCKED-on-drift case so we can still see what was approved.
+      - `current_diff_hash`: what the worktree contains right now. Differs from
+        `approved_diff_hash` only on a drift block — that's the whole signal
+        that drift happened, and it would be lost if we collapsed the two
+        into one field.
+
+    For PUBLISHED outcomes the two are equal by definition (drift check passed).
+    For NO_PR outcomes both are None (no diff was reviewed).
+    """
+
     kind: PublishOutcomeKind
     base: str
     publish_mode: PublishMode
     reason: str
     branch: str | None = None
     url: str | None = None
-    diff_hash: str | None = None
+    approved_diff_hash: str | None = None
+    current_diff_hash: str | None = None
     dry_run: bool = True  # True for stub or for non-PUBLISHED kinds; False only when gh actually opened a PR.
 
 
@@ -50,7 +65,8 @@ def record_publication(paths: RunPaths, outcome: PublishOutcome) -> None:
             "branch": outcome.branch,
             "base": outcome.base,
             "url": outcome.url,
-            "diff_hash": outcome.diff_hash,
+            "approved_diff_hash": outcome.approved_diff_hash,
+            "current_diff_hash": outcome.current_diff_hash,
             "reason": outcome.reason,
             "publish_mode": outcome.publish_mode.value,
             "dry_run": outcome.dry_run,
@@ -65,6 +81,7 @@ class Publisher:
 
 class StubPublisher(Publisher):
     def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishOutcome:
+        # PUBLISHED implies the drift check passed, so approved == current.
         outcome = PublishOutcome(
             kind=PublishOutcomeKind.PUBLISHED,
             base=config.base,
@@ -72,7 +89,8 @@ class StubPublisher(Publisher):
             reason="publisher stub: would push branch and open a draft PR after approval",
             branch=branch,
             url=None,
-            diff_hash=diff_hash,
+            approved_diff_hash=diff_hash,
+            current_diff_hash=diff_hash,
             dry_run=True,
         )
         record_publication(paths, outcome)
@@ -109,7 +127,8 @@ class GhPublisher(Publisher):
             reason="pushed branch and opened draft PR via gh",
             branch=branch,
             url=_extract_url(proc.stdout),
-            diff_hash=diff_hash,
+            approved_diff_hash=diff_hash,
+            current_diff_hash=diff_hash,
             dry_run=False,
         )
         record_publication(paths, outcome)

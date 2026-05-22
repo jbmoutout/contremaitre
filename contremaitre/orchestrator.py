@@ -394,6 +394,7 @@ class Orchestrator:
             return self._blocked_by_gates(
                 branch=branch,
                 approved_hash=approved_hash,
+                current_hash=recomputed_hash,
                 checks=checks,
                 diff_scan=diff_scan,
                 hard_gates=hard_gates,
@@ -404,6 +405,7 @@ class Orchestrator:
             return self._blocked_by_gates(
                 branch=branch,
                 approved_hash=approved_hash,
+                current_hash=recomputed_hash,
                 checks=checks,
                 diff_scan=diff_scan,
                 hard_gates=hard_gates,
@@ -442,6 +444,7 @@ class Orchestrator:
         *,
         branch: str,
         approved_hash: str,
+        current_hash: str,
         checks: list[CheckResult],
         diff_scan: DiffScanResult,
         hard_gates: dict[str, object],
@@ -462,7 +465,8 @@ class Orchestrator:
                 publish_mode=self.config.publish_mode,
                 reason=reason,
                 branch=branch,
-                diff_hash=approved_hash,
+                approved_diff_hash=approved_hash,
+                current_diff_hash=current_hash,
                 dry_run=True,
             ),
         )
