@@ -119,7 +119,7 @@ class Orchestrator:
 
             return self._review_rounds(actor=actor, worktree_git=worktree_git, branch=branch)
         except Exception as exc:
-            append_jsonl(self.paths.guardrail_events, {"event": events.INFRA_FAILURE, "error": repr(exc)})
+            self._emit(events.INFRA_FAILURE, error=repr(exc))
             record_publication(
                 self.paths,
                 PublishOutcome(
@@ -166,10 +166,7 @@ class Orchestrator:
                 review_round=review_round,
                 required_changes=last_required_changes,
             )
-            append_jsonl(
-                self.paths.guardrail_events,
-                {"event": events.WORK_SESSION_END, "round": review_round, "outcome": outcome},
-            )
+            self._emit(events.WORK_SESSION_END, round=review_round, outcome=outcome)
 
             if not self._implementation_complete():
                 return self._terminal_no_pr(
@@ -224,13 +221,10 @@ class Orchestrator:
                 last_required_changes = list(parsed.required_changes)
                 last_parsed = parsed
                 self._clear_implementation_complete()
-                append_jsonl(
-                    self.paths.guardrail_events,
-                    {
-                        "event": events.REVISION_REQUESTED,
-                        "round": review_round,
-                        "required_changes": last_required_changes,
-                    },
+                self._emit(
+                    events.REVISION_REQUESTED,
+                    round=review_round,
+                    required_changes=last_required_changes,
                 )
                 continue
 
@@ -347,14 +341,11 @@ class Orchestrator:
                 break
             except VerdictParseError as exc:
                 last_error = str(exc)
-                append_jsonl(
-                    self.paths.guardrail_events,
-                    {
-                        "event": events.MALFORMED_VERDICT,
-                        "round": review_round,
-                        "attempt": attempt,
-                        "error": last_error,
-                    },
+                self._emit(
+                    events.MALFORMED_VERDICT,
+                    round=review_round,
+                    attempt=attempt,
+                    error=last_error,
                 )
 
         if parsed is None:
@@ -457,14 +448,11 @@ class Orchestrator:
         reason: str,
         sim_verdict: ParsedVerdict | None,
     ) -> RunResult:
-        append_jsonl(
-            self.paths.guardrail_events,
-            {
-                "event": events.PUBLICATION_BLOCKED,
-                "reason": reason,
-                "hard_gates": hard_gates,
-                "forbidden_files": diff_scan.forbidden_files,
-            },
+        self._emit(
+            events.PUBLICATION_BLOCKED,
+            reason=reason,
+            hard_gates=hard_gates,
+            forbidden_files=diff_scan.forbidden_files,
         )
         record_publication(
             self.paths,
@@ -614,21 +602,18 @@ class Orchestrator:
         drift.write_text("committed after approval to force diff-hash mismatch\n", encoding="utf-8")
         repo.run("add", str(drift.relative_to(self.paths.worktree)))
         repo.run("commit", "-m", "Simulate drift after approval")
-        append_jsonl(self.paths.guardrail_events, {"event": events.SIMULATED_DIFF_DRIFT})
+        self._emit(events.SIMULATED_DIFF_DRIFT)
 
     def _commit_agent_changes(self, repo: GitRepo) -> None:
         status = repo.status_porcelain()
         if not status.strip():
-            append_jsonl(self.paths.guardrail_events, {"event": events.HOST_COMMIT_SKIPPED, "reason": "worktree clean"})
+            self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
         repo.run("add", ".")
         repo.run("commit", "-m", "Apply Contremaitre agent changes")
-        append_jsonl(
-            self.paths.guardrail_events,
-            {
-                "event": events.HOST_COMMIT_CREATED,
-                "reason": "actor left worktree changes for orchestrator-owned git boundary",
-            },
+        self._emit(
+            events.HOST_COMMIT_CREATED,
+            reason="actor left worktree changes for orchestrator-owned git boundary",
         )
 
     # ----- terminal signal -----
@@ -640,9 +625,20 @@ class Orchestrator:
         marker = self.paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH
         if marker.exists():
             marker.unlink()
-            append_jsonl(self.paths.guardrail_events, {"event": events.IMPLEMENTATION_COMPLETE_CLEARED})
+            self._emit(events.IMPLEMENTATION_COMPLETE_CLEARED)
 
     # ----- bookkeeping -----
+
+    def _emit(self, event: str, **fields) -> None:
+        """Append an event row to guardrail_events.jsonl.
+
+        Wraps the `append_jsonl(self.paths.guardrail_events, {"event": …, …})`
+        boilerplate so call sites read as one line for simple emits and stay
+        flat for multi-field ones. Single emission point also lets us add a
+        timestamp / turn-counter later in one place.
+        """
+
+        append_jsonl(self.paths.guardrail_events, {"event": event, **fields})
 
     def _transition(self, state: State, note: str) -> None:
         record = {"state": state.value, "note": note, "turns": self.turns}
@@ -656,10 +652,10 @@ class Orchestrator:
     def _cap_tripped(self) -> bool:
         wall_minutes = (time.monotonic() - self.started) / 60.0
         if self.turns >= self.config.caps.max_turns:
-            append_jsonl(self.paths.guardrail_events, {"event": events.TURN_CAP, "turns": self.turns})
+            self._emit(events.TURN_CAP, turns=self.turns)
             return True
         if wall_minutes >= self.config.caps.max_wall_minutes:
-            append_jsonl(self.paths.guardrail_events, {"event": events.WALL_CAP, "wall_minutes": wall_minutes})
+            self._emit(events.WALL_CAP, wall_minutes=wall_minutes)
             return True
         recorded_cost = estimate_recorded_cost_usd(self.paths.raw_export, self.paths.sim_raw_export)
         write_json(
@@ -671,23 +667,17 @@ class Orchestrator:
             },
         )
         if recorded_cost >= self.config.caps.max_cost_usd:
-            append_jsonl(
-                self.paths.guardrail_events,
-                {
-                    "event": events.RECORDED_COST_CAP,
-                    "recorded_cost_usd": recorded_cost,
-                    "max_cost_usd": self.config.caps.max_cost_usd,
-                },
+            self._emit(
+                events.RECORDED_COST_CAP,
+                recorded_cost_usd=recorded_cost,
+                max_cost_usd=self.config.caps.max_cost_usd,
             )
             return True
         if self.no_progress_streak >= self.config.caps.no_progress_turns:
-            append_jsonl(
-                self.paths.guardrail_events,
-                {
-                    "event": events.NO_PROGRESS_CAP,
-                    "no_progress_streak": self.no_progress_streak,
-                    "no_progress_turns": self.config.caps.no_progress_turns,
-                },
+            self._emit(
+                events.NO_PROGRESS_CAP,
+                no_progress_streak=self.no_progress_streak,
+                no_progress_turns=self.config.caps.no_progress_turns,
             )
             return True
         return False
@@ -707,14 +697,7 @@ class Orchestrator:
         else:
             self.no_progress_streak += 1
             event = events.NO_PROGRESS
-        append_jsonl(
-            self.paths.guardrail_events,
-            {
-                "event": event,
-                "label": label,
-                "no_progress_streak": self.no_progress_streak,
-            },
-        )
+        self._emit(event, label=label, no_progress_streak=self.no_progress_streak)
 
     def _record_worktree_state(self, repo: GitRepo, label: str) -> _WorktreeSnapshot:
         """Snapshot + log + return for reuse by callers needing the same data."""
