@@ -47,6 +47,11 @@ WALL_CAP = "wall_cap"
 RECORDED_COST_CAP = "recorded_cost_cap"
 NO_PROGRESS_CAP = "no_progress_cap"
 
+# ----- Executable checks (L1) -----
+
+CHECK_STARTED = "check_started"
+CHECK_COMPLETED = "check_completed"
+
 # ----- Host-side git -----
 
 HOST_COMMIT_CREATED = "host_commit_created"

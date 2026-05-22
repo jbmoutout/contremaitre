@@ -201,7 +201,12 @@ class Orchestrator:
                 )
 
             self._commit_agent_changes(worktree_git)
-            checks = run_checks(self.paths.worktree, self.config.check_cmds, self.paths.test_runs)
+            checks = run_checks(
+                self.paths.worktree,
+                self.config.check_cmds,
+                self.paths.test_runs,
+                emit_event=self._emit,
+            )
             self._record_worktree_state(worktree_git, f"after-checks-round{review_round}")
 
             review_result = self._run_review(
