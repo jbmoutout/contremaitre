@@ -42,8 +42,8 @@ python3 -m contremaitre run \
   --repo ~/code/itadakimasu \
   --fork git@github.com:<user>/itadakimasu.git \
   --base main \
-  --agent-model openrouter/qwen/qwen3.6-27b \
-  --sim-model openrouter/qwen/qwen3.6-27b \
+  --agent-model openrouter/deepseek/deepseek-v4-flash \
+  --sim-model openrouter/deepseek/deepseek-v4-flash \
   --docker-image arch001-eval-app:latest \
   --opencode-config /path/to/opencode.json \
   --check-cmd "npm test" \
