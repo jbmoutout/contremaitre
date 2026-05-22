@@ -71,7 +71,7 @@ class RunConfig:
     publish_mode: PublishMode = PublishMode.STUB
     keep_worktree: bool = False
     simulate_drift_after_approval: bool = False
-    docker_image: str = "arch001-eval-app:latest"
+    docker_image: str = "contremaitre-agent:latest"
     opencode_config: Path | None = None
     openrouter_env_var: str = "OPENROUTER_API_KEY"
     container_user: str | None = None

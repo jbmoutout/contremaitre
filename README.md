@@ -36,6 +36,16 @@ Artifacts land in `.contremaitre/runs/<run-id>/`.
 
 ## Live run (opencode actor)
 
+First, build the runtime image (once per host, or when the Dockerfile changes):
+
+```bash
+python3 -m contremaitre image build
+```
+
+This builds `contremaitre-agent:latest` from the package's [Dockerfile](contremaitre/Dockerfile) — generic opencode-in-Docker base with `mattpocock/skills` installed globally. No target codebase is baked in; the orchestrator mounts the per-run worktree at `/app` at run time.
+
+Then the run itself:
+
 ```bash
 python3 -m contremaitre run \
   --actor opencode \
@@ -44,11 +54,12 @@ python3 -m contremaitre run \
   --base main \
   --agent-model openrouter/deepseek/deepseek-v4-flash \
   --sim-model openrouter/deepseek/deepseek-v4-flash \
-  --docker-image arch001-eval-app:latest \
   --opencode-config /path/to/opencode.json \
   --check-cmd "npm test" \
   --publish-mode stub
 ```
+
+`--docker-image` defaults to `contremaitre-agent:latest`; override only when you've built a custom image.
 
 To actually publish a draft PR, set `--publish-mode gh` and supply `GITHUB_TOKEN`:
 

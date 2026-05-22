@@ -24,6 +24,7 @@ No build step. No external dependencies (the dependency-free `.env` parser and J
 - `contremaitre/preflight.py` — operational checks for live opencode runs.
 - `contremaitre/publisher.py` — `StubPublisher` and `GhPublisher`. Host-side only.
 - `contremaitre/{checks,costs,diffscan,verdicts,evaluator,git_utils,jsonlog,fixture,envfile,paths,models}.py` — small focused modules.
+- `contremaitre/Dockerfile` — generic runtime image (opencode + mattpocock/skills). Shipped as package data; built via `contremaitre image build`.
 - `tests/` — `test_control_plane.py` (state machine end-to-end), `test_opencode_boundaries.py` (docker command shape, publisher, prompts), `test_preflight.py`, `test_envfile.py`.
 
 ## Conventions

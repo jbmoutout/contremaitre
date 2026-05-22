@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +14,10 @@ from .models import ActorMode, Caps, PublishMode, RunConfig
 from .orchestrator import run
 from .paths import slugify
 from .preflight import run_preflight
+
+
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_DEFAULT_DOCKERFILE = _PACKAGE_DIR / "Dockerfile"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--publish-mode", choices=[mode.value for mode in PublishMode], default=PublishMode.STUB.value)
     run_p.add_argument("--keep-worktree", action="store_true")
     run_p.add_argument("--simulate-drift-after-approval", action="store_true")
-    run_p.add_argument("--docker-image", default="arch001-eval-app:latest")
+    run_p.add_argument("--docker-image", default="contremaitre-agent:latest")
     run_p.add_argument("--opencode-config", type=Path, default=None)
     run_p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
     run_p.add_argument("--container-user", default=None, help="Optional docker --user value, e.g. $(id -u):$(id -g)")
@@ -89,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.OPENCODE.value)
     doctor_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     doctor_p.add_argument("--run-slug", default="doctor")
-    doctor_p.add_argument("--docker-image", default="arch001-eval-app:latest")
+    doctor_p.add_argument("--docker-image", default="contremaitre-agent:latest")
     doctor_p.add_argument("--opencode-config", type=Path, default=None)
     doctor_p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
     doctor_p.add_argument("--docker-network", default=None)
@@ -109,6 +114,19 @@ def build_parser() -> argparse.ArgumentParser:
     fixture_init.add_argument("path", type=Path)
     fixture_init.add_argument("--overwrite", action="store_true")
     fixture_init.set_defaults(func=_fixture_init_cmd)
+
+    image_p = sub.add_parser("image", help="Manage the opencode runtime image")
+    image_sub = image_p.add_subparsers(dest="image_command", required=True)
+    image_build = image_sub.add_parser("build", help="Build the runtime docker image from the package's Dockerfile")
+    image_build.add_argument("--image-name", default="contremaitre-agent:latest", help="Tag for the built image")
+    image_build.add_argument(
+        "--dockerfile",
+        type=Path,
+        default=None,
+        help=f"Override Dockerfile path (default: {_DEFAULT_DOCKERFILE})",
+    )
+    image_build.add_argument("--no-cache", action="store_true")
+    image_build.set_defaults(func=_image_build_cmd)
 
     return parser
 
@@ -182,6 +200,28 @@ def _fixture_init_cmd(args: argparse.Namespace) -> int:
     path = init_fixture(args.path.resolve(), overwrite=args.overwrite)
     print(path)
     return 0
+
+
+def _image_build_cmd(args: argparse.Namespace) -> int:
+    dockerfile = (args.dockerfile or _DEFAULT_DOCKERFILE).resolve()
+    if not dockerfile.exists():
+        print(f"contremaitre: Dockerfile not found: {dockerfile}", file=sys.stderr)
+        return 1
+    contents = dockerfile.read_text(encoding="utf-8")
+    # Stream the Dockerfile via stdin so docker build has no host-side
+    # build context — the image is self-contained (no COPY directives).
+    # `docker build -` reads the Dockerfile directly from stdin.
+    cmd = ["docker", "build", "-t", args.image_name]
+    if args.no_cache:
+        cmd.append("--no-cache")
+    cmd.append("-")
+    print(f"contremaitre: building {args.image_name} from {dockerfile}", file=sys.stderr)
+    try:
+        proc = subprocess.run(cmd, input=contents.encode("utf-8"), check=False)
+    except FileNotFoundError:
+        print("contremaitre: docker binary not found in PATH", file=sys.stderr)
+        return 1
+    return proc.returncode
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -117,7 +117,12 @@ def _check_docker_image(config: RunConfig) -> PreflightCheck:
         return _fail("docker", "docker daemon is not available", _proc_details(docker))
     inspect = _run(["docker", "image", "inspect", config.docker_image, "--format", "{{.Id}} {{.Created}}"])
     if inspect.returncode != 0:
-        return _fail("docker_image", f"docker image not found: {config.docker_image}", _proc_details(inspect))
+        return _fail(
+            "docker_image",
+            f"docker image not found: {config.docker_image} "
+            f"(build via `contremaitre image build` or pass --docker-image <existing-tag>)",
+            _proc_details(inspect),
+        )
     return _pass("docker_image", "docker image is available", {"image": config.docker_image, "inspect": inspect.stdout.strip()})
 
 

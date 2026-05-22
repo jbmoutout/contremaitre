@@ -18,3 +18,6 @@ contremaitre = "contremaitre.cli:main"
 [tool.setuptools.packages.find]
 include = ["contremaitre*"]
 
+[tool.setuptools.package-data]
+contremaitre = ["Dockerfile", "prompts/*.md"]
+
