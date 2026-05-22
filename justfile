@@ -6,7 +6,7 @@
 set shell := ["bash", "-uc"]
 
 # Stable defaults — override per-recipe or on the CLI:
-#   just agent_model=openrouter/anthropic/claude-sonnet-4.6 itadakimasu
+#   just agent_model=openrouter/anthropic/claude-sonnet-4.6 my-repo
 base            := "main"
 publish_mode    := "gh"
 actor           := "opencode"
@@ -15,7 +15,7 @@ max_wall_min    := "45"
 max_cost_usd    := "5"
 # Models — unset by default; CLI provides its own defaults. Use a preset
 # (e.g. `deepdeep`) to pin a model pair, or override on the CLI:
-#   just agent_model=openrouter/anthropic/claude-sonnet-4.6 itadakimasu
+#   just agent_model=openrouter/anthropic/claude-sonnet-4.6 my-repo
 agent_model     := ""
 sim_model       := ""
 
@@ -49,7 +49,6 @@ tui-run repo fork check_cmd="npx tsc --noEmit":
 
 # === Model presets ============================================================
 # Presets wrap any recipe with a pinned (agent_model, sim_model) pair. Compose:
-#   just deepdeep itadakimasu
 #   just deepdeep tui-run ~/code/foo git@github.com:me/foo.git
 # Add more presets (e.g. claude-claude, gpt-claude) by copying the pattern.
 
