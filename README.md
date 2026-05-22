@@ -36,16 +36,6 @@ Artifacts land in `.contremaitre/runs/<run-id>/`.
 
 ## Live run (opencode actor)
 
-First, build the runtime image (once per host, or when the Dockerfile changes):
-
-```bash
-python3 -m contremaitre image build
-```
-
-This builds `contremaitre-agent:latest` from the package's [Dockerfile](contremaitre/Dockerfile) — generic opencode-in-Docker base with `mattpocock/skills` installed globally. No target codebase is baked in; the orchestrator mounts the per-run worktree at `/app` at run time.
-
-Then the run itself:
-
 ```bash
 python3 -m contremaitre run \
   --actor opencode \
@@ -59,7 +49,16 @@ python3 -m contremaitre run \
   --publish-mode stub
 ```
 
-`--docker-image` defaults to `contremaitre-agent:latest`; override only when you've built a custom image.
+The runtime image (`contremaitre-agent:latest`) is built from the package's [Dockerfile](contremaitre/Dockerfile) — generic opencode-in-Docker base with `mattpocock/skills` installed globally. No target codebase is baked in; the orchestrator mounts the per-run worktree at `/app` at run time.
+
+**The first opencode-mode run auto-builds the image if it doesn't exist** (~3 min on a warm host). You can also pre-build or force a rebuild:
+
+```bash
+python3 -m contremaitre image build              # build with cache
+python3 -m contremaitre image build --no-cache   # force fresh layers
+```
+
+Override `--docker-image` only when you have a custom image; the auto-build only fires for the default tag.
 
 To actually publish a draft PR, set `--publish-mode gh` and supply `GITHUB_TOKEN`:
 

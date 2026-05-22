@@ -18,6 +18,7 @@ from .preflight import run_preflight
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _DEFAULT_DOCKERFILE = _PACKAGE_DIR / "Dockerfile"
+_DEFAULT_IMAGE = "contremaitre-agent:latest"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--publish-mode", choices=[mode.value for mode in PublishMode], default=PublishMode.STUB.value)
     run_p.add_argument("--keep-worktree", action="store_true")
     run_p.add_argument("--simulate-drift-after-approval", action="store_true")
-    run_p.add_argument("--docker-image", default="contremaitre-agent:latest")
+    run_p.add_argument("--docker-image", default=_DEFAULT_IMAGE)
     run_p.add_argument("--opencode-config", type=Path, default=None)
     run_p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
     run_p.add_argument("--container-user", default=None, help="Optional docker --user value, e.g. $(id -u):$(id -g)")
@@ -94,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.OPENCODE.value)
     doctor_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     doctor_p.add_argument("--run-slug", default="doctor")
-    doctor_p.add_argument("--docker-image", default="contremaitre-agent:latest")
+    doctor_p.add_argument("--docker-image", default=_DEFAULT_IMAGE)
     doctor_p.add_argument("--opencode-config", type=Path, default=None)
     doctor_p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
     doctor_p.add_argument("--docker-network", default=None)
@@ -118,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     image_p = sub.add_parser("image", help="Manage the opencode runtime image")
     image_sub = image_p.add_subparsers(dest="image_command", required=True)
     image_build = image_sub.add_parser("build", help="Build the runtime docker image from the package's Dockerfile")
-    image_build.add_argument("--image-name", default="contremaitre-agent:latest", help="Tag for the built image")
+    image_build.add_argument("--image-name", default=_DEFAULT_IMAGE, help="Tag for the built image")
     image_build.add_argument(
         "--dockerfile",
         type=Path,
@@ -150,12 +151,65 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _run_cmd(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
+    rc = _ensure_default_image_built(config)
+    if rc != 0:
+        return rc
     result = run(config)
     print(f"{result.verdict.value}: {result.reason}")
     print(f"run_dir={result.run_dir}")
     if result.pr_created:
         return 0
     return 2 if result.verdict.value.startswith("NO_PR") else 1
+
+
+def _ensure_default_image_built(config: RunConfig) -> int:
+    """Auto-build the default image before opencode-mode runs if it's missing.
+
+    Only fires for `--actor opencode` AND `--docker-image contremaitre-agent:latest`
+    (the default). Custom images are the operator's responsibility — preflight
+    will surface a clean failure with the build hint.
+    """
+
+    if config.actor_mode != ActorMode.OPENCODE:
+        return 0
+    if config.docker_image != _DEFAULT_IMAGE:
+        return 0
+    try:
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", config.docker_image, "--format", "{{.Id}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # Docker daemon not reachable — let preflight surface a clean message.
+        return 0
+    if inspect.returncode == 0:
+        return 0
+    print(
+        f"contremaitre: default image {config.docker_image} not found — building inline",
+        file=sys.stderr,
+    )
+    return _build_image_inline(image_name=config.docker_image, dockerfile=_DEFAULT_DOCKERFILE, no_cache=False)
+
+
+def _build_image_inline(*, image_name: str, dockerfile: Path, no_cache: bool) -> int:
+    dockerfile = dockerfile.resolve()
+    if not dockerfile.exists():
+        print(f"contremaitre: Dockerfile not found: {dockerfile}", file=sys.stderr)
+        return 1
+    contents = dockerfile.read_text(encoding="utf-8")
+    cmd = ["docker", "build", "-t", image_name]
+    if no_cache:
+        cmd.append("--no-cache")
+    cmd.append("-")
+    print(f"contremaitre: building {image_name} from {dockerfile}", file=sys.stderr)
+    try:
+        proc = subprocess.run(cmd, input=contents.encode("utf-8"), check=False)
+    except FileNotFoundError:
+        print("contremaitre: docker binary not found in PATH", file=sys.stderr)
+        return 1
+    return proc.returncode
 
 
 def _doctor_cmd(args: argparse.Namespace) -> int:
@@ -241,7 +295,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     runs_root = Path(_extract_flag_value(forwarded, "--runs-root", ".contremaitre/runs"))
     agent_model = _extract_flag_value(forwarded, "--agent-model", "openrouter/deepseek/deepseek-v4-flash")
     sim_model = _extract_flag_value(forwarded, "--sim-model", "openrouter/deepseek/deepseek-v4-flash")
-    docker_image = _extract_flag_value(forwarded, "--docker-image", "contremaitre-agent:latest")
+    docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
     run_cmd = [sys.executable, "-m", "contremaitre", "run", *forwarded]
     return tui.spawn_and_attach(
         runs_root=runs_root,
@@ -262,25 +316,11 @@ def _tui_attach_cmd(args: argparse.Namespace) -> int:
 
 
 def _image_build_cmd(args: argparse.Namespace) -> int:
-    dockerfile = (args.dockerfile or _DEFAULT_DOCKERFILE).resolve()
-    if not dockerfile.exists():
-        print(f"contremaitre: Dockerfile not found: {dockerfile}", file=sys.stderr)
-        return 1
-    contents = dockerfile.read_text(encoding="utf-8")
-    # Stream the Dockerfile via stdin so docker build has no host-side
-    # build context — the image is self-contained (no COPY directives).
-    # `docker build -` reads the Dockerfile directly from stdin.
-    cmd = ["docker", "build", "-t", args.image_name]
-    if args.no_cache:
-        cmd.append("--no-cache")
-    cmd.append("-")
-    print(f"contremaitre: building {args.image_name} from {dockerfile}", file=sys.stderr)
-    try:
-        proc = subprocess.run(cmd, input=contents.encode("utf-8"), check=False)
-    except FileNotFoundError:
-        print("contremaitre: docker binary not found in PATH", file=sys.stderr)
-        return 1
-    return proc.returncode
+    return _build_image_inline(
+        image_name=args.image_name,
+        dockerfile=args.dockerfile or _DEFAULT_DOCKERFILE,
+        no_cache=args.no_cache,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
