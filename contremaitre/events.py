@@ -39,6 +39,8 @@ OPENCODE_ACTOR_START = "opencode_actor_start"
 
 MALFORMED_VERDICT = "malformed_verdict"
 REVISION_REQUESTED = "revision_requested"
+REVIEW_VERDICT = "review_verdict"
+HARD_GATES_CHECKED = "hard_gates_checked"
 
 # ----- Cap trips -----
 
@@ -63,6 +65,10 @@ IMPLEMENTATION_COMPLETE_CLEARED = "implementation_complete_cleared"
 
 PUBLICATION_BLOCKED = "publication_blocked"
 PUBLISHED = "published"
+
+# ----- Cleanup -----
+
+WORKTREE_REMOVED = "worktree_removed"
 
 # ----- Infrastructure -----
 

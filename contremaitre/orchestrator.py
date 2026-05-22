@@ -381,6 +381,14 @@ class Orchestrator:
                 "summary": parsed.summary,
             },
         )
+        self._emit(
+            events.REVIEW_VERDICT,
+            round=review_round,
+            verdict=parsed.verdict.value,
+            confidence=parsed.confidence,
+            summary=parsed.summary[:200] if parsed.summary else "",
+            required_changes=len(parsed.required_changes),
+        )
         return parsed, current_hash
 
     # ----- publication gate -----
@@ -405,6 +413,14 @@ class Orchestrator:
             diff_scan=diff_scan,
             clean_worktree=clean,
             diff_hash_matched=diff_hash_matched,
+        )
+        self._emit(
+            events.HARD_GATES_CHECKED,
+            passed=bool(hard_gates["passed"]),
+            diff_hash_matched=diff_hash_matched,
+            diff_scan_passed=diff_scan.passed if diff_scan else False,
+            clean_worktree=clean,
+            changed_files=len(diff_scan.changed_files) if diff_scan else 0,
         )
         # L1 executable-check gate: blocks only on a configured-and-failing
         # check. No --check-cmd → empty results → no-op (operator opted out;
@@ -774,11 +790,14 @@ class Orchestrator:
         # `finally`); this catches the timeout / signal paths.
         self._stop_run_containers()
         source_repo = GitRepo(self.config.repo, self.paths.git_log)
-        if self.paths.worktree.exists():
+        worktree_existed = self.paths.worktree.exists()
+        if worktree_existed:
             source_repo.run("worktree", "remove", "--force", str(self.paths.worktree), check=False)
         if self.paths.worktree.exists():
             shutil.rmtree(self.paths.worktree)
         source_repo.run("worktree", "prune", check=False)
+        if worktree_existed:
+            self._emit(events.WORKTREE_REMOVED, path=str(self.paths.worktree))
 
     def _stop_run_containers(self) -> None:
         """`docker stop` every container labeled with this run-id. Best effort.
