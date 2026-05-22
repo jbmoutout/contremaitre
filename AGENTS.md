@@ -35,9 +35,13 @@ No build step. No external dependencies (the dependency-free `.env` parser and J
 - **Skill vocabulary.** When writing prompts or persona text, use Module / Interface / Implementation / Depth / Seam / Adapter / Leverage / Locality. Don't drift into "component / service / API / boundary."
 - **No backwards-compat layers.** This is pre-1.0. Change the shape, update the callers, update the tests. No deprecation shims.
 
-## No-vendor-runtime policy
+## Dependency policy
 
-This repo is self-contained. No runtime imports from sibling/parent directories on the operator's machine, no `sys.path` hacks, no soft dependencies on external research repos. When a pattern (a multi-turn loop, a focused-judge call, a recovery routine) comes from outside, **copy it in and own it**. The vendored copy is the source of truth; the upstream may move on and we will not chase.
+**Local sibling/parent directories on the operator's machine** (research substrates, internal eval repos, anything reachable only by absolute path or `sys.path` hack): never import at runtime. When a useful pattern lives there — a multi-turn loop, a recovery routine, a focused-judge call — **copy it in and own it**. The vendored copy is the source of truth; the upstream may move and we will not chase.
+
+**Public PyPI packages**: allowed when they carry real weight. Add to `pyproject.toml` and use normally. We've shipped zero-dep so far because every pattern we needed was small enough to hand-roll — that's circumstance, not a rule. If `httpx`, `tenacity`, or similar would do substantially more than 30 lines of hand-rolled code, pull it in.
+
+**Private GitHub repos / internal-only packages**: treat the same as local sibling — copy in, don't depend on access.
 
 This repo should be treated as public. Do not commit absolute paths to anyone's machine, internal project names, links to private repos, or references to non-public design documents. Anything operator-specific belongs in `AGENTS.local.md` (gitignored).
 
