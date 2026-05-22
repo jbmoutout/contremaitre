@@ -1,14 +1,24 @@
 """Run-event names emitted to guardrail_events.jsonl and recoveries.jsonl.
 
-Single source of truth for event-name strings. Writers (orchestrator, actors,
-cleanup paths) and readers (TUI, tests) import the constants here so a rename
-breaks at import time instead of silently at runtime.
+Single source of truth for event-name strings on the **writer** side
+(orchestrator, actors, cleanup paths) and **structural** readers (tests
+asserting specific event presence). Rename a constant here, every writer
++ structural reader breaks at import time instead of silently at runtime.
 
-This is a registry, not a type system. We deliberately keep the heavier
-"named RunEventLog with a tagged Event union" refactor on the shelf —
-it's worth it only when a second reader appears (see candidate 4 in the
-architecture review). The constants below close the hard-coded-key gap
-without inventing a Writer/Reader seam that has only one adapter today.
+The TUI (`tui.py`) deliberately does NOT import these constants — it
+classifies events for **color** by substring pattern (`"recovery" in kind`)
+so a new event named `*_recovery_*` gets a sensible default style without
+explicit registration. That coupling is permissive on purpose: the TUI is
+a best-effort observability tool, not a load-bearing reader. A rename that
+removes the substring marker would silently fall back to the default style,
+not crash. Acceptable tradeoff for now; revisit if a second non-TUI reader
+appears.
+
+We deliberately keep the heavier "named RunEventLog with a tagged Event
+union" refactor on the shelf — it's worth it only when a structural reader
+appears (eval consumer, programmatic dashboard). The constants below close
+the writer-side hard-coded-key gap without inventing a Writer/Reader seam
+that has only one adapter today.
 """
 
 from __future__ import annotations
