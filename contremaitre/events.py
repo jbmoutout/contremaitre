@@ -62,6 +62,7 @@ IMPLEMENTATION_COMPLETE_CLEARED = "implementation_complete_cleared"
 # ----- Publication -----
 
 PUBLICATION_BLOCKED = "publication_blocked"
+PUBLISHED = "published"
 
 # ----- Infrastructure -----
 

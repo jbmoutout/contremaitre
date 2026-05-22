@@ -441,6 +441,13 @@ class Orchestrator:
             branch=branch,
             diff_hash=approved_hash,
         )
+        self._emit(
+            events.PUBLISHED,
+            publish_mode=self.config.publish_mode.value,
+            branch=branch,
+            url=outcome.url,
+            dry_run=outcome.dry_run,
+        )
         self._write_eval(
             verdict=TerminalVerdict.READY_FOR_DRAFT_PR,
             checks=checks,
@@ -634,11 +641,15 @@ class Orchestrator:
         if not status.strip():
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
+        title, body = _derive_commit_message(self.paths.worktree, self.run_id)
         repo.run("add", ".")
-        repo.run("commit", "-m", "Apply Contremaitre agent changes")
+        # Use a HEREDOC-style multi-arg commit so the body lands as the
+        # commit message body, not the headline. GitRepo.run takes a list.
+        repo.run("commit", "-m", title, "-m", body)
         self._emit(
             events.HOST_COMMIT_CREATED,
             reason="actor left worktree changes for orchestrator-owned git boundary",
+            title=title,
         )
 
     # ----- terminal signal -----
@@ -792,6 +803,36 @@ class Orchestrator:
                 _sp.run(["docker", "stop", "-t", "5", cid], capture_output=True, timeout=15)
             except (OSError, _sp.TimeoutExpired):
                 continue
+
+
+def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
+    """Read SETTLED_DESIGN.md and turn it into (commit title, commit body).
+
+    Title: first non-empty line, stripped of `# ` and any "Settled design — "
+    prefix the skill tends to emit. Falls back to a run-id-tagged generic
+    when SETTLED is missing or empty (shouldn't happen post-WORK since the
+    orchestrator gates on it, but the host commit must never fail here).
+    Body: the full SETTLED text + a trailer with the run id, so the commit
+    is self-contained for anyone reading `git log` later.
+    """
+
+    settled = worktree / SETTLED_RELPATH
+    fallback_title = f"Contremaitre refactor ({run_id})"
+    if not settled.exists():
+        return fallback_title, f"Run: {run_id}\n"
+    text = settled.read_text(encoding="utf-8").strip()
+    if not text:
+        return fallback_title, f"Run: {run_id}\n"
+    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    title = first_line.lstrip("#").strip()
+    for prefix in ("Settled design — ", "Settled design - ", "Settled design: "):
+        if title.lower().startswith(prefix.lower()):
+            title = title[len(prefix):].strip()
+            break
+    if not title:
+        title = fallback_title
+    body = f"{text}\n\n---\nRun: {run_id}\n"
+    return title, body
 
 
 def run(config: RunConfig) -> RunResult:

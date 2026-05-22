@@ -105,6 +105,56 @@ def _fmt_elapsed(seconds: float | None) -> str:
     return f"{h}h{m:02d}m"
 
 
+def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path | None) -> Text:
+    """Render INIT > WORK > REVIEW > APPROVED > PUBLISHED progression.
+
+    Derived from guardrail_events (cheap inference, no orchestrator state
+    leaked): WORK starts at the first opencode_actor_start with role=agent,
+    REVIEW at role=review, APPROVED at work_session_end with outcome
+    starting "approved", PUBLISHED at the `published` event,
+    BLOCKED/FAILED at publication_blocked / infra_failure. Bold-cyan the
+    current state, dim the rest.
+    """
+
+    stages = ["INIT", "WORK", "REVIEW", "APPROVED", "PUBLISHED"]
+    current = "INIT"
+    blocked_or_failed: str | None = None
+    for ev in guardrails:
+        kind = ev.get("event")
+        if kind == "opencode_actor_start":
+            role = ev.get("role")
+            if role == "agent" and current == "INIT":
+                current = "WORK"
+            elif role == "review":
+                current = "REVIEW"
+        elif kind == "published":
+            current = "PUBLISHED"
+        elif kind == "publication_blocked":
+            blocked_or_failed = "BLOCKED"
+        elif kind == "infra_failure":
+            blocked_or_failed = "FAILED"
+    if terminal_stats is not None and current == "REVIEW" and blocked_or_failed is None:
+        # Terminal reached but no PUBLISHED event — common when SIM
+        # disapproved or hard gates failed before publication.
+        current = "APPROVED" if (terminal_stats and "READY_FOR_DRAFT_PR" in terminal_stats.read_text(encoding="utf-8", errors="replace")) else current
+
+    text = Text()
+    for i, stage in enumerate(stages):
+        if i > 0:
+            text.append(" › ", style="dim")
+        is_current = stage == current and blocked_or_failed is None
+        if is_current:
+            text.append(stage, style="bold cyan")
+        elif stages.index(current) > i and blocked_or_failed is None:
+            text.append(stage, style="green")
+        else:
+            text.append(stage, style="dim")
+    if blocked_or_failed:
+        text.append("  →  ", style="dim")
+        text.append(blocked_or_failed, style="bold red")
+    return text
+
+
 # ---------- Event introspection ----------
 
 
@@ -489,6 +539,13 @@ if _TEXTUAL_AVAILABLE:
             self._docker_state: dict[str, Any] = {}
             self._docker_ts = 0.0
             self._showed_initial_prompt = False
+            # Snapshot of elapsed / last-write age at terminal state — once
+            # stats.json appears the run is over and these numbers should
+            # stop incrementing (previous behavior had the clock running
+            # forever, which made the "9m18s ago" of a finished run look
+            # like a stall).
+            self._frozen_elapsed: float | None = None
+            self._frozen_gr_age: float | None = None
 
         @property
         def paths(self) -> dict[str, Path]:
@@ -597,13 +654,24 @@ if _TEXTUAL_AVAILABLE:
             agent_events = _read_jsonl(self.paths["raw_export"])
             sim_events = _read_jsonl(self.paths["sim_raw_export"])
             recoveries = _read_jsonl(self.paths["recoveries"])
+            guardrails = _read_jsonl(self.paths["guardrail_events"])
 
             agent_turns = _text_event_count(agent_events)
             sim_turns = _text_event_count(sim_events)
             settled = _settled_in(agent_events)
             impl_complete = _impl_complete_in(agent_events)
             subagents = _task_count(agent_events)
-            elapsed = time.time() - self.t_start
+
+            # Freeze elapsed + activity-age once the orchestrator has
+            # written stats.json (terminal state) so a finished run stops
+            # looking like it's still ticking.
+            stats_path = self.paths["stats"]
+            terminal = stats_path.exists()
+            if terminal and self._frozen_elapsed is None:
+                self._frozen_elapsed = time.time() - self.t_start
+                gr_age_at_freeze = _file_age(self.paths["guardrail_events"])
+                self._frozen_gr_age = gr_age_at_freeze if gr_age_at_freeze is not None else 0.0
+            elapsed = self._frozen_elapsed if terminal and self._frozen_elapsed is not None else (time.time() - self.t_start)
 
             # ----- Header -----
             img = self._docker_state.get("image_created")
@@ -658,7 +726,10 @@ if _TEXTUAL_AVAILABLE:
             sim_pane.set_class(active == "sim", "active")
 
             # ----- Activity panel title -----
-            gr_age = _file_age(self.paths["guardrail_events"])
+            if terminal and self._frozen_gr_age is not None:
+                gr_age: float | None = self._frozen_gr_age
+            else:
+                gr_age = _file_age(self.paths["guardrail_events"])
             age_str = f" (last write {_fmt_elapsed(gr_age)} ago)" if gr_age is not None else ""
             self.query_one("#activity-panel").border_title = f"orchestrator activity{age_str}"
 
@@ -687,7 +758,11 @@ if _TEXTUAL_AVAILABLE:
                 status = f"exited {rc}"
                 style = "bold red"
 
+            crumb = _state_breadcrumb(guardrails, terminal_stats=stats_path if terminal else None)
+
             footer = Text()
+            footer.append(crumb)
+            footer.append("   ")
             footer.append(f"turns A:{agent_turns} S:{sim_turns}")
             footer.append(" · ")
             footer.append("SETTLED" if settled else "no settled", style="bold green" if settled else "dim")

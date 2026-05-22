@@ -107,14 +107,15 @@ class GhPublisher(Publisher):
             raise RuntimeError("--fork is required for --publish-mode gh")
 
         env = os.environ.copy()
-        pr_body = _write_pr_body(paths, config, diff_hash)
+        derived_title, derived_body = _derive_pr_metadata(paths, diff_hash)
+        pr_body = _write_pr_body(paths, config, derived_body)
         self._run(["git", "push", "origin", f"HEAD:{branch}"], cwd=paths.worktree, paths=paths, env=env)
         cmd = [
             "gh", "pr", "create",
             "--draft",
             "--base", config.base,
             "--head", branch,
-            "--title", config.pr_title or f"Contremaitre: {paths.run_id}",
+            "--title", config.pr_title or derived_title,
             "--body-file", str(pr_body),
         ]
         if config.gh_repo:
@@ -167,19 +168,53 @@ def make_publisher(config: RunConfig) -> Publisher:
     raise RuntimeError(f"unknown publish mode: {config.publish_mode}")
 
 
-def _write_pr_body(paths: RunPaths, config: RunConfig, diff_hash: str) -> Path:
+def _write_pr_body(paths: RunPaths, config: RunConfig, derived_body: str) -> Path:
     body = paths.run_dir / "pr_body.md"
-    if config.pr_body:
-        text = config.pr_body
-    else:
-        text = (
-            "Draft PR produced by Contremaitre.\n\n"
-            f"- Run id: `{paths.run_id}`\n"
-            f"- Diff hash: `{diff_hash}`\n"
-            f"- Eval: `eval/pr_eval.md`\n"
-        )
+    text = config.pr_body or derived_body
     body.write_text(text, encoding="utf-8")
     return body
+
+
+def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
+    """Build PR title + body from SETTLED_DESIGN.md and the eval report.
+
+    Title: same shape as the host commit title (first SETTLED line minus
+    skill-emitted "Settled design — " prefix) so the PR, the commit, and
+    `git log` all agree.
+    Body: SETTLED full text + SIM verdict summary + trailer with run id,
+    diff hash, and pointers to the eval artifacts the reviewer should
+    open. Self-contained so reviewers don't need to clone the run dir.
+    """
+
+    # Use the worktree-side SETTLED — that's what was just committed, so
+    # the PR description and the commit body match by construction.
+    from .orchestrator import _derive_commit_message
+
+    title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
+    sim_summary = _read_sim_summary(paths)
+    lines = [settled_body.rstrip()]
+    if sim_summary:
+        lines.append("\n## SIM review\n")
+        lines.append(sim_summary.rstrip())
+    lines.append("\n## Artifacts\n")
+    lines.append(f"- Diff hash: `{diff_hash}`")
+    lines.append(f"- Eval: `eval/pr_eval.md` in the run dir")
+    lines.append("- Architecture review report: `extracted_files/architecture-review.html`")
+    return title, "\n".join(lines) + "\n"
+
+
+def _read_sim_summary(paths: RunPaths) -> str | None:
+    """Return the SIM's `summary` field from pr_eval.json (last verdict)."""
+
+    if not paths.pr_eval.exists():
+        return None
+    try:
+        import json as _json
+        data = _json.loads(paths.pr_eval.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    sim = data.get("sim_review") or {}
+    return sim.get("summary")
 
 
 def _extract_url(stdout: str) -> str | None:

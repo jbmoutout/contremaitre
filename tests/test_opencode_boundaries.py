@@ -160,13 +160,29 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 capture_output=True,
             )
             (orch.paths.worktree / "README.md").write_text("changed\n", encoding="utf-8")
+            # SETTLED_DESIGN.md is required by the orchestrator before commit
+            # in normal flow; the commit message helper reads its first line
+            # to derive the title.
+            settled_dir = orch.paths.worktree / ".contremaitre"
+            settled_dir.mkdir(exist_ok=True)
+            (settled_dir / "SETTLED_DESIGN.md").write_text(
+                "# Settled design — Consolidate Prisma seam\n\n"
+                "## What\n\nDelete the duplicate singleton.\n",
+                encoding="utf-8",
+            )
 
             orch._commit_agent_changes(repo=GitRepo(orch.paths.worktree, orch.paths.git_log))
 
             status = subprocess.run(["git", "-C", str(orch.paths.worktree), "status", "--porcelain"], check=True, capture_output=True, text=True)
-            log = subprocess.run(["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%s"], check=True, capture_output=True, text=True)
+            log_title = subprocess.run(["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%s"], check=True, capture_output=True, text=True)
+            log_body = subprocess.run(["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%b"], check=True, capture_output=True, text=True)
             self.assertEqual(status.stdout, "")
-            self.assertEqual(log.stdout.strip(), "Apply Contremaitre agent changes")
+            # Title is derived from SETTLED_DESIGN.md first line, with the
+            # "Settled design — " prefix stripped.
+            self.assertEqual(log_title.stdout.strip(), "Consolidate Prisma seam")
+            # Body carries the full SETTLED text + a run-id trailer.
+            self.assertIn("Delete the duplicate singleton.", log_body.stdout)
+            self.assertIn(f"Run: {orch.run_id}", log_body.stdout)
             orch._cleanup_worktree()
 
     def test_gh_publisher_pushes_and_creates_draft_pr_from_host(self):
