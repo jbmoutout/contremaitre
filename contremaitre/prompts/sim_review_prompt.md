@@ -19,7 +19,7 @@ Return **strict JSON only** — no markdown fences, no prose around it — with 
 - No new abstractions appear that aren't in SETTLED.
 - Constraints raised during grilling and reflected in SETTLED are honored.
 - No drift into unrelated changes.
-- Forbidden paths are not touched: `prisma/migrations/`, `.env*`, `*.pem`, `*.key`. If the diff touches any of these, return `CHANGES_REQUESTED` and name the path.
+- Forbidden paths are not touched: `.env`, `.env.*` (except `.env.example` / `.env.sample` / `.env.template` / `.env.defaults`), `.envrc*`, `*.pem`, `*.key`. If the diff touches any of these, return `CHANGES_REQUESTED` and name the path. Schema migrations (`prisma/migrations/*`, equivalents in other ORMs) are NOT forbidden — if SETTLED designs for a schema change, the matching migration is part of the legitimate diff; verify it matches SETTLED rather than rejecting on path alone.
 
 Use `NEEDS_HUMAN` when the diff is ambiguous, `SETTLED_DESIGN.md` is missing or vague, or judgement requires evidence the diff doesn't carry.
 

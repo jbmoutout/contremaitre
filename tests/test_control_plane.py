@@ -49,7 +49,7 @@ class ControlPlaneTest(unittest.TestCase):
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_NEEDS_HUMAN)
         pr_eval = self._read_json(result.run_dir / "eval" / "pr_eval.json")
         self.assertEqual(pr_eval["hard_gates"], "FAIL")
-        self.assertIn("prisma/migrations/0001_forbidden.sql", pr_eval["hard_gate_details"]["forbidden_files"])
+        self.assertIn(".env", pr_eval["hard_gate_details"]["forbidden_files"])
 
     def test_diff_hash_drift_blocks_publication(self):
         result, _ = self._run_fixture(run_slug="drift", simulate_drift_after_approval=True)

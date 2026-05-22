@@ -102,9 +102,10 @@ def _write_implementation(worktree: Path, scenario: str) -> None:
     )
     (src / "__init__.py").write_text("", encoding="utf-8")
     if scenario == "forbidden_path":
-        forbidden = worktree / "prisma" / "migrations" / "0001_forbidden.sql"
-        forbidden.parent.mkdir(parents=True, exist_ok=True)
-        forbidden.write_text("-- forbidden-path fixture\n", encoding="utf-8")
+        # `.env` is a real-secret pattern (always forbidden); migrations
+        # used to be here but were legitimized — see diffscan.py history.
+        forbidden = worktree / ".env"
+        forbidden.write_text("SECRET_API_KEY=fixture-leak\n", encoding="utf-8")
 
 
 def _write_implementation_complete(worktree: Path) -> None:
