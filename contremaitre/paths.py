@@ -81,8 +81,4 @@ def build_run_paths(runs_root: Path, run_id: str) -> RunPaths:
         recoveries=run_dir / "recoveries.jsonl",
         subagents_dir=run_dir / "subagents",
         extracted_files_dir=run_dir / "extracted_files",
-        # Named per-run docker volume for /app/node_modules. Both agent and
-        # SIM containers mount the same one. Explicitly removed in cleanup
-        # so anonymous-volume leakage stops accumulating.
-        docker_volume=f"contremaitre-{run_id}-node-modules",
     )

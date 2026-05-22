@@ -126,20 +126,10 @@ def _run_sidecar(
         docker_cmd.extend(["--user", config.container_user])
     if config.docker_network:
         docker_cmd.extend(["--network", config.docker_network])
-    docker_cmd.extend(
-        [
-            "-v",
-            f"{paths.worktree}:/app:rw",
-            "-v",
-            f"{paths.docker_volume}:/app/node_modules",
-            "-w",
-            "/app",
-            config.docker_image,
-            "sh",
-            "-lc",
-            cmd,
-        ]
-    )
+    docker_cmd.extend(["-v", f"{paths.worktree}:/app:rw"])
+    if config.deps_volume:
+        docker_cmd.extend(["-v", f"{config.deps_volume}:/app/node_modules:ro"])
+    docker_cmd.extend(["-w", "/app", config.docker_image, "sh", "-lc", cmd])
     return subprocess.run(
         docker_cmd,
         capture_output=True,

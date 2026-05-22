@@ -72,6 +72,11 @@ class RunConfig:
     keep_worktree: bool = False
     simulate_drift_after_approval: bool = False
     docker_image: str = "contremaitre-agent:latest"
+    # Name of a docker named volume mounted RO at /app/node_modules in
+    # agent/SIM/check containers. Keyed on lockfile hash; populated once
+    # per lockhash by runtime_image.ensure_deps_volume. None when the
+    # target has no recognized lockfile (deps unavailable to checks).
+    deps_volume: str | None = None
     opencode_config: Path | None = None
     openrouter_env_var: str = "OPENROUTER_API_KEY"
     container_user: str | None = None
@@ -123,7 +128,6 @@ class RunPaths:
     recoveries: Path
     subagents_dir: Path
     extracted_files_dir: Path
-    docker_volume: str
 
 
 @dataclass(frozen=True)

@@ -2,8 +2,9 @@
 #
 # Generic opencode-in-Docker base. No target codebase baked in — the
 # orchestrator mounts the per-run worktree at /app (read-write for the
-# agent, read-only for the SIM) at run time. node_modules is an anonymous
-# volume so the target's install doesn't leak into the host worktree.
+# agent, read-only for the SIM) at run time. /app/node_modules is
+# overlaid with a lockhash-keyed named volume populated once per
+# lockfile by contremaitre.runtime_image.ensure_deps_volume.
 #
 # Built via `contremaitre image build`. The Dockerfile ships inside the
 # package so it's available after pip install.

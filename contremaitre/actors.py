@@ -419,13 +419,14 @@ def build_docker_command(
             f"{state_dir}:/root/.local/share/opencode",
             "-v",
             f"{worktree}:/app:{mount_mode}",
-            # Named per-run volume shared by agent + SIM containers. Removed
-            # in the orchestrator's _cleanup_worktree path. Replaces the
-            # anonymous-volume pattern that leaked one volume per turn.
-            "-v",
-            f"{paths.docker_volume}:/app/node_modules",
         ]
     )
+    if config.deps_volume:
+        # Lockhash-keyed deps volume, RO so parallel runs against the same
+        # lockfile don't poison each other. Mounted over the worktree bind
+        # at /app/node_modules; the worktree's own node_modules (if any)
+        # is shadowed.
+        cmd.extend(["-v", f"{config.deps_volume}:/app/node_modules:ro"])
     if config.opencode_config:
         cmd.extend(["-v", f"{config.opencode_config}:/app/opencode.json:ro"])
     for host_path, container_path, mode in extra_mounts or []:
