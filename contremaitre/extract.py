@@ -186,6 +186,34 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
             "output_len": len(output), "host_file": str(fname),
         })
 
+    # Belt-and-suspenders: capture everything in the worktree's `.contremaitre/`
+    # directory directly. The event-based scan above only catches files written
+    # via opencode's write/edit/apply_patch tools; files written via bash
+    # heredoc (the skill's architecture-review HTML report is the classic
+    # example) don't appear in tool_use events. Reading from disk ensures we
+    # don't lose them.
+    scaffolds = paths.worktree / ".contremaitre"
+    salvaged: list[dict[str, Any]] = []
+    if scaffolds.is_dir():
+        already_have = {entry["host_file"] for entry in written if entry.get("host_file")}
+        for src in sorted(scaffolds.iterdir()):
+            if not src.is_file():
+                continue
+            dst = paths.extracted_files_dir / f".contremaitre__{src.name}"
+            if str(dst) in already_have:
+                continue
+            try:
+                dst.write_bytes(src.read_bytes())
+            except OSError:
+                continue
+            salvaged.append({
+                "original_path": f".contremaitre/{src.name}",
+                "host_file": str(dst),
+                "len": src.stat().st_size,
+                "tool": "worktree_scan",
+            })
+    written.extend(salvaged)
+
     return {
         "files_written_count": len(written),
         "files_written": written,
