@@ -89,7 +89,9 @@ def ensure_deps_volume(*, repo: Path, base_image: str) -> str | None:
     print(f"contremaitre: populating deps volume {volume}", file=sys.stderr)
     try:
         subprocess.run(
-            ["docker", "volume", "create", volume],
+            ["docker", "volume", "create",
+             "--label", "contremaitre.purpose=deps-cache",
+             volume],
             check=True, capture_output=True, text=True, timeout=10,
         )
     except subprocess.CalledProcessError as exc:
@@ -108,6 +110,7 @@ def ensure_deps_volume(*, repo: Path, base_image: str) -> str | None:
         proc = subprocess.run(
             [
                 "docker", "run", "--rm",
+                "--label", "contremaitre.role=deps-install",
                 "-v", f"{ctx}:/work:ro",
                 "-v", f"{volume}:/install/node_modules",
                 "-w", "/install",

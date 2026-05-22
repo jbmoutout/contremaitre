@@ -121,7 +121,11 @@ def _run_sidecar(
     config: RunConfig,
     paths: RunPaths,
 ) -> subprocess.CompletedProcess[str]:
-    docker_cmd = ["docker", "run", "--rm"]
+    docker_cmd = [
+        "docker", "run", "--rm",
+        "--label", f"contremaitre.run-id={paths.run_id}",
+        "--label", "contremaitre.role=check",
+    ]
     if config.container_user:
         docker_cmd.extend(["--user", config.container_user])
     if config.docker_network:

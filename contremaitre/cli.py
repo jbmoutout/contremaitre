@@ -163,10 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
     image_build.add_argument("--no-cache", action="store_true")
     image_build.set_defaults(func=_image_build_cmd)
 
-    cleanup_p = sub.add_parser("cleanup", help="Prune leftover worktrees and dangling images")
+    cleanup_p = sub.add_parser("cleanup", help="Prune stale containers + worktrees + dangling images")
     cleanup_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     cleanup_p.add_argument("--dry-run", action="store_true", help="Report what would be removed without touching anything")
-    cleanup_p.add_argument("--skip-images", action="store_true", help="Skip docker image prune (worktrees only)")
+    cleanup_p.add_argument("--skip-images", action="store_true", help="Skip docker image prune (containers + worktrees only)")
     cleanup_p.add_argument(
         "--deps",
         action="store_true",
@@ -247,12 +247,16 @@ _WORKTREE_NAME_RE = re.compile(r"^contremaitre-(\d{8}-\d{6}-[A-Za-z0-9._-]+)$")
 
 
 def _cleanup_cmd(args: argparse.Namespace) -> int:
-    """Prune leftover worktrees + dangling images (+ deps volumes with --deps).
+    """Prune stale containers + worktrees + dangling images (+ deps volumes).
 
-    A worktree is "stale" when its corresponding run-dir under
+    A container/worktree is "stale" when its corresponding run-dir under
     `--runs-root` no longer exists — i.e. the orchestrator's `finally`
     didn't get to clean it up (typically because the parent was
     SIGKILL'd or the host rebooted mid-run).
+
+    Containers are identified by their `contremaitre.run-id=<id>` label,
+    set at launch on every contremaitre-managed docker run. Worktrees
+    are identified by their `/tmp/contremaitre-<run-id>/` path.
 
     Lockhash-keyed deps volumes (`contremaitre-deps-*`) are the
     across-run dependency cache and are kept by default. Pass `--deps`
@@ -262,25 +266,37 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
     runs_root = args.runs_root.resolve()
     dry = args.dry_run
 
+    stale_containers = _scan_stale_containers(runs_root)
     stale_worktrees = _scan_stale_worktrees(runs_root)
     dangling_images = [] if args.skip_images else _scan_dangling_images()
     deps_volumes = list_deps_volumes() if args.deps else []
 
-    if not stale_worktrees and not dangling_images and not deps_volumes:
+    if not stale_containers and not stale_worktrees and not dangling_images and not deps_volumes:
         print("contremaitre cleanup: nothing to do")
         return 0
 
     action = "would remove (dry-run)" if dry else "removing"
     print(f"contremaitre cleanup: {action}")
+    for cid, run_id in stale_containers:
+        print(f"  container {cid}  (run-id {run_id})")
     for path in stale_worktrees:
-        print(f"  worktree {path}")
+        print(f"  worktree  {path}")
     for name in deps_volumes:
-        print(f"  deps-vol {name}")
+        print(f"  deps-vol  {name}")
     if dangling_images:
         print(f"  {len(dangling_images)} dangling image(s)")
 
     if dry:
         return 0
+
+    removed_containers = 0
+    for cid, _ in stale_containers:
+        proc = subprocess.run(
+            ["docker", "rm", "-f", cid],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode == 0:
+            removed_containers += 1
 
     removed_wts = 0
     for path in stale_worktrees:
@@ -303,13 +319,44 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
     if dangling_images:
         _prune_dangling_images()
 
-    summary = [f"removed {removed_wts} worktree(s)"]
+    parts = [f"{removed_containers} container(s)", f"{removed_wts} worktree(s)"]
     if args.deps:
-        summary.append(f"{removed_vols} deps-volume(s)")
+        parts.append(f"{removed_vols} deps-volume(s)")
     if dangling_images:
-        summary.append(f"pruned {len(dangling_images)} dangling image(s)")
-    print("contremaitre cleanup: " + ", ".join(summary))
+        parts.append(f"{len(dangling_images)} dangling image(s)")
+    print("contremaitre cleanup: removed " + ", ".join(parts))
     return 0
+
+
+def _scan_stale_containers(runs_root: Path) -> list[tuple[str, str]]:
+    """Containers labeled `contremaitre.run-id=<id>` whose run-dir is gone.
+
+    Returns [(container_id, run_id), …]. Includes stopped/exited containers
+    so left-behind `--rm` containers that the daemon didn't auto-remove
+    (rare, but happens on daemon crash) get cleaned too.
+    """
+
+    try:
+        proc = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "label=contremaitre.run-id",
+             "--format", "{{.ID}}\t{{.Label \"contremaitre.run-id\"}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    stale: list[tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        cid, run_id = parts[0].strip(), parts[1].strip()
+        if not cid or not run_id:
+            continue
+        if not (runs_root / run_id).exists():
+            stale.append((cid, run_id))
+    return stale
 
 
 def _scan_stale_worktrees(runs_root: Path) -> list[Path]:
