@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from . import events
 from .jsonlog import append_jsonl, append_text_event, append_transcript
 from .models import ActorMode, RunConfig, RunPaths
 
@@ -260,7 +261,7 @@ class OpencodeActorRunner:
         append_jsonl(
             self.paths.guardrail_events,
             {
-                "event": "opencode_actor_start",
+                "event": events.OPENCODE_ACTOR_START,
                 "role": role,
                 "mount_mode": mount_mode,
                 "model": model,
@@ -281,7 +282,7 @@ class OpencodeActorRunner:
                 if killed:
                     _record_recovery(
                         self.paths,
-                        kind="orphan_container_kill",
+                        kind=events.ORPHAN_CONTAINER_KILL,
                         role=role,
                         reason="timeout",
                         container_ids=killed,
@@ -314,7 +315,7 @@ class OpencodeActorRunner:
                 )
                 _record_recovery(
                     self.paths,
-                    kind="sqlite_recovery_silent_stall",
+                    kind=events.SQLITE_RECOVERY_SILENT_STALL,
                     role=role,
                     recovered_chars=len(recovered),
                     message_id=msg_id,

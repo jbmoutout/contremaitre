@@ -28,7 +28,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import prompts
+from . import events, prompts
 from .actors import ActorRunner, _kill_orphan_containers_by_mount, make_actor_runner
 from .checks import CheckResult, run_checks
 from .costs import estimate_recorded_cost_usd
@@ -90,7 +90,7 @@ class Orchestrator:
         def _on_sigterm(_signum, _frame):
             append_jsonl(
                 self.paths.recoveries,
-                {"kind": "sigterm_emergency_write", "turns": self.turns},
+                {"kind": events.SIGTERM_EMERGENCY_WRITE, "turns": self.turns},
             )
             self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, "killed_via_sigterm")
             self._extract_artifacts_safely()
@@ -106,7 +106,7 @@ class Orchestrator:
 
             return self._review_rounds(actor=actor, worktree_git=worktree_git, branch=branch)
         except Exception as exc:
-            append_jsonl(self.paths.guardrail_events, {"event": "infra_failure", "error": repr(exc)})
+            append_jsonl(self.paths.guardrail_events, {"event": events.INFRA_FAILURE, "error": repr(exc)})
             record_publication(
                 self.paths,
                 PublishOutcome(
@@ -140,7 +140,7 @@ class Orchestrator:
         try:
             extract_run_artifacts(self.paths)
         except Exception as exc:
-            append_jsonl(self.paths.recoveries, {"kind": "extract_failed", "error": repr(exc)})
+            append_jsonl(self.paths.recoveries, {"kind": events.EXTRACT_FAILED, "error": repr(exc)})
 
     def _review_rounds(self, *, actor: ActorRunner, worktree_git: GitRepo, branch: str) -> RunResult:
         last_required_changes: list[str] = []
@@ -155,7 +155,7 @@ class Orchestrator:
             )
             append_jsonl(
                 self.paths.guardrail_events,
-                {"event": "work_session_end", "round": review_round, "outcome": outcome},
+                {"event": events.WORK_SESSION_END, "round": review_round, "outcome": outcome},
             )
 
             if not self._implementation_complete():
@@ -214,7 +214,7 @@ class Orchestrator:
                 append_jsonl(
                     self.paths.guardrail_events,
                     {
-                        "event": "revision_requested",
+                        "event": events.REVISION_REQUESTED,
                         "round": review_round,
                         "required_changes": last_required_changes,
                     },
@@ -337,7 +337,7 @@ class Orchestrator:
                 append_jsonl(
                     self.paths.guardrail_events,
                     {
-                        "event": "malformed_verdict",
+                        "event": events.MALFORMED_VERDICT,
                         "round": review_round,
                         "attempt": attempt,
                         "error": last_error,
@@ -447,7 +447,7 @@ class Orchestrator:
         append_jsonl(
             self.paths.guardrail_events,
             {
-                "event": "publication_blocked",
+                "event": events.PUBLICATION_BLOCKED,
                 "reason": reason,
                 "hard_gates": hard_gates,
                 "forbidden_files": diff_scan.forbidden_files,
@@ -601,19 +601,19 @@ class Orchestrator:
         drift.write_text("committed after approval to force diff-hash mismatch\n", encoding="utf-8")
         repo.run("add", str(drift.relative_to(self.paths.worktree)))
         repo.run("commit", "-m", "Simulate drift after approval")
-        append_jsonl(self.paths.guardrail_events, {"event": "simulated_diff_drift"})
+        append_jsonl(self.paths.guardrail_events, {"event": events.SIMULATED_DIFF_DRIFT})
 
     def _commit_agent_changes(self, repo: GitRepo) -> None:
         status = repo.status_porcelain()
         if not status.strip():
-            append_jsonl(self.paths.guardrail_events, {"event": "host_commit_skipped", "reason": "worktree clean"})
+            append_jsonl(self.paths.guardrail_events, {"event": events.HOST_COMMIT_SKIPPED, "reason": "worktree clean"})
             return
         repo.run("add", ".")
         repo.run("commit", "-m", "Apply Contremaitre agent changes")
         append_jsonl(
             self.paths.guardrail_events,
             {
-                "event": "host_commit_created",
+                "event": events.HOST_COMMIT_CREATED,
                 "reason": "actor left worktree changes for orchestrator-owned git boundary",
             },
         )
@@ -627,7 +627,7 @@ class Orchestrator:
         marker = self.paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH
         if marker.exists():
             marker.unlink()
-            append_jsonl(self.paths.guardrail_events, {"event": "implementation_complete_cleared"})
+            append_jsonl(self.paths.guardrail_events, {"event": events.IMPLEMENTATION_COMPLETE_CLEARED})
 
     # ----- bookkeeping -----
 
@@ -638,15 +638,15 @@ class Orchestrator:
 
     def _before_turn(self) -> None:
         self.turns += 1
-        append_jsonl(self.paths.timeline, {"event": "turn", "turn": self.turns})
+        append_jsonl(self.paths.timeline, {"event": events.TURN, "turn": self.turns})
 
     def _cap_tripped(self) -> bool:
         wall_minutes = (time.monotonic() - self.started) / 60.0
         if self.turns >= self.config.caps.max_turns:
-            append_jsonl(self.paths.guardrail_events, {"event": "turn_cap", "turns": self.turns})
+            append_jsonl(self.paths.guardrail_events, {"event": events.TURN_CAP, "turns": self.turns})
             return True
         if wall_minutes >= self.config.caps.max_wall_minutes:
-            append_jsonl(self.paths.guardrail_events, {"event": "wall_cap", "wall_minutes": wall_minutes})
+            append_jsonl(self.paths.guardrail_events, {"event": events.WALL_CAP, "wall_minutes": wall_minutes})
             return True
         recorded_cost = estimate_recorded_cost_usd(self.paths.raw_export, self.paths.sim_raw_export)
         write_json(
@@ -661,7 +661,7 @@ class Orchestrator:
             append_jsonl(
                 self.paths.guardrail_events,
                 {
-                    "event": "recorded_cost_cap",
+                    "event": events.RECORDED_COST_CAP,
                     "recorded_cost_usd": recorded_cost,
                     "max_cost_usd": self.config.caps.max_cost_usd,
                 },
@@ -671,7 +671,7 @@ class Orchestrator:
             append_jsonl(
                 self.paths.guardrail_events,
                 {
-                    "event": "no_progress_cap",
+                    "event": events.NO_PROGRESS_CAP,
                     "no_progress_streak": self.no_progress_streak,
                     "no_progress_turns": self.config.caps.no_progress_turns,
                 },
@@ -686,10 +686,10 @@ class Orchestrator:
         if self._last_progress_key is None or key != self._last_progress_key:
             self.no_progress_streak = 0
             self._last_progress_key = key
-            event = "progress"
+            event = events.PROGRESS
         else:
             self.no_progress_streak += 1
-            event = "no_progress"
+            event = events.NO_PROGRESS
         append_jsonl(
             self.paths.guardrail_events,
             {
@@ -738,7 +738,7 @@ class Orchestrator:
         if killed:
             append_jsonl(
                 self.paths.recoveries,
-                {"kind": "orphan_container_kill", "reason": "cleanup", "container_ids": killed},
+                {"kind": events.ORPHAN_CONTAINER_KILL, "reason": "cleanup", "container_ids": killed},
             )
         source_repo = GitRepo(self.config.repo, self.paths.git_log)
         if self.paths.worktree.exists():
@@ -775,7 +775,7 @@ class Orchestrator:
         if proc.returncode == 0 and self.paths.docker_volume in proc.stdout:
             append_jsonl(
                 self.paths.recoveries,
-                {"kind": "volume_removed", "name": self.paths.docker_volume},
+                {"kind": events.VOLUME_REMOVED, "name": self.paths.docker_volume},
             )
 
 

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from contremaitre import events
 from contremaitre.fixture import init_fixture
 from contremaitre.models import Caps, RunConfig, TerminalVerdict
 from contremaitre.orchestrator import run
@@ -39,8 +40,8 @@ class ControlPlaneTest(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_NEEDS_HUMAN)
-        events = (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8")
-        self.assertIn("malformed_verdict", events)
+        guardrails = (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8")
+        self.assertIn(events.MALFORMED_VERDICT, guardrails)
 
     def test_forbidden_path_blocks_approved_publication(self):
         result, _ = self._run_fixture(run_slug="forbidden", agent_scenario="forbidden_path")
@@ -66,8 +67,8 @@ class ControlPlaneTest(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_NEEDS_HUMAN)
-        events = (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8")
-        self.assertIn("turn_cap", events)
+        guardrails = (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8")
+        self.assertIn(events.TURN_CAP, guardrails)
 
     def _run_fixture(
         self,

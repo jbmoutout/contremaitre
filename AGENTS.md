@@ -15,6 +15,7 @@ No build step. Python ≥ 3.11. Core CLI is zero-dep; the TUI requires `textual`
 ## Where to edit
 
 - **Prompts** — `contremaitre/prompts/*.md`. Tweak the markdown, not the Python wrapper.
+- **Event names** — `contremaitre/events.py` constants. Don't write `"some_event"` string literals when emitting to `guardrail_events.jsonl` / `recoveries.jsonl`; renaming a constant breaks at import time instead of silently at runtime.
 - **State machine / caps / cleanup** — `orchestrator.py`.
 - **Docker / opencode launch** — `actors.py` (`OpencodeActorRunner.build_docker_command`).
 - **Hard gates** — `evaluator.py` + `diffscan.py` + `verdicts.py`. Strict by design.
