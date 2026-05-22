@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from .envfile import load_dotenv_defaults
@@ -22,6 +23,37 @@ _DEFAULT_DOCKERFILE = _PACKAGE_DIR / "Dockerfile"
 _DEFAULT_IMAGE = "contremaitre-agent:latest"
 
 
+def _synthesize_opencode_config(*, agent_model: str, openrouter_env_var: str) -> Path:
+    """Write a minimal opencode.json derived from CLI args, return its path.
+
+    No static file shipped with the package — the only knobs are the model
+    string and the env-var holding the OpenRouter key, both already on the
+    CLI. The tempfile lives for the OS's tempdir lifetime (tiny JSON; not
+    worth atexit-cleaning).
+    """
+
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "model": agent_model,
+        "provider": {
+            "openrouter": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "OpenRouter",
+                "options": {
+                    "baseURL": "https://openrouter.ai/api/v1",
+                    "apiKey": "{env:" + openrouter_env_var + "}",
+                },
+            },
+        },
+    }
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", prefix="contremaitre-opencode-", delete=False, encoding="utf-8"
+    )
+    json.dump(config, tmp, indent=2)
+    tmp.close()
+    return Path(tmp.name)
+
+
 def _shared_run_doctor_parser() -> argparse.ArgumentParser:
     """Flags common to `run` and `doctor`. Single source of truth; attach via parents=[…]."""
 
@@ -30,7 +62,13 @@ def _shared_run_doctor_parser() -> argparse.ArgumentParser:
     p.add_argument("--base", default="main", help="Base branch for worktree and diff")
     p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     p.add_argument("--docker-image", default=_DEFAULT_IMAGE)
-    p.add_argument("--opencode-config", type=Path, default=None)
+    p.add_argument(
+        "--opencode-config",
+        type=Path,
+        default=None,
+        help="Path to opencode.json. If omitted, a minimal config is "
+             "synthesized from --agent-model and --openrouter-env-var.",
+    )
     p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
     p.add_argument("--docker-network", default=None, help="Optional docker --network value")
     p.add_argument("--http-proxy", default=None, help="Optional HTTP_PROXY value passed by env name to containers")
@@ -391,7 +429,14 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         keep_worktree=getattr(args, "keep_worktree", False),
         simulate_drift_after_approval=getattr(args, "simulate_drift_after_approval", False),
         docker_image=args.docker_image,
-        opencode_config=args.opencode_config.resolve() if args.opencode_config else None,
+        opencode_config=(
+            args.opencode_config.resolve()
+            if args.opencode_config
+            else _synthesize_opencode_config(
+                agent_model=getattr(args, "agent_model", "openrouter/deepseek/deepseek-v4-flash"),
+                openrouter_env_var=args.openrouter_env_var,
+            )
+        ),
         openrouter_env_var=args.openrouter_env_var,
         container_user=getattr(args, "container_user", None),
         docker_network=args.docker_network,

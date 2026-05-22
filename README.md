@@ -14,7 +14,6 @@ GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
   --repo ~/code/<target-repo> \
   --base main \
   --fork git@github.com:<you>/<target-repo>.git \
-  --opencode-config /path/to/opencode.json \
   --check-cmd "npx tsc --noEmit" \
   --publish-mode gh \
   --allow-open-egress \
