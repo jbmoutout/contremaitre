@@ -95,21 +95,31 @@ class Orchestrator:
         repo = GitRepo(self.config.repo, self.paths.git_log)
         branch = f"{validate_slug(self.config.branch_prefix, 'branch prefix')}/{self.run_id}"
 
-        # SIGTERM handler: when the operator kills us, dump whatever state we
-        # have to disk before exiting so the run isn't a black hole.
-        # (SIGKILL still can't be caught.)
-        prior_handler = signal.getsignal(signal.SIGTERM)
+        # Signal handler for operator-initiated death.
+        #
+        # We catch SIGTERM and SIGHUP because both kill the process without
+        # running `finally` by default. SIGHUP is the silent killer — when
+        # the operator closes the terminal window or an SSH session drops,
+        # the shell sends SIGHUP to the whole process group, Python's
+        # default disposition is to terminate, and the run becomes a black
+        # hole: committed worktree on disk, no stats.json, no recoveries.
+        # We chose this fix after diagnosing exactly that failure mode.
+        # SIGKILL remains uncatchable (intentional kernel-level kill).
+        prior_term = signal.getsignal(signal.SIGTERM)
+        prior_hup = signal.getsignal(signal.SIGHUP)
 
-        def _on_sigterm(_signum, _frame):
+        def _on_kill_signal(signum, _frame):
+            name = "sighup" if signum == signal.SIGHUP else "sigterm"
             append_jsonl(
                 self.paths.recoveries,
-                {"kind": events.SIGTERM_EMERGENCY_WRITE, "turns": self.turns},
+                {"kind": events.SIGTERM_EMERGENCY_WRITE, "turns": self.turns, "signal": name},
             )
-            self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, "killed_via_sigterm")
+            self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, f"killed_via_{name}")
             self._extract_artifacts_safely()
             raise SystemExit(143)
 
-        signal.signal(signal.SIGTERM, _on_sigterm)
+        signal.signal(signal.SIGTERM, _on_kill_signal)
+        signal.signal(signal.SIGHUP, _on_kill_signal)
         try:
             enforce_preflight(self.config, self.paths)
             self._transition(State.INIT, "creating worktree")
@@ -145,7 +155,8 @@ class Orchestrator:
             self._extract_artifacts_safely()
             if not self.config.keep_worktree:
                 self._cleanup_worktree()
-            signal.signal(signal.SIGTERM, prior_handler)
+            signal.signal(signal.SIGTERM, prior_term)
+            signal.signal(signal.SIGHUP, prior_hup)
 
     def _extract_artifacts_safely(self) -> None:
         """Run the subagent + files extractor; swallow extraction errors."""
