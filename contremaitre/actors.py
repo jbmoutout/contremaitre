@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -275,7 +276,36 @@ class OpencodeActorRunner:
             error = _latest_error(raw_export)
             if error:
                 raise ActorError(f"{role} opencode emitted error without text: {error[:500]}")
-            raise ActorError(f"{role} opencode emitted no text")
+            # opencode silent-stall: the text part landed in opencode's sqlite
+            # but the corresponding `text` event was never flushed to stdout
+            # before docker exited. Read it back from the DB and synthesize
+            # the missing event so downstream tooling sees a uniform stream.
+            recovered, msg_id, completed = _recover_text_from_sqlite(
+                state_dir, session_id or new_session_id
+            )
+            if recovered:
+                _append_synthetic_text_event(
+                    raw_export, recovered, msg_id, session_id or new_session_id
+                )
+                append_jsonl(
+                    self.paths.guardrail_events,
+                    {
+                        "event": "sqlite_recovery",
+                        "role": role,
+                        "recovered_chars": len(recovered),
+                        "message_id": msg_id,
+                        "step_finish_completed": completed,
+                    },
+                )
+                return ActorOutput(
+                    stdout=recovered,
+                    stderr=stderr,
+                    returncode=proc.returncode,
+                    raw_export_written=True,
+                )
+            raise ActorError(
+                f"{role} opencode emitted no text and sqlite recovery found nothing"
+            )
         latest = _latest_text(raw_export)
         return ActorOutput(stdout=latest, stderr=stderr, returncode=proc.returncode, raw_export_written=True)
 
@@ -443,3 +473,88 @@ def _latest_error(path: Path) -> str | None:
         if event.get("type") == "error":
             return json.dumps(event, sort_keys=True)
     return None
+
+
+def _recover_text_from_sqlite(
+    state_dir: Path, session_id: str | None
+) -> tuple[str | None, str | None, bool]:
+    """Recover the latest message's text from opencode's sqlite.
+
+    Failure mode this addresses: opencode persists message parts to its
+    SQLite (text + step-finish with reason='stop') but sometimes does NOT
+    flush the corresponding `text` event to its --format=json stdout
+    before the docker process exits. The data is intact in the DB; we
+    read it back.
+
+    Returns: (text, message_id, completed). `completed` is True if the
+    message has a step-finish part with reason='stop' — i.e. genuinely
+    finished, not mid-stream.
+    """
+
+    db_path = state_dir / "opencode.db"
+    if not db_path.exists():
+        return None, None, False
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        cur = conn.cursor()
+        sess_id = session_id
+        if sess_id is None:
+            row = cur.execute(
+                "SELECT id FROM session ORDER BY time_created DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                conn.close()
+                return None, None, False
+            sess_id = row[0]
+        msg_row = cur.execute(
+            "SELECT id FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1",
+            (sess_id,),
+        ).fetchone()
+        if not msg_row:
+            conn.close()
+            return None, None, False
+        msg_id = msg_row[0]
+        parts = cur.execute(
+            "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC",
+            (msg_id,),
+        ).fetchall()
+        conn.close()
+        if not parts:
+            return None, msg_id, False
+        text_chunks: list[str] = []
+        completed = False
+        for (data_str,) in parts:
+            try:
+                part = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            ptype = part.get("type")
+            if ptype == "text":
+                chunk = part.get("text", "")
+                if isinstance(chunk, str):
+                    text_chunks.append(chunk)
+            elif ptype == "step-finish" and part.get("reason") == "stop":
+                completed = True
+        if not text_chunks:
+            return None, msg_id, completed
+        return "".join(text_chunks), msg_id, completed
+    except sqlite3.Error:
+        return None, None, False
+
+
+def _append_synthetic_text_event(
+    raw_export: Path, text: str, message_id: str | None, session_id: str | None
+) -> None:
+    """Append a synthetic text event so downstream tooling sees a uniform stream."""
+
+    event = {
+        "type": "text",
+        "timestamp": int(time.time() * 1000),
+        "sessionID": session_id,
+        "_recovered_from_sqlite": True,
+        "_message_id": message_id,
+        "part": {"text": text},
+    }
+    raw_export.parent.mkdir(parents=True, exist_ok=True)
+    with raw_export.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
