@@ -91,6 +91,7 @@ Every run writes:
 - `pr.json`
 - `subagents/agent_NN_<slug>.md` (one per `task` tool_use; populated by `extract.py` in the orchestrator's `finally`)
 - `extracted_files/<host_name>` (every file the agent wrote via `write`, `edit`, or `apply_patch`)
+- `viewer.html` (self-contained single-file viewer over the artifacts above; built by `contremaitre/viewer/` in the orchestrator's `finally`, so it lands on success **and** failure paths. Rebuild for an existing run with `contremaitre viewer <run-dir>`.)
 - `eval/pr_eval.{json,md}`
 - `eval/checks_report.json`
 - `eval/settled_diff_report.json`

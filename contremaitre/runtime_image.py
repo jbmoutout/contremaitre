@@ -22,31 +22,44 @@ checks that depend on installed deps).
 from __future__ import annotations
 
 import hashlib
-import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+
+class DepsInstallError(RuntimeError):
+    """Lockfile was detected but the install one-shot container exited non-zero.
+
+    Carries the path to the captured install log so the operator can
+    inspect the real failure (often a postinstall script — `prisma
+    generate`, husky, etc. — that needs source files present in the
+    install context).
+    """
+
+    def __init__(self, *, lockfile: str, log_path: Path, returncode: int):
+        super().__init__(
+            f"deps install for {lockfile} failed (rc={returncode}); see {log_path}"
+        )
+        self.lockfile = lockfile
+        self.log_path = log_path
+        self.returncode = returncode
 
 
 @dataclass(frozen=True)
 class _Lockfile:
     name: str
     install_cmd: str
-    # Files in addition to the lockfile that the install command needs in
-    # the working directory (e.g. npm needs package.json present).
-    companion_files: tuple[str, ...] = ()
 
 
 _LOCKFILES: tuple[_Lockfile, ...] = (
-    _Lockfile("package-lock.json", "npm ci --no-audit --no-fund", ("package.json",)),
-    _Lockfile("pnpm-lock.yaml", "corepack pnpm install --frozen-lockfile", ("package.json",)),
-    _Lockfile("yarn.lock", "yarn install --frozen-lockfile --non-interactive", ("package.json",)),
-    _Lockfile("poetry.lock", "pip install --quiet poetry && poetry install --no-root", ("pyproject.toml",)),
-    _Lockfile("uv.lock", "pip install --quiet uv && uv sync --frozen --no-install-project", ("pyproject.toml",)),
-    _Lockfile("Cargo.lock", "cargo fetch", ("Cargo.toml",)),
-    _Lockfile("go.sum", "go mod download", ("go.mod",)),
+    _Lockfile("package-lock.json", "npm ci --no-audit --no-fund"),
+    _Lockfile("pnpm-lock.yaml", "corepack pnpm install --frozen-lockfile"),
+    _Lockfile("yarn.lock", "yarn install --frozen-lockfile --non-interactive"),
+    _Lockfile("poetry.lock", "pip install --quiet poetry && poetry install --no-root"),
+    _Lockfile("uv.lock", "pip install --quiet uv && uv sync --frozen --no-install-project"),
+    _Lockfile("Cargo.lock", "cargo fetch"),
+    _Lockfile("go.sum", "go mod download"),
 )
 
 
@@ -66,27 +79,50 @@ def _safe_name(lockfile_name: str) -> str:
     return lockfile_name.replace(".", "-")
 
 
-def ensure_deps_volume(*, repo: Path, base_image: str) -> str | None:
+def ensure_deps_volume(*, repo: Path, base_image: str, runs_root: Path) -> str | None:
     """Ensure a populated lockhash-keyed deps volume exists, return its name.
 
-    Returns None if the repo has no recognized lockfile (publication then
-    continues without a /app/node_modules mount; checks that need installed
-    deps will fail loudly inside the sidecar, which is the correct signal).
+    Returns None if the repo has no recognized lockfile — publication
+    then continues without a /app/node_modules mount, and any L1 check
+    that needs installed deps will fail clearly inside the sidecar.
 
-    Side effects: may call `docker volume create` and `docker run` to
-    populate the volume. Both are idempotent across re-invocations.
+    Raises DepsInstallError if a lockfile *was* detected but the install
+    one-shot container exited non-zero. We deliberately do NOT silently
+    fall back to "no deps" in that case: the failure mode of running
+    `npx tsc` against an empty node_modules is npm-helpfully installing
+    the `tsc@2.0.4` placeholder package, which prints a deceptive
+    "this is not the tsc command you are looking for" message and
+    returns rc=1. That looks like a real TypeScript error in the check
+    report but is actually our infra silently degraded. Surface the
+    real install error and stop.
+
+    The install container mounts the host repo RO at /install and the
+    deps volume RW at /install/node_modules. This is the simplest
+    install context that lets postinstall scripts read project source
+    files (e.g. `prisma generate` reads `prisma/schema.prisma`,
+    `husky install` reads `.git/`) without our needing to enumerate
+    every framework's companion-file list. RO is fine for the common
+    case; postinstall scripts that need to write to source files fail
+    loud, which is the correct signal.
+
+    Side effects: docker volume create, docker run, and a per-lockhash
+    install log at `<runs_root>/_deps_install_<lockhash>.log`.
     """
 
     detected = _detect(repo)
     if detected is None:
         return None
     lockfile, lock_path = detected
-    volume = f"contremaitre-deps-{_safe_name(lockfile.name)}-{_digest(lock_path)}"
+    digest = _digest(lock_path)
+    volume = f"contremaitre-deps-{_safe_name(lockfile.name)}-{digest}"
 
     if _volume_exists(volume):
         return volume
 
-    print(f"contremaitre: populating deps volume {volume}", file=sys.stderr)
+    runs_root.mkdir(parents=True, exist_ok=True)
+    log_path = runs_root / f"_deps_install_{digest}.log"
+
+    print(f"contremaitre: populating deps volume {volume} (log: {log_path})", file=sys.stderr)
     try:
         subprocess.run(
             ["docker", "volume", "create",
@@ -95,45 +131,31 @@ def ensure_deps_volume(*, repo: Path, base_image: str) -> str | None:
             check=True, capture_output=True, text=True, timeout=10,
         )
     except subprocess.CalledProcessError as exc:
-        print(f"contremaitre: docker volume create failed: {exc.stderr}", file=sys.stderr)
-        return None
+        log_path.write_text(f"docker volume create failed:\n{exc.stderr}", encoding="utf-8")
+        raise DepsInstallError(lockfile=lockfile.name, log_path=log_path, returncode=exc.returncode)
 
-    with tempfile.TemporaryDirectory() as ctx_str:
-        ctx = Path(ctx_str)
-        shutil.copy2(lock_path, ctx / lockfile.name)
-        for companion in lockfile.companion_files:
-            src = repo / companion
-            if src.exists():
-                shutil.copy2(src, ctx / companion)
-        # `node_modules` is the path the agent and checks read from; the
-        # install command writes there relative to /work.
-        proc = subprocess.run(
-            [
-                "docker", "run", "--rm",
-                "--label", "contremaitre.role=deps-install",
-                "-v", f"{ctx}:/work:ro",
-                "-v", f"{volume}:/install/node_modules",
-                "-w", "/install",
-                base_image,
-                "sh", "-lc",
-                # Copy ctx contents into /install so the install command
-                # operates on a writable tree, then run the install which
-                # populates /install/node_modules → the named volume.
-                f"cp -r /work/. /install/ && {lockfile.install_cmd}",
-            ],
-            capture_output=True, text=True, timeout=900,
+    proc = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "--label", "contremaitre.role=deps-install",
+            "-v", f"{repo.resolve()}:/install:ro",
+            "-v", f"{volume}:/install/node_modules",
+            "-w", "/install",
+            base_image,
+            "sh", "-lc", lockfile.install_cmd,
+        ],
+        capture_output=True, text=True, timeout=900,
+    )
+    log_path.write_text(
+        f"$ {lockfile.install_cmd}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
+        encoding="utf-8",
+    )
+    if proc.returncode != 0:
+        subprocess.run(
+            ["docker", "volume", "rm", "-f", volume],
+            capture_output=True, timeout=10,
         )
-        if proc.returncode != 0:
-            print(
-                f"contremaitre: deps install failed (rc={proc.returncode})\n"
-                f"stdout: {proc.stdout[-2000:]}\nstderr: {proc.stderr[-2000:]}",
-                file=sys.stderr,
-            )
-            subprocess.run(
-                ["docker", "volume", "rm", "-f", volume],
-                capture_output=True, timeout=10,
-            )
-            return None
+        raise DepsInstallError(lockfile=lockfile.name, log_path=log_path, returncode=proc.returncode)
     return volume
 
 

@@ -39,6 +39,7 @@ from .evaluator import (
     write_eval_reports,
 )
 from .extract import extract_run_artifacts
+from .viewer import build_viewer
 from .git_utils import GitRepo
 from .jsonlog import append_jsonl, write_json
 from .models import (
@@ -152,12 +153,21 @@ class Orchestrator:
             signal.signal(signal.SIGTERM, prior_term)
 
     def _extract_artifacts_safely(self) -> None:
-        """Run the subagent + files extractor; swallow extraction errors."""
+        """Run the subagent + files extractor, then build the viewer.
+
+        Both are observability — failures are recorded and swallowed so a
+        broken extractor or viewer can't mask the real run outcome. Viewer
+        runs second because it reads the extracted files.
+        """
 
         try:
             extract_run_artifacts(self.paths)
         except Exception as exc:
             append_jsonl(self.paths.recoveries, {"kind": events.EXTRACT_FAILED, "error": repr(exc)})
+        try:
+            build_viewer(self.paths)
+        except Exception as exc:
+            append_jsonl(self.paths.recoveries, {"kind": events.VIEWER_BUILD_FAILED, "error": repr(exc)})
 
     def _review_rounds(self, *, actor: ActorRunner, worktree_git: GitRepo, branch: str) -> RunResult:
         last_required_changes: list[str] = []

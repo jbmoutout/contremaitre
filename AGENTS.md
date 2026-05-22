@@ -30,6 +30,7 @@ No build step. Python ≥ 3.11. Core CLI is zero-dep; the TUI requires `textual`
 - **Prompts as markdown files.** The `.md` is the source; `prompts/__init__.py` loads them. Edit the markdown.
 - **Skill vocabulary.** Module / Interface / Implementation / Depth / Seam / Adapter / Leverage / Locality. Don't drift into "component / service / API / boundary."
 - **No backwards-compat layers.** Pre-1.0. Change the shape, update callers, update tests. No deprecation shims.
+- **Run observations go in `LEARNINGS.md`** (gitignored). When a live run surfaces something non-obvious about agent/SIM behavior, the skill, or the orchestrator — append a dated entry. **Facts only**: turn-by-turn what happened, what the skill prescribed, what the prompt said. No interpretation, no fix proposals, no "this means…". Interpretation lives in the conversation that produced the fix; the notepad is forensic.
 
 ## Dependency policy
 

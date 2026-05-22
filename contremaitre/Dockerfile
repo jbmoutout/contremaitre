@@ -9,7 +9,7 @@
 # Built via `contremaitre image build`. The Dockerfile ships inside the
 # package so it's available after pip install.
 
-FROM node:24-bookworm
+FROM node:24-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \

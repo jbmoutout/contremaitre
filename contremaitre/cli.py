@@ -17,7 +17,8 @@ from .models import ActorMode, Caps, PublishMode, RunConfig
 from .orchestrator import run
 from .paths import slugify
 from .preflight import run_preflight
-from .runtime_image import ensure_deps_volume, list_deps_volumes
+from .runtime_image import DepsInstallError, ensure_deps_volume, list_deps_volumes
+from .viewer import VIEWER_FILENAME, build_viewer
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -192,6 +193,22 @@ def build_parser() -> argparse.ArgumentParser:
     tui_attach.add_argument("--refresh-hz", type=float, default=5.0)
     tui_attach.set_defaults(func=_tui_attach_cmd)
 
+    viewer_p = sub.add_parser(
+        "viewer",
+        help=f"Rebuild {VIEWER_FILENAME} for an existing run directory",
+    )
+    viewer_p.add_argument(
+        "run_dir",
+        type=Path,
+        help="Path to a run directory under .contremaitre/runs/",
+    )
+    viewer_p.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the rebuilt viewer in the default browser",
+    )
+    viewer_p.set_defaults(func=_viewer_cmd)
+
     return parser
 
 
@@ -201,7 +218,18 @@ def _run_cmd(args: argparse.Namespace) -> int:
     if rc != 0:
         return rc
     if config.actor_mode == ActorMode.OPENCODE:
-        volume = ensure_deps_volume(repo=config.repo, base_image=config.docker_image)
+        try:
+            volume = ensure_deps_volume(
+                repo=config.repo,
+                base_image=config.docker_image,
+                runs_root=config.runs_root,
+            )
+        except DepsInstallError as exc:
+            # Hard fail: continuing without deps makes L1 checks look like
+            # real failures (the `tsc@2.0.4` placeholder trap) when the
+            # real issue is a postinstall script. See log for the actual error.
+            print(f"contremaitre: {exc}", file=sys.stderr)
+            return 1
         if volume:
             config = dataclasses.replace(config, deps_volume=volume)
     result = run(config)
@@ -537,6 +565,39 @@ def _tui_attach_cmd(args: argparse.Namespace) -> int:
     from . import tui  # imported lazily
 
     return tui.attach(args.run_dir.resolve(), refresh_hz=args.refresh_hz)
+
+
+def _viewer_cmd(args: argparse.Namespace) -> int:
+    """Rebuild viewer.html for an existing run directory.
+
+    The orchestrator already builds the viewer at run termination; this
+    command back-fills runs created before the viewer existed, or
+    refreshes a viewer after manually editing artifacts in a run dir.
+    """
+
+    run_dir: Path = args.run_dir.resolve()
+    if not run_dir.is_dir():
+        print(f"contremaitre viewer: not a directory: {run_dir}", file=sys.stderr)
+        return 1
+
+    runs_root = run_dir.parent
+    from .paths import build_run_paths
+
+    paths = build_run_paths(runs_root, run_dir.name)
+    if not paths.stats.exists():
+        print(
+            f"contremaitre viewer: {paths.stats} is missing — run never reached a terminal state",
+            file=sys.stderr,
+        )
+        return 1
+
+    out = build_viewer(paths)
+    print(f"wrote {out}")
+
+    if args.open:
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        subprocess.run([opener, str(out)], check=False)
+    return 0
 
 
 def _image_build_cmd(args: argparse.Namespace) -> int:

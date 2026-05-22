@@ -173,6 +173,17 @@ python3 -m contremaitre tui attach .contremaitre/runs/<run-id>
 
 `Ctrl-C` quits. When wrapping a live run, `Ctrl-C` also SIGTERMs the orchestrator so its emergency-flush handler fires.
 
+### Viewer — single-file HTML over a finished run
+
+Every run terminus (success or failure) writes `viewer.html` into the run directory alongside `stats.json` / `transcript.md` / `extracted_files/`. The viewer is self-contained (no network, no build step) — open it in a browser to browse the transcript, timeline, sub-agents, written files, guardrail events, and eval reports for that run.
+
+Rebuild it for an existing run directory at any time:
+
+```bash
+python3 -m contremaitre viewer .contremaitre/runs/<run-id>
+python3 -m contremaitre viewer .contremaitre/runs/<run-id> --open   # also opens in default browser
+```
+
 ### Cleanup
 
 Each opencode-mode run creates a per-run docker volume + a worktree at `/tmp/contremaitre-<run-id>/`; both are removed by the orchestrator in `finally`. `image build` prunes dangling images on success.
