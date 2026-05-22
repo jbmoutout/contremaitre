@@ -516,6 +516,23 @@ def _render_event(event: dict[str, Any]):
     return t
 
 
+def _turn_separator(turn_number: int, role: str) -> Text:
+    """Visual break between turns within a pane's RichLog.
+
+    Each opencode invocation ends with exactly one `text` event (the
+    model's final reply); the next event in the file is the first step
+    of the next turn. Rendering a separator right after each text event
+    gives the operator a clear "the conversation just came back" cue
+    instead of an undifferentiated stream of step_start/tool_use rows.
+    """
+
+    label = f"turn {turn_number} · {role} ✓"
+    body = "── " + label + " " + "─" * max(0, 70 - len(label) - 4)
+    sep = Text()
+    sep.append(body, style="bold cyan")
+    return sep
+
+
 def _render_guardrail(event: dict[str, Any]):
     """Render a guardrail_events.jsonl or recoveries.jsonl line."""
 
@@ -608,6 +625,12 @@ if _TEXTUAL_AVAILABLE:
             # (~5Hz default) so the rotation is visible to the operator
             # without eating CPU. Resets when both containers go idle.
             self._spin_tick = 0
+            # Per-pane turn counters for the inter-turn separator. One
+            # `text` event ends one opencode invocation, so these tick
+            # exactly once per turn and the label stays in sync with the
+            # footer's `turns A:N S:N`.
+            self._agent_turn_separators = 0
+            self._sim_turn_separators = 0
 
         @property
         def paths(self) -> dict[str, Path]:
@@ -675,6 +698,9 @@ if _TEXTUAL_AVAILABLE:
                 return
             for e in events[self._agent_idx:]:
                 widget.write(_render_event(e))
+                if e.get("type") == "text":
+                    self._agent_turn_separators += 1
+                    widget.write(_turn_separator(self._agent_turn_separators, "agent"))
             self._agent_idx = len(events)
 
         def _update_sim_log(self) -> None:
@@ -682,6 +708,9 @@ if _TEXTUAL_AVAILABLE:
             widget = self.query_one("#sim-log", RichLog)
             for e in events[self._sim_idx:]:
                 widget.write(_render_event(e))
+                if e.get("type") == "text":
+                    self._sim_turn_separators += 1
+                    widget.write(_turn_separator(self._sim_turn_separators, "sim"))
             self._sim_idx = len(events)
 
         def _update_activity_log(self) -> None:
