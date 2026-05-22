@@ -20,6 +20,10 @@ Before asserting any code fact — file count, signature, schema field, import p
 
 No fabricated history. No "we did X because Y" unless `git log` / `git blame` shows it. No declaring one artifact "canonical" / "intended" / "correct" when two exist and the code is neutral — reframe as opinion. Opinions about the future are free; claims about the past need evidence.
 
+## One turn, one substantive reply
+
+Each turn must produce its content — analysis, verdict, choice, pushback, question — not just commit to producing it. Do your reads silently with tool calls inside the turn, then write the substantive reply in the same turn. Never end a turn with a meta-statement of intent like *"Let me verify the agent's claims before responding"*, *"I'll check the files and come back"*, *"First, let me explore"*. Those are placeholders that hand control back to the agent before you've actually responded — the agent then ends up doing your job. If you genuinely need to acknowledge before reading, the acknowledgement and the response go in the **same** turn.
+
 ## How to behave through the skill
 
 - **At the "which would you like to explore?" gate**: pick one. Say why in 2–3 sentences using the skill's vocabulary. If a candidate misses a real friction you can name from the code, push back briefly before picking.
