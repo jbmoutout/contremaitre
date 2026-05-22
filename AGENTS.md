@@ -23,6 +23,7 @@ No build step. Python ≥ 3.11. Core CLI is zero-dep; the TUI requires `textual`
 
 ## Conventions
 
+- **Docs in sync with code.** Before committing any behavior or interface change, verify [README.md](README.md) (user-facing CLI, run flow, cleanup) and [docs/control-plane.md](docs/control-plane.md) (state machine, host-owned boundaries, artifact contract, lifecycle) still match. Update them in the same commit, not in a follow-up.
 - **Host owns git and GitHub.** Never put `git push` / `gh pr create` / credentials into an actor adapter. The orchestrator's publisher is the only thing that publishes.
 - **Hard gates are deterministic.** L0 (diff scan, diff-hash match, clean worktree, draft-only) and L1 (executable checks). LLM judgement never gates publication.
 - **Prompts as markdown files.** The `.md` is the source; `prompts/__init__.py` loads them. Edit the markdown.
