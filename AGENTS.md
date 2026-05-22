@@ -25,6 +25,7 @@ No build step. No external dependencies (the dependency-free `.env` parser and J
 - `contremaitre/publisher.py` — `StubPublisher` and `GhPublisher`. Host-side only.
 - `contremaitre/{checks,costs,diffscan,verdicts,evaluator,git_utils,jsonlog,fixture,envfile,paths,models}.py` — small focused modules.
 - `contremaitre/Dockerfile` — generic runtime image (opencode + mattpocock/skills). Shipped as package data; built via `contremaitre image build`.
+- `contremaitre/tui.py` — Textual live TUI (optional). Watches a run dir's JSONL streams + docker state. Two entry points: `tui.spawn_and_attach(...)` wraps `contremaitre run`; `tui.attach(run_dir)` is read-only. Gated on the `tui` optional extra (`pip install contremaitre[tui]`).
 - `tests/` — `test_control_plane.py` (state machine end-to-end), `test_opencode_boundaries.py` (docker command shape, publisher, prompts), `test_preflight.py`, `test_envfile.py`.
 
 ## Conventions

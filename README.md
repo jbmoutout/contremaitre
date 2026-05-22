@@ -99,6 +99,34 @@ All prompts live as markdown in [`contremaitre/prompts/`](contremaitre/prompts/)
 - [`sim_tooled_persona.md`](contremaitre/prompts/sim_tooled_persona.md) — SIM's first-turn persona. Tooled SWE collaborator, `read`/`glob`/`grep` only, skill vocabulary, read-first-claim-second discipline.
 - [`sim_review_prompt.md`](contremaitre/prompts/sim_review_prompt.md) — strict-JSON review against SETTLED + diff.
 
+## Live TUI
+
+Optional Textual UI: two panes (Agent | SIM) streaming JSONL events colorized by tool type, orchestrator-activity panel, live docker introspection (which container is running, mount mode), footer with turn counts, `SETTLED`/`IMPL_COMPLETE` flags, subagent count, recoveries count, elapsed, status.
+
+Install the extra once:
+
+```bash
+python3 -m pip install --user textual
+```
+
+Spawn-and-attach (wraps `contremaitre run`):
+
+```bash
+python3 -m contremaitre tui run -- \
+  --actor opencode \
+  --repo ~/code/itadakimasu \
+  --check-cmd "node --version" \
+  --publish-mode stub
+```
+
+Read-only attach to a completed or in-progress run:
+
+```bash
+python3 -m contremaitre tui attach .contremaitre/runs/20260522-023626-first-live
+```
+
+`Ctrl-C` quits the TUI (and sends SIGTERM to the spawned `run` so the orchestrator's emergency-flush handler fires).
+
 ## Tests
 
 ```bash

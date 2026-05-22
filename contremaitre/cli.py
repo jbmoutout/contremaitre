@@ -128,6 +128,23 @@ def build_parser() -> argparse.ArgumentParser:
     image_build.add_argument("--no-cache", action="store_true")
     image_build.set_defaults(func=_image_build_cmd)
 
+    tui_p = sub.add_parser("tui", help="Live Textual TUI (requires `textual`)")
+    tui_sub = tui_p.add_subparsers(dest="tui_command", required=True)
+    tui_run = tui_sub.add_parser("run", help="Spawn `contremaitre run` and attach the TUI to its run dir")
+    tui_run.add_argument(
+        "run_args",
+        nargs=argparse.REMAINDER,
+        help="Flags forwarded to `contremaitre run` (e.g. --actor opencode --repo /path …)",
+    )
+    tui_run.add_argument("--refresh-hz", type=float, default=5.0)
+    tui_run.add_argument("--discover-timeout", type=float, default=30.0,
+                         help="Seconds to wait for the spawned run to create its dir")
+    tui_run.set_defaults(func=_tui_run_cmd)
+    tui_attach = tui_sub.add_parser("attach", help="Read-only attach to an existing run directory")
+    tui_attach.add_argument("run_dir", type=Path)
+    tui_attach.add_argument("--refresh-hz", type=float, default=5.0)
+    tui_attach.set_defaults(func=_tui_attach_cmd)
+
     return parser
 
 
@@ -200,6 +217,48 @@ def _fixture_init_cmd(args: argparse.Namespace) -> int:
     path = init_fixture(args.path.resolve(), overwrite=args.overwrite)
     print(path)
     return 0
+
+
+def _extract_flag_value(args: list[str], flag: str, default: str) -> str:
+    """Find a `--flag value` or `--flag=value` pair in a passthrough arg list."""
+
+    for i, item in enumerate(args):
+        if item == flag and i + 1 < len(args):
+            return args[i + 1]
+        prefix = f"{flag}="
+        if item.startswith(prefix):
+            return item[len(prefix):]
+    return default
+
+
+def _tui_run_cmd(args: argparse.Namespace) -> int:
+    from . import tui  # imported lazily so the rest of the CLI works without textual
+
+    forwarded = list(args.run_args or [])
+    if forwarded and forwarded[0] == "--":
+        forwarded = forwarded[1:]
+    run_slug = _extract_flag_value(forwarded, "--run-slug", "run")
+    runs_root = Path(_extract_flag_value(forwarded, "--runs-root", ".contremaitre/runs"))
+    agent_model = _extract_flag_value(forwarded, "--agent-model", "openrouter/deepseek/deepseek-v4-flash")
+    sim_model = _extract_flag_value(forwarded, "--sim-model", "openrouter/deepseek/deepseek-v4-flash")
+    docker_image = _extract_flag_value(forwarded, "--docker-image", "contremaitre-agent:latest")
+    run_cmd = [sys.executable, "-m", "contremaitre", "run", *forwarded]
+    return tui.spawn_and_attach(
+        runs_root=runs_root,
+        run_slug=slugify(run_slug),
+        run_cmd=run_cmd,
+        refresh_hz=args.refresh_hz,
+        discover_timeout_s=args.discover_timeout,
+        agent_model=agent_model,
+        sim_model=sim_model,
+        docker_image=docker_image,
+    )
+
+
+def _tui_attach_cmd(args: argparse.Namespace) -> int:
+    from . import tui  # imported lazily
+
+    return tui.attach(args.run_dir.resolve(), refresh_hz=args.refresh_hz)
 
 
 def _image_build_cmd(args: argparse.Namespace) -> int:

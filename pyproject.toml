@@ -12,6 +12,11 @@ license = {text = "Proprietary"}
 authors = [{name = "Contremaitre"}]
 dependencies = []
 
+[project.optional-dependencies]
+# Live TUI: `contremaitre tui run …` / `contremaitre tui attach <run-dir>`.
+# Core CLI works without it.
+tui = ["textual>=0.50"]
+
 [project.scripts]
 contremaitre = "contremaitre.cli:main"
 
