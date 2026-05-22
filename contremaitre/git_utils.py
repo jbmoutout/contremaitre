@@ -76,8 +76,14 @@ class GitRepo:
     def output(self, *args: str) -> str:
         return self.run(*args).stdout
 
-    def bytes_output(self, *args: str) -> bytes:
-        cmd = ["git", *args]
+    def diff_bytes(self, base: str) -> bytes:
+        """`git diff <base>...HEAD` as raw bytes (for byte-exact hashing).
+
+        Can't go through `run()` because that path text-decodes, and the
+        diff-hash must be byte-stable for the drift check.
+        """
+
+        cmd = ["git", "diff", f"{base}...HEAD"]
         proc = subprocess.run(cmd, cwd=self.cwd, capture_output=True, timeout=120)
         if self.log_path:
             append_jsonl(
@@ -86,7 +92,7 @@ class GitRepo:
                     "cmd": cmd,
                     "cwd": str(self.cwd),
                     "returncode": proc.returncode,
-                    "stdout": proc.stdout[-4000:].decode("utf-8", errors="replace"),
+                    "stdout_bytes": len(proc.stdout),
                     "stderr": proc.stderr[-4000:].decode("utf-8", errors="replace"),
                 },
             )
@@ -99,10 +105,4 @@ class GitRepo:
 
     def status_porcelain(self) -> str:
         return self.output("status", "--porcelain")
-
-    def current_head(self) -> str:
-        return self.output("rev-parse", "HEAD").strip()
-
-    def branch_name(self) -> str:
-        return self.output("branch", "--show-current").strip()
 

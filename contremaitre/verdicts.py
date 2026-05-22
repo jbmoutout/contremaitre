@@ -112,15 +112,11 @@ def _string_list(value: Any, label: str) -> list[str]:
     return value
 
 
-def diff_bytes(repo: GitRepo, base: str) -> bytes:
-    return repo.bytes_output("diff", f"{base}...HEAD")
-
-
 def diff_hash(repo: GitRepo, base: str) -> str:
-    return hashlib.sha256(diff_bytes(repo, base)).hexdigest()
+    return hashlib.sha256(repo.diff_bytes(base)).hexdigest()
 
 
 def write_review_diff(repo: GitRepo, base: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(diff_bytes(repo, base))
+    path.write_bytes(repo.diff_bytes(base))
 
