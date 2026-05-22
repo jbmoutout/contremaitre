@@ -14,3 +14,7 @@ dist/
 .env
 
 AGENTS.local.md
+
+# mattpocock/skills installed locally by opencode when invoked with cwd=here
+.agents/
+skills-lock.json

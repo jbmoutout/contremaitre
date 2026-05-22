@@ -87,7 +87,10 @@ Every run writes:
 - `review_cycles.jsonl`
 - `worktree_state.jsonl`
 - `guardrail_events.jsonl`
+- `recoveries.jsonl` (sqlite-recovery / orphan-kill / SIGTERM-emergency events)
 - `pr.json`
+- `subagents/agent_NN_<slug>.md` (one per `task` tool_use; populated by `extract.py` in the orchestrator's `finally`)
+- `extracted_files/<host_name>` (every file the agent wrote via `write`, `edit`, or `apply_patch`)
 - `eval/pr_eval.{json,md}`
 - `eval/checks_report.json`
 - `eval/settled_diff_report.json`
@@ -97,6 +100,16 @@ Every run writes:
 - `eval/preflight_report.json`
 
 These are product artifacts. The eval-style `score.json` / weighted composite shapes some readers may expect are intentionally absent — Contremaitre uses a gate-first verdict (`READY_FOR_DRAFT_PR` / `NO_PR_*` / `FAILED_INFRA`) with an explanatory scorecard, not a single score.
+
+## Lifecycle / cleanup
+
+Per opencode-mode run, the orchestrator owns three external artifacts beyond the run directory:
+
+- **Worktree** at `/tmp/contremaitre-<run-id>/` — removed by `_cleanup_worktree` in `finally`.
+- **Named docker volume** `contremaitre-<run-id>-node-modules` — both agent and SIM containers mount it. Removed by `_cleanup_docker_volume` after worktree removal. (`docker run --rm` is unreliable for anonymous volumes on aborted containers, hence the named volume + explicit `docker volume rm -f`.)
+- **opencode state dirs** `opencode-{agent,sim,review}-state/` inside the run dir — kept on purpose: `_recover_text_from_sqlite` reads them when opencode silent-stalls, and they're the source of truth for forensic recovery. Not auto-pruned.
+
+If a parent is SIGKILL'd, the worktree and named volume can survive. `contremaitre cleanup` scans for stale per-run volumes and `/tmp/contremaitre-*` worktrees (run dir gone → stale) and prunes dangling docker images. `contremaitre image build` runs `docker image prune -f` after a successful build so rebuilds with the same tag don't accumulate `<none>:<none>` orphans.
 
 ## Terminal signal
 

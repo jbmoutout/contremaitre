@@ -2,11 +2,7 @@
 
 Working notes for coding agents (Claude Code, opencode, Codex, etc.) modifying this repository.
 
-## What this project is
-
-Contremaitre is the deterministic control plane around an architecture-improvement agent. It launches `improve-codebase-architecture` end-to-end in an opencode-in-Docker container, pairs it with a tooled SIM (read-only opencode), and produces a draft PR after deterministic gates.
-
-Read [docs/control-plane.md](docs/control-plane.md) for the implementation map and [README.md](README.md) for the run shape.
+**Source of truth** for what this project is and how it's wired: [docs/control-plane.md](docs/control-plane.md). Read that first.
 
 ## Build / test
 
@@ -14,53 +10,36 @@ Read [docs/control-plane.md](docs/control-plane.md) for the implementation map a
 python3 -m unittest discover -s tests
 ```
 
-No build step. No external dependencies (the dependency-free `.env` parser and JSONL helpers are deliberate). Python ≥ 3.11.
+No build step. Python ≥ 3.11. Core CLI is zero-dep; the TUI requires `textual` (optional extra).
 
-## File layout
+## Where to edit
 
-- `contremaitre/orchestrator.py` — state machine, WORK multi-turn loop, REVIEW pass, hard gates.
-- `contremaitre/actors.py` — `FakeActorRunner` (subprocess) and `OpencodeActorRunner` (opencode-in-Docker).
-- `contremaitre/prompts/` — markdown prompts loaded into constants. Tweak the `.md`, not the Python.
-- `contremaitre/preflight.py` — operational checks for live opencode runs.
-- `contremaitre/publisher.py` — `StubPublisher` and `GhPublisher`. Host-side only.
-- `contremaitre/{checks,costs,diffscan,verdicts,evaluator,git_utils,jsonlog,fixture,envfile,paths,models}.py` — small focused modules.
-- `contremaitre/Dockerfile` — generic runtime image (opencode + mattpocock/skills). Shipped as package data; built via `contremaitre image build`.
-- `contremaitre/tui.py` — Textual live TUI (optional). Watches a run dir's JSONL streams + docker state. Two entry points: `tui.spawn_and_attach(...)` wraps `contremaitre run`; `tui.attach(run_dir)` is read-only. Gated on the `tui` optional extra (`pip install contremaitre[tui]`).
-
-## Lifecycle / cleanup
-
-Per opencode-mode run:
-- `/tmp/contremaitre-<run-id>/` — git worktree, removed by `_cleanup_worktree` in `finally`.
-- `contremaitre-<run-id>-node-modules` docker volume — named so we can remove explicitly. `--rm` on `docker run` is unreliable on aborted containers, so we don't trust it; the orchestrator runs `docker volume rm -f` after worktree removal.
-- `<run-dir>/opencode-*-state/` directories — opencode's sqlite + cache. Kept on purpose: `_recover_text_from_sqlite` reads them when opencode silent-stalls, and they're the source of truth for forensic recovery. Not auto-pruned.
-
-`contremaitre cleanup` (subcommand) scans for stale per-run volumes and `/tmp/contremaitre-*` worktrees (run dir gone → stale) and prunes dangling docker images. `--dry-run` reports without acting; `--skip-images` leaves images alone. Anonymous volumes (hex names, no `contremaitre-` prefix) are NOT touched — we can't tell if they're ours.
-
-`contremaitre image build` runs `docker image prune -f` after a successful build to remove the prior tagged image that became `<none>:<none>`.
-- `tests/` — `test_control_plane.py` (state machine end-to-end), `test_opencode_boundaries.py` (docker command shape, publisher, prompts), `test_preflight.py`, `test_envfile.py`.
+- **Prompts** — `contremaitre/prompts/*.md`. Tweak the markdown, not the Python wrapper.
+- **State machine / caps / cleanup** — `orchestrator.py`.
+- **Docker / opencode launch** — `actors.py` (`OpencodeActorRunner.build_docker_command`).
+- **Hard gates** — `evaluator.py` + `diffscan.py` + `verdicts.py`. Strict by design.
+- **Live UI** — `tui.py`. Reads JSONL artifacts; never writes.
+- **CLI subcommands** — `cli.py` (`run`, `doctor`, `fixture`, `image`, `tui`, `cleanup`).
 
 ## Conventions
 
-- **Host owns git and GitHub.** Never put `git push` / `gh pr create` / credential handling into an actor adapter. The orchestrator's publisher is the only thing that publishes.
-- **Strict JSON SIM verdicts.** Parser in `verdicts.py` rejects markdown fences. Don't loosen it.
+- **Host owns git and GitHub.** Never put `git push` / `gh pr create` / credentials into an actor adapter. The orchestrator's publisher is the only thing that publishes.
 - **Hard gates are deterministic.** L0 (diff scan, diff-hash match, clean worktree, draft-only) and L1 (executable checks). LLM judgement never gates publication.
-- **Prompts as markdown files.** `contremaitre/prompts/*.md` are the source of truth; the `__init__.py` loads them into constants. Edit the markdown.
-- **Skill vocabulary.** When writing prompts or persona text, use Module / Interface / Implementation / Depth / Seam / Adapter / Leverage / Locality. Don't drift into "component / service / API / boundary."
-- **No backwards-compat layers.** This is pre-1.0. Change the shape, update the callers, update the tests. No deprecation shims.
+- **Prompts as markdown files.** The `.md` is the source; `prompts/__init__.py` loads them. Edit the markdown.
+- **Skill vocabulary.** Module / Interface / Implementation / Depth / Seam / Adapter / Leverage / Locality. Don't drift into "component / service / API / boundary."
+- **No backwards-compat layers.** Pre-1.0. Change the shape, update callers, update tests. No deprecation shims.
 
 ## Dependency policy
 
-**Local sibling/parent directories on the operator's machine** (research substrates, internal eval repos, anything reachable only by absolute path or `sys.path` hack): never import at runtime. When a useful pattern lives there — a multi-turn loop, a recovery routine, a focused-judge call — **copy it in and own it**. The vendored copy is the source of truth; the upstream may move and we will not chase.
+- **Local sibling directories on the operator's machine** — never import at runtime. Copy patterns in and own the vendored copy.
+- **Public PyPI packages** — allowed when they carry real weight (>30 lines of hand-rolled). Add to `pyproject.toml`.
+- **Private GitHub repos** — copy in, don't depend on access.
 
-**Public PyPI packages**: allowed when they carry real weight. Add to `pyproject.toml` and use normally. We've shipped zero-dep so far because every pattern we needed was small enough to hand-roll — that's circumstance, not a rule. If `httpx`, `tenacity`, or similar would do substantially more than 30 lines of hand-rolled code, pull it in.
-
-**Private GitHub repos / internal-only packages**: treat the same as local sibling — copy in, don't depend on access.
-
-This repo should be treated as public. Do not commit absolute paths to anyone's machine, internal project names, links to private repos, or references to non-public design documents. Anything operator-specific belongs in `AGENTS.local.md` (gitignored).
+Repo is treated as public. No absolute paths, internal codenames, or links to private repos in committed files. Operator-specific notes go in `AGENTS.local.md` (gitignored).
 
 ## What NOT to do
 
-- Don't add cosmetic "scorecard" numbers without an actual judge backing them. L2 (SETTLED-to-diff conformance) and L3 (architecture-delta) are explicitly `PENDING` in `evaluator.py` until focused-judge passes exist. When implementing them, copy the pattern in — don't import from external paths.
-- Don't put `--no-verify`, `--no-gpg-sign`, or destructive force operations in the publisher. The diff-scan and diff-hash check are load-bearing, not advisory.
-- Don't move git operations into the agent or SIM containers. The threat model is built on the agent having no outbound credentials.
-- Don't reintroduce phase-based prompts. The agent runs the skill end-to-end in one multi-turn session. The orchestrator yields to the SIM between agent turns; it does not re-prompt the agent with phase instructions.
+- Don't add scorecard numbers without a real judge backing them. L2 / L3 are `PENDING` in `evaluator.py` until focused-judge passes exist.
+- Don't put `--no-verify`, force-push, or destructive flags in the publisher. Hard gates are load-bearing, not advisory.
+- Don't move git operations into the agent or SIM containers. The threat model relies on the agent having no outbound credentials.
+- Don't reintroduce phase-based prompts. One multi-turn WORK session, SIM yields between agent turns, no orchestrator-side phase re-prompting.
