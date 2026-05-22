@@ -22,18 +22,39 @@ _DEFAULT_DOCKERFILE = _PACKAGE_DIR / "Dockerfile"
 _DEFAULT_IMAGE = "contremaitre-agent:latest"
 
 
+def _shared_run_doctor_parser() -> argparse.ArgumentParser:
+    """Flags common to `run` and `doctor`. Single source of truth; attach via parents=[…]."""
+
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--repo", required=True, type=Path, help="Local source checkout used for git worktree add")
+    p.add_argument("--base", default="main", help="Base branch for worktree and diff")
+    p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
+    p.add_argument("--docker-image", default=_DEFAULT_IMAGE)
+    p.add_argument("--opencode-config", type=Path, default=None)
+    p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
+    p.add_argument("--docker-network", default=None, help="Optional docker --network value")
+    p.add_argument("--http-proxy", default=None, help="Optional HTTP_PROXY value passed by env name to containers")
+    p.add_argument("--https-proxy", default=None, help="Optional HTTPS_PROXY value passed by env name to containers")
+    p.add_argument("--no-proxy", default=None, help="Optional NO_PROXY value passed by env name to containers")
+    p.add_argument("--allow-open-egress", action="store_true", help="Allow opencode containers without explicit network/proxy policy")
+    p.add_argument("--skip-openrouter-key-check", action="store_true", help="Do not query OpenRouter key metadata")
+    p.add_argument("--allow-unlimited-openrouter-key", action="store_true", help="Allow OpenRouter keys with no provider-side credit limit")
+    p.add_argument("--openrouter-key-url", default="https://openrouter.ai/api/v1/key")
+    p.add_argument("--max-cost-usd", type=float, default=30.0)
+    return p
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="contremaitre",
         description="Deterministic control plane for architecture-agent PR runs.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+    shared = _shared_run_doctor_parser()
 
-    run_p = sub.add_parser("run", help="Run the WORK + REVIEW loop")
-    run_p.add_argument("--repo", required=True, type=Path, help="Local source checkout used for git worktree add")
+    run_p = sub.add_parser("run", parents=[shared], help="Run the WORK + REVIEW loop")
     run_p.add_argument("--fork", default=None, help="Push remote for the run branch. Required for --publish-mode gh.")
     run_p.add_argument("--upstream", default=None, help="Canonical (read-only) remote, mounted as `upstream`.")
-    run_p.add_argument("--base", default="main", help="Base branch for worktree and diff")
     run_p.add_argument("--branch-prefix", default="refactor")
     run_p.add_argument(
         "--agent-model",
@@ -47,7 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value)
     run_p.add_argument("--run-slug", default="run")
-    run_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     run_p.add_argument("--check-cmd", action="append", default=[], help="Executable check command; repeatable")
     run_p.add_argument(
         "--sim-scenario",
@@ -64,19 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--publish-mode", choices=[mode.value for mode in PublishMode], default=PublishMode.STUB.value)
     run_p.add_argument("--keep-worktree", action="store_true")
     run_p.add_argument("--simulate-drift-after-approval", action="store_true")
-    run_p.add_argument("--docker-image", default=_DEFAULT_IMAGE)
-    run_p.add_argument("--opencode-config", type=Path, default=None)
-    run_p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
     run_p.add_argument("--container-user", default=None, help="Optional docker --user value, e.g. $(id -u):$(id -g)")
-    run_p.add_argument("--docker-network", default=None, help="Optional docker --network value")
-    run_p.add_argument("--http-proxy", default=None, help="Optional HTTP_PROXY value passed by env name to containers")
-    run_p.add_argument("--https-proxy", default=None, help="Optional HTTPS_PROXY value passed by env name to containers")
-    run_p.add_argument("--no-proxy", default=None, help="Optional NO_PROXY value passed by env name to containers")
     run_p.add_argument("--skip-preflight", action="store_true", help="Bypass operational preflight checks")
-    run_p.add_argument("--allow-open-egress", action="store_true", help="Allow opencode containers without explicit network/proxy policy")
-    run_p.add_argument("--skip-openrouter-key-check", action="store_true", help="Do not query OpenRouter key metadata")
-    run_p.add_argument("--allow-unlimited-openrouter-key", action="store_true", help="Allow OpenRouter keys with no provider-side credit limit")
-    run_p.add_argument("--openrouter-key-url", default="https://openrouter.ai/api/v1/key")
     run_p.add_argument("--agent-timeout-seconds", type=int, default=1800)
     run_p.add_argument("--sim-timeout-seconds", type=int, default=900)
     run_p.add_argument("--gh-repo", default=None, help="Optional owner/repo for gh pr create --repo")
@@ -84,30 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--pr-body", default=None)
     run_p.add_argument("--max-turns", type=int, default=30)
     run_p.add_argument("--max-wall-minutes", type=int, default=180)
-    run_p.add_argument("--max-cost-usd", type=float, default=30.0)
     run_p.add_argument("--no-progress-turns", type=int, default=5)
     run_p.add_argument("--malformed-verdict-retries", type=int, default=2)
     run_p.add_argument("--max-review-rounds", type=int, default=3)
     run_p.set_defaults(func=_run_cmd)
 
-    doctor_p = sub.add_parser("doctor", help="Validate live-run operational prerequisites")
-    doctor_p.add_argument("--repo", required=True, type=Path, help="Local source checkout used for git worktree add")
-    doctor_p.add_argument("--base", default="main")
+    doctor_p = sub.add_parser("doctor", parents=[shared], help="Validate live-run operational prerequisites")
     doctor_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.OPENCODE.value)
-    doctor_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     doctor_p.add_argument("--run-slug", default="doctor")
-    doctor_p.add_argument("--docker-image", default=_DEFAULT_IMAGE)
-    doctor_p.add_argument("--opencode-config", type=Path, default=None)
-    doctor_p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
-    doctor_p.add_argument("--docker-network", default=None)
-    doctor_p.add_argument("--http-proxy", default=None)
-    doctor_p.add_argument("--https-proxy", default=None)
-    doctor_p.add_argument("--no-proxy", default=None)
-    doctor_p.add_argument("--allow-open-egress", action="store_true")
-    doctor_p.add_argument("--skip-openrouter-key-check", action="store_true")
-    doctor_p.add_argument("--allow-unlimited-openrouter-key", action="store_true")
-    doctor_p.add_argument("--openrouter-key-url", default="https://openrouter.ai/api/v1/key")
-    doctor_p.add_argument("--max-cost-usd", type=float, default=30.0)
     doctor_p.set_defaults(func=_doctor_cmd)
 
     fixture_p = sub.add_parser("fixture", help="Fixture helpers for fake-mode smoke runs")
