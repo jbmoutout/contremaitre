@@ -28,6 +28,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .costs import sum_costs_in_events
+
 try:
     from rich.table import Table
     from rich.text import Text
@@ -871,6 +873,10 @@ if _TEXTUAL_AVAILABLE:
                           style="bold green" if impl_complete else "dim")
             footer.append(" · ")
             footer.append(f"subagents: {subagents}")
+            footer.append(" · ")
+            cost_usd = sum_costs_in_events(agent_events, sim_events)
+            footer.append(f"cost ${cost_usd:.4f}",
+                          style="cyan" if cost_usd > 0 else "dim")
             footer.append(" · ")
             footer.append(f"recoveries: {len(recoveries)}",
                           style="yellow" if recoveries else "dim")

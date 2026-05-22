@@ -26,6 +26,20 @@ def estimate_recorded_cost_usd(*paths: Path) -> float:
     return round(total, 6)
 
 
+def sum_costs_in_events(*event_lists: list[dict[str, Any]]) -> float:
+    """Sum recorded costs across one or more already-parsed event lists.
+
+    Same semantics as `estimate_recorded_cost_usd` but avoids re-reading
+    JSONL files when callers (the TUI) already have parsed events in hand.
+    """
+
+    total = 0.0
+    for events in event_lists:
+        for event in events:
+            total += _sum_costs(event)
+    return round(total, 6)
+
+
 def _sum_costs(value: Any) -> float:
     if isinstance(value, dict):
         subtotal = 0.0
