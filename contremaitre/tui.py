@@ -292,6 +292,14 @@ def _tool_style(tool: str) -> str:
     return _TOOL_STYLES.get(tool, "magenta")
 
 
+def _truncate(value: str, limit: int = 200) -> str:
+    """Cap unbounded tool args so a multi-KB body doesn't crash the RichLog."""
+
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"… (+{len(value) - limit:,} chars)"
+
+
 def _tool_body(tool: str, inp: dict[str, Any], state: dict[str, Any]) -> str:
     if tool == "task":
         desc = inp.get("description") or inp.get("subagent_type") or ""
@@ -299,7 +307,7 @@ def _tool_body(tool: str, inp: dict[str, Any], state: dict[str, Any]) -> str:
         status = state.get("status", "")
         bits = []
         if desc:
-            bits.append(f"desc: {desc}")
+            bits.append(f"desc: {_truncate(desc)}")
         if status == "completed" and out:
             bits.append(f"[subagent output · {len(out):,} chars]")
         return "  ·  ".join(bits)
@@ -318,10 +326,10 @@ def _tool_body(tool: str, inp: dict[str, Any], state: dict[str, Any]) -> str:
     if tool == "grep":
         pat = inp.get("pattern", "")
         inc = inp.get("path") or inp.get("include") or ""
-        return f"pattern: {pat}" + (f"  in {inc}" if inc else "")
+        return f"pattern: {_truncate(pat)}" + (f"  in {inc}" if inc else "")
     if tool == "bash":
         cmd = inp.get("command") or ""
-        return f"cmd: {cmd}"
+        return f"cmd: {_truncate(cmd)}"
     if tool == "apply_patch":
         patch = inp.get("patchText") or inp.get("patch") or ""
         m = re.search(r"\*\*\*\s+(Add|Update|Delete)\s+File:\s*(\S+)", patch[:200])
