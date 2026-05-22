@@ -20,6 +20,7 @@ Requires `textual` (optional extra). Install with:
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import subprocess
@@ -240,8 +241,14 @@ def _docker_info(image_name: str, worktree: Path) -> dict[str, Any]:
     return info
 
 
+@functools.lru_cache(maxsize=256)
 def _container_mount_mode(cid: str, worktree_str: str) -> str:
-    """Return 'ro' or 'rw' for the worktree mount on the container."""
+    """Return 'ro' or 'rw' for the worktree mount on the container.
+
+    Mount mode is fixed for a container's lifetime; cache by cid+mount so the
+    TUI's 2-second refresh loop doesn't shell out to `docker inspect` every
+    tick. lru_cache lets stale cids age out automatically.
+    """
 
     try:
         proc = subprocess.run(
