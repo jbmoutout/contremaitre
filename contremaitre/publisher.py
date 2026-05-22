@@ -3,6 +3,11 @@
 The orchestrator is the only component allowed to publish. Actor containers do
 not receive GitHub credentials, and this module runs only after SIM approval,
 diff-hash verification, executable checks, and deterministic diff-scan pass.
+
+`PublishOutcome` is the single tagged result type for every terminal of the
+state machine — PUBLISHED, BLOCKED, NO_PR — and `record_publication` is the
+one writer of `pr.json`. Schema drift between the published and not-published
+paths is structurally impossible.
 """
 
 from __future__ import annotations
@@ -10,45 +15,74 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from .jsonlog import append_jsonl, write_json
 from .models import PublishMode, RunConfig, RunPaths
 
 
+class PublishOutcomeKind(str, Enum):
+    PUBLISHED = "PUBLISHED"  # Publisher ran. May be dry-run (stub) or real (gh).
+    BLOCKED = "BLOCKED"      # Hard gate or executable check refused publication.
+    NO_PR = "NO_PR"          # Run ended before publication was attempted.
+
+
 @dataclass(frozen=True)
-class PublishResult:
-    created: bool
-    dry_run: bool
-    branch: str
+class PublishOutcome:
+    kind: PublishOutcomeKind
     base: str
-    url: str | None
+    publish_mode: PublishMode
     reason: str
+    branch: str | None = None
+    url: str | None = None
+    diff_hash: str | None = None
+    dry_run: bool = True  # True for stub or for non-PUBLISHED kinds; False only when gh actually opened a PR.
+
+
+def record_publication(paths: RunPaths, outcome: PublishOutcome) -> None:
+    """Write the single canonical pr.json row for this run."""
+
+    write_json(
+        paths.pr_json,
+        {
+            "kind": outcome.kind.value,
+            "branch": outcome.branch,
+            "base": outcome.base,
+            "url": outcome.url,
+            "diff_hash": outcome.diff_hash,
+            "reason": outcome.reason,
+            "publish_mode": outcome.publish_mode.value,
+            "dry_run": outcome.dry_run,
+        },
+    )
 
 
 class Publisher:
-    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishResult:
+    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishOutcome:
         raise NotImplementedError
 
 
 class StubPublisher(Publisher):
-    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishResult:
-        result = PublishResult(
-            created=True,
-            dry_run=True,
-            branch=branch,
+    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishOutcome:
+        outcome = PublishOutcome(
+            kind=PublishOutcomeKind.PUBLISHED,
             base=config.base,
-            url=None,
+            publish_mode=config.publish_mode,
             reason="publisher stub: would push branch and open a draft PR after approval",
+            branch=branch,
+            url=None,
+            diff_hash=diff_hash,
+            dry_run=True,
         )
-        _write_pr_json(paths, config, result, diff_hash)
-        return result
+        record_publication(paths, outcome)
+        return outcome
 
 
 class GhPublisher(Publisher):
     """Host-side GitHub publisher using local git + GitHub CLI."""
 
-    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishResult:
+    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishOutcome:
         if not os.environ.get("GITHUB_TOKEN") and not os.environ.get("GH_TOKEN"):
             raise RuntimeError("GITHUB_TOKEN or GH_TOKEN is required for --publish-mode gh")
         if not config.fork:
@@ -58,33 +92,28 @@ class GhPublisher(Publisher):
         pr_body = _write_pr_body(paths, config, diff_hash)
         self._run(["git", "push", "origin", f"HEAD:{branch}"], cwd=paths.worktree, paths=paths, env=env)
         cmd = [
-            "gh",
-            "pr",
-            "create",
+            "gh", "pr", "create",
             "--draft",
-            "--base",
-            config.base,
-            "--head",
-            branch,
-            "--title",
-            config.pr_title or f"Contremaitre: {paths.run_id}",
-            "--body-file",
-            str(pr_body),
+            "--base", config.base,
+            "--head", branch,
+            "--title", config.pr_title or f"Contremaitre: {paths.run_id}",
+            "--body-file", str(pr_body),
         ]
         if config.gh_repo:
             cmd.extend(["--repo", config.gh_repo])
         proc = self._run(cmd, cwd=paths.worktree, paths=paths, env=env)
-        url = _extract_url(proc.stdout)
-        result = PublishResult(
-            created=True,
-            dry_run=False,
-            branch=branch,
+        outcome = PublishOutcome(
+            kind=PublishOutcomeKind.PUBLISHED,
             base=config.base,
-            url=url,
+            publish_mode=config.publish_mode,
             reason="pushed branch and opened draft PR via gh",
+            branch=branch,
+            url=_extract_url(proc.stdout),
+            diff_hash=diff_hash,
+            dry_run=False,
         )
-        _write_pr_json(paths, config, result, diff_hash)
-        return result
+        record_publication(paths, outcome)
+        return outcome
 
     def _run(
         self,
@@ -119,40 +148,6 @@ def make_publisher(config: RunConfig) -> Publisher:
     raise RuntimeError(f"unknown publish mode: {config.publish_mode}")
 
 
-def write_no_pr(paths: RunPaths, *, reason: str, branch: str | None = None) -> None:
-    write_json(
-        paths.pr_json,
-        {
-            "created": False,
-            "dry_run": True,
-            "branch": branch,
-            "url": None,
-            "reason": reason,
-        },
-    )
-
-
-def _write_pr_json(
-    paths: RunPaths,
-    config: RunConfig,
-    result: PublishResult,
-    diff_hash: str,
-) -> None:
-    write_json(
-        paths.pr_json,
-        {
-            "created": result.created,
-            "dry_run": result.dry_run,
-            "branch": result.branch,
-            "base": result.base,
-            "url": result.url,
-            "diff_hash": diff_hash,
-            "reason": result.reason,
-            "publish_mode": config.publish_mode.value,
-        },
-    )
-
-
 def _write_pr_body(paths: RunPaths, config: RunConfig, diff_hash: str) -> Path:
     body = paths.run_dir / "pr_body.md"
     if config.pr_body:
@@ -173,4 +168,3 @@ def _extract_url(stdout: str) -> str | None:
         if token.startswith("http://") or token.startswith("https://"):
             return token
     return stdout.strip() or None
-

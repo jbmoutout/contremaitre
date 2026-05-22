@@ -17,8 +17,8 @@ class ControlPlaneTest(unittest.TestCase):
 
         self.assertEqual(result.verdict, TerminalVerdict.READY_FOR_DRAFT_PR)
         pr = self._read_json(result.run_dir / "pr.json")
-        self.assertTrue(pr["created"])
-        self.assertTrue(pr["dry_run"])
+        self.assertEqual(pr["kind"], "PUBLISHED")
+        self.assertTrue(pr["dry_run"])  # stub publisher
         self.assertTrue((result.run_dir / "raw_export.jsonl").exists())
         self.assertTrue((result.run_dir / "sim_raw_export.jsonl").exists())
         self.assertTrue((result.run_dir / "eval" / "pr_eval.json").exists())
@@ -29,7 +29,7 @@ class ControlPlaneTest(unittest.TestCase):
 
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_CHANGES_REQUESTED)
         pr = self._read_json(result.run_dir / "pr.json")
-        self.assertFalse(pr["created"])
+        self.assertEqual(pr["kind"], "NO_PR")
 
     def test_malformed_verdict_retries_to_needs_human(self):
         result, _ = self._run_fixture(

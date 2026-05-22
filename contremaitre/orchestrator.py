@@ -51,7 +51,12 @@ from .models import (
 )
 from .paths import build_run_paths, new_run_id, validate_slug
 from .preflight import enforce_preflight
-from .publisher import make_publisher, write_no_pr
+from .publisher import (
+    PublishOutcome,
+    PublishOutcomeKind,
+    make_publisher,
+    record_publication,
+)
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
 
 
@@ -102,7 +107,17 @@ class Orchestrator:
             return self._review_rounds(actor=actor, worktree_git=worktree_git, branch=branch)
         except Exception as exc:
             append_jsonl(self.paths.guardrail_events, {"event": "infra_failure", "error": repr(exc)})
-            write_no_pr(self.paths, reason=f"FAILED_INFRA: {exc}", branch=branch)
+            record_publication(
+                self.paths,
+                PublishOutcome(
+                    kind=PublishOutcomeKind.NO_PR,
+                    base=self.config.base,
+                    publish_mode=self.config.publish_mode,
+                    reason=f"FAILED_INFRA: {exc}",
+                    branch=branch,
+                    dry_run=True,
+                ),
+            )
             self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, str(exc))
             return RunResult(
                 run_id=self.run_id,
@@ -374,6 +389,7 @@ class Orchestrator:
         if not hard_gates["passed"]:
             return self._blocked_by_gates(
                 branch=branch,
+                approved_hash=approved_hash,
                 checks=checks,
                 diff_scan=diff_scan,
                 hard_gates=hard_gates,
@@ -383,6 +399,7 @@ class Orchestrator:
         if not checks_pass:
             return self._blocked_by_gates(
                 branch=branch,
+                approved_hash=approved_hash,
                 checks=checks,
                 diff_scan=diff_scan,
                 hard_gates=hard_gates,
@@ -391,7 +408,7 @@ class Orchestrator:
             )
 
         publisher = make_publisher(self.config)
-        publish_result = publisher.publish(
+        outcome = publisher.publish(
             config=self.config,
             paths=self.paths,
             branch=branch,
@@ -403,9 +420,9 @@ class Orchestrator:
             hard_gates=hard_gates,
             needs_human=[],
             sim_verdict=parsed,
-            reason=publish_result.reason,
+            reason=outcome.reason,
         )
-        self._write_final_stats(State.APPROVED, TerminalVerdict.READY_FOR_DRAFT_PR, publish_result.reason)
+        self._write_final_stats(State.APPROVED, TerminalVerdict.READY_FOR_DRAFT_PR, outcome.reason)
         return RunResult(
             run_id=self.run_id,
             terminal_state=State.APPROVED,
@@ -413,13 +430,14 @@ class Orchestrator:
             run_dir=self.paths.run_dir,
             worktree=self.paths.worktree,
             pr_created=True,
-            reason=publish_result.reason,
+            reason=outcome.reason,
         )
 
     def _blocked_by_gates(
         self,
         *,
         branch: str,
+        approved_hash: str,
         checks: list[CheckResult],
         diff_scan: DiffScanResult,
         hard_gates: dict[str, object],
@@ -435,7 +453,18 @@ class Orchestrator:
                 "forbidden_files": diff_scan.forbidden_files,
             },
         )
-        write_no_pr(self.paths, reason=reason, branch=branch)
+        record_publication(
+            self.paths,
+            PublishOutcome(
+                kind=PublishOutcomeKind.BLOCKED,
+                base=self.config.base,
+                publish_mode=self.config.publish_mode,
+                reason=reason,
+                branch=branch,
+                diff_hash=approved_hash,
+                dry_run=True,
+            ),
+        )
         self._write_eval(
             verdict=TerminalVerdict.NO_PR_NEEDS_HUMAN,
             checks=checks,
@@ -464,7 +493,17 @@ class Orchestrator:
         checks: list[CheckResult] | None = None,
         sim_verdict: ParsedVerdict | None = None,
     ) -> RunResult:
-        write_no_pr(self.paths, reason=reason, branch=branch)
+        record_publication(
+            self.paths,
+            PublishOutcome(
+                kind=PublishOutcomeKind.NO_PR,
+                base=self.config.base,
+                publish_mode=self.config.publish_mode,
+                reason=reason,
+                branch=branch,
+                dry_run=True,
+            ),
+        )
         self._write_eval(
             verdict=verdict,
             checks=checks or [],

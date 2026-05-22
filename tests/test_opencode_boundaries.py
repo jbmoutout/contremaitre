@@ -197,16 +197,17 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
             with patch("contremaitre.publisher.subprocess.run", side_effect=fake_run):
-                result = GhPublisher().publish(config=config, paths=paths, branch="refactor/x", diff_hash="abc")
+                outcome = GhPublisher().publish(config=config, paths=paths, branch="refactor/x", diff_hash="abc")
 
-            self.assertTrue(result.created)
-            self.assertFalse(result.dry_run)
-            self.assertEqual(result.url, "https://github.com/owner/repo/pull/1")
+            self.assertEqual(outcome.kind.value, "PUBLISHED")
+            self.assertFalse(outcome.dry_run)
+            self.assertEqual(outcome.url, "https://github.com/owner/repo/pull/1")
             self.assertEqual(calls[0], ["git", "push", "origin", "HEAD:refactor/x"])
             self.assertEqual(calls[1][:3], ["gh", "pr", "create"])
             self.assertIn("--draft", calls[1])
             self.assertIn("--repo", calls[1])
             pr = json.loads(paths.pr_json.read_text(encoding="utf-8"))
+            self.assertEqual(pr["kind"], "PUBLISHED")
             self.assertEqual(pr["publish_mode"], "gh")
 
 
