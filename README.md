@@ -14,13 +14,14 @@ GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
   --repo ~/code/<target-repo> \
   --base main \
   --fork git@github.com:<you>/<target-repo>.git \
-  --check-cmd "npx tsc --noEmit" \
   --publish-mode gh \
   --allow-open-egress \
   --max-turns 20 \
   --max-wall-minutes 45 \
   --max-cost-usd 5
 ```
+
+Add `--check-cmd "<command>"` (repeatable) if your target has a fast deterministic check worth gating publication on — see [ecosystem examples](#executable-checks-per-ecosystem) below. Without it, publication still requires SIM approval + L0 hard gates (diff scan, diff-hash match, clean worktree).
 
 **One-time setup** (auto-handled on first run):
 - Runtime image `contremaitre-agent:latest` builds itself on first opencode-mode run. ~3 min on a warm host.
@@ -36,7 +37,7 @@ GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
 | `--base` | branch the worktree forks off + PR base | **yes** (typical: `main`) |
 | `--fork` | git URL where the run's branch is pushed | **yes** for `--publish-mode gh` |
 | `--opencode-config` | path to your `opencode.json` (provider + model registry) | **yes** for opencode mode |
-| `--check-cmd` | executable check the post-implementation worktree must pass; repeatable | **yes** (publication blocked if absent or failing) |
+| `--check-cmd` | executable check the post-implementation worktree must pass; repeatable | optional (publication blocked only on a configured-and-failing check) |
 | `--publish-mode gh` | open a real draft PR via `gh pr create --draft` | optional (default: `stub` — no PR, just simulates) |
 | `--allow-open-egress` | accept unrestricted container egress; alternative is `--docker-network` / proxy flags | required if no proxy is configured |
 | `--max-turns` | per-actor turn budget | optional (default `30`) |
@@ -93,9 +94,23 @@ INIT → WORK → REVIEW → APPROVED → draft PR
 
 **REVIEW** is a single-shot SIM call against `.contremaitre/SETTLED_DESIGN.md` and the diff. The SIM returns a strict JSON verdict.
 
-**Publication** runs only after `APPROVED` clears hard gates (diff scan, diff-hash match, clean worktree) and the configured executable checks.
+**Publication** runs only after `APPROVED` clears hard gates (diff scan, diff-hash match, clean worktree) and any configured executable checks. Skipping `--check-cmd` is fine — the L1 gate becomes a no-op and the scorecard records `executable_confidence: null`.
 
 See [docs/control-plane.md](docs/control-plane.md) for the implementation map.
+
+### Executable checks per ecosystem
+
+`--check-cmd` is target-agnostic: pass whatever fast deterministic command tells you the diff is at least mechanically sound. Examples:
+
+| Stack | Example |
+|---|---|
+| Node / TS | `--check-cmd "npx tsc --noEmit"` |
+| Python (poetry) | `--check-cmd "poetry run pytest -q"` |
+| Python (uv / stdlib) | `--check-cmd "python3 -m unittest discover -s tests"` |
+| Rust | `--check-cmd "cargo check --all-targets"` |
+| Go | `--check-cmd "go build ./..."` |
+
+The check runs inside the post-implementation worktree on the host (not in the agent container), with a 600s timeout per command. Repeat the flag to gate on more than one command.
 
 ## Smoke run (fake actor, no docker, no spend)
 

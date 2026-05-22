@@ -202,9 +202,8 @@ class Orchestrator:
 
             self._commit_agent_changes(worktree_git)
             checks = run_checks(
-                self.paths.worktree,
-                self.config.check_cmds,
-                self.paths.test_runs,
+                config=self.config,
+                paths=self.paths,
                 emit_event=self._emit,
             )
             self._record_worktree_state(worktree_git, f"after-checks-round{review_round}")
@@ -404,7 +403,10 @@ class Orchestrator:
             clean_worktree=clean,
             diff_hash_matched=diff_hash_matched,
         )
-        checks_pass = bool(checks) and all(check.passed for check in checks)
+        # L1 executable-check gate: blocks only on a configured-and-failing
+        # check. No --check-cmd → empty results → no-op (operator opted out;
+        # SIM approval + L0 hard gates still apply).
+        checks_failed = any(not check.passed for check in checks)
 
         if not hard_gates["passed"]:
             return self._blocked_by_gates(
@@ -417,7 +419,7 @@ class Orchestrator:
                 reason="hard gate failed",
                 sim_verdict=parsed,
             )
-        if not checks_pass:
+        if checks_failed:
             return self._blocked_by_gates(
                 branch=branch,
                 approved_hash=approved_hash,
@@ -425,7 +427,7 @@ class Orchestrator:
                 checks=checks,
                 diff_scan=diff_scan,
                 hard_gates=hard_gates,
-                reason="executable checks failed or were not configured",
+                reason="executable checks failed",
                 sim_verdict=parsed,
             )
 

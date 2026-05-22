@@ -1,4 +1,15 @@
-"""Executable check runner for PR-eval L1."""
+"""Executable check runner for PR-eval L1.
+
+In OPENCODE mode each check runs in a one-shot sidecar container that
+mounts the agent's worktree + per-run node_modules volume — the host
+worktree has no project deps, so running `npx tsc --noEmit` on the host
+hangs until the 600s timeout. The sidecar reuses the same image the
+agent ran in, so the check sees the same toolchain.
+
+In FAKE mode (fixture smoke runs) the check runs on the host directly:
+fake mode never touches docker, and forcing it to here would make the
+test suite need a docker daemon.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +22,7 @@ from typing import Callable
 
 from . import events
 from .jsonlog import append_jsonl
+from .models import ActorMode, RunConfig, RunPaths
 
 
 @dataclass(frozen=True)
@@ -27,34 +39,30 @@ class CheckResult:
 
 
 def run_checks(
-    worktree: Path,
-    commands: tuple[str, ...],
-    log_path: Path,
+    *,
+    config: RunConfig,
+    paths: RunPaths,
     emit_event: Callable[..., None] | None = None,
 ) -> list[CheckResult]:
-    """Run executable checks in the worktree.
+    """Run executable checks against the post-implementation worktree.
 
-    `emit_event` is the orchestrator's `_emit` (or None). When supplied, each
-    check pair emits `check_started` / `check_completed` to guardrail_events
-    so the TUI / a tail of guardrail_events.jsonl shows forward motion even
-    when a check runs for the full 600s timeout — closes the silent-stall
-    failure mode where a hung check made the whole REVIEW handover look
-    frozen.
+    `emit_event` is the orchestrator's `_emit` (or None). When supplied,
+    each check pair emits `check_started` / `check_completed` to
+    guardrail_events so the TUI / a tail of guardrail_events.jsonl shows
+    forward motion even when a check runs for the full 600s timeout.
     """
 
     results: list[CheckResult] = []
-    for index, cmd in enumerate(commands):
+    in_container = config.actor_mode == ActorMode.OPENCODE
+    for index, cmd in enumerate(config.check_cmds):
         if emit_event is not None:
-            emit_event(events.CHECK_STARTED, cmd=cmd, index=index)
+            emit_event(events.CHECK_STARTED, cmd=cmd, index=index, in_container=in_container)
         started = time.monotonic()
         try:
-            proc = subprocess.run(
-                shlex.split(cmd),
-                cwd=worktree,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
+            if in_container:
+                proc = _run_sidecar(cmd, config=config, paths=paths)
+            else:
+                proc = _run_host(cmd, worktree=paths.worktree)
         except subprocess.TimeoutExpired:
             if emit_event is not None:
                 emit_event(
@@ -74,13 +82,14 @@ def run_checks(
             stderr=proc.stderr[-8000:],
         )
         append_jsonl(
-            log_path,
+            paths.test_runs,
             {
                 "cmd": result.cmd,
                 "returncode": result.returncode,
                 "duration_seconds": result.duration_seconds,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
+                "in_container": in_container,
             },
         )
         if emit_event is not None:
@@ -94,3 +103,46 @@ def run_checks(
             )
         results.append(result)
     return results
+
+
+def _run_host(cmd: str, *, worktree: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        shlex.split(cmd),
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+
+
+def _run_sidecar(
+    cmd: str,
+    *,
+    config: RunConfig,
+    paths: RunPaths,
+) -> subprocess.CompletedProcess[str]:
+    docker_cmd = ["docker", "run", "--rm"]
+    if config.container_user:
+        docker_cmd.extend(["--user", config.container_user])
+    if config.docker_network:
+        docker_cmd.extend(["--network", config.docker_network])
+    docker_cmd.extend(
+        [
+            "-v",
+            f"{paths.worktree}:/app:rw",
+            "-v",
+            f"{paths.docker_volume}:/app/node_modules",
+            "-w",
+            "/app",
+            config.docker_image,
+            "sh",
+            "-lc",
+            cmd,
+        ]
+    )
+    return subprocess.run(
+        docker_cmd,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )

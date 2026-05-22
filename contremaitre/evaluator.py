@@ -65,7 +65,7 @@ def write_eval_reports(
         "architecture_delta": "PENDING",
         "needs_human": needs_human,
         "scorecard": {
-            "executable_confidence": 1.0 if checks_payload["status"] == "PASS" else 0.0,
+            "executable_confidence": _executable_confidence(checks_payload["status"]),
             "sim_review_confidence": sim_review.get("confidence"),
             "process_reliability": trajectory.get("process_reliability", 0.0),
             "design_conformance": None,
@@ -127,6 +127,17 @@ def _checks_status(checks: list[CheckResult]) -> str:
     if not checks:
         return "NOT_CONFIGURED"
     return "PASS" if all(check.passed for check in checks) else "FAIL"
+
+
+def _executable_confidence(status: str) -> float | None:
+    # NOT_CONFIGURED → null (operator opted out; absence of signal, not a
+    # zero-confidence signal). Distinguishing this from FAIL keeps the
+    # scorecard honest for downstream readers.
+    if status == "PASS":
+        return 1.0
+    if status == "FAIL":
+        return 0.0
+    return None
 
 
 def _render_md(payload: dict[str, Any]) -> str:
