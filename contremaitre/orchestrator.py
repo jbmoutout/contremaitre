@@ -26,6 +26,7 @@ import shutil
 import signal
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import events, prompts
@@ -62,6 +63,18 @@ from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_rev
 
 SETTLED_RELPATH = Path(".contremaitre") / "SETTLED_DESIGN.md"
 IMPLEMENTATION_COMPLETE_RELPATH = Path(".contremaitre") / "IMPLEMENTATION_COMPLETE"
+
+
+@dataclass(frozen=True)
+class _WorktreeSnapshot:
+    """One pair of git read-only queries shared across the two per-turn records.
+
+    Without this, every turn ran `git status --porcelain` and `git diff --stat`
+    twice — once for the worktree-state log, once for the no-progress key.
+    """
+
+    status: str
+    diff_stat: str
 
 
 class Orchestrator:
@@ -293,8 +306,8 @@ class Orchestrator:
         text = output.text
         worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
         label = f"after-agent-turn-{self.turns}"
-        self._record_worktree_state(worktree_git, label)
-        self._record_progress(worktree_git, label, text)
+        snapshot = self._record_worktree_state(worktree_git, label)
+        self._record_progress(snapshot, label, text)
         return text
 
     def _sim_turn(self, actor: ActorRunner, message: str) -> str:
@@ -679,10 +692,14 @@ class Orchestrator:
             return True
         return False
 
-    def _record_progress(self, repo: GitRepo, label: str, text: str) -> None:
-        status = repo.run("status", "--porcelain", check=False).stdout
-        diff_stat = repo.run("diff", "--stat", f"{self.config.base}...HEAD", check=False).stdout
-        key = (status + "\n" + diff_stat, str(len(text.strip())))
+    def _snapshot_worktree(self, repo: GitRepo) -> _WorktreeSnapshot:
+        return _WorktreeSnapshot(
+            status=repo.run("status", "--porcelain", check=False).stdout,
+            diff_stat=repo.run("diff", "--stat", f"{self.config.base}...HEAD", check=False).stdout,
+        )
+
+    def _record_progress(self, snapshot: _WorktreeSnapshot, label: str, text: str) -> None:
+        key = (snapshot.status + "\n" + snapshot.diff_stat, str(len(text.strip())))
         if self._last_progress_key is None or key != self._last_progress_key:
             self.no_progress_streak = 0
             self._last_progress_key = key
@@ -699,15 +716,15 @@ class Orchestrator:
             },
         )
 
-    def _record_worktree_state(self, repo: GitRepo, label: str) -> None:
+    def _record_worktree_state(self, repo: GitRepo, label: str) -> _WorktreeSnapshot:
+        """Snapshot + log + return for reuse by callers needing the same data."""
+
+        snapshot = self._snapshot_worktree(repo)
         append_jsonl(
             self.paths.worktree_state,
-            {
-                "label": label,
-                "status": repo.run("status", "--porcelain", check=False).stdout,
-                "diff_stat": repo.run("diff", "--stat", f"{self.config.base}...HEAD", check=False).stdout,
-            },
+            {"label": label, "status": snapshot.status, "diff_stat": snapshot.diff_stat},
         )
+        return snapshot
 
     def _write_final_stats(self, terminal_state: State, verdict: TerminalVerdict, reason: str) -> None:
         write_json(
