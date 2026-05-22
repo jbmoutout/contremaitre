@@ -408,7 +408,10 @@ class Orchestrator:
         recomputed_hash = diff_hash(worktree_git, self.config.base)
         diff_hash_matched = recomputed_hash == approved_hash
         diff_scan = scan_diff(worktree_git, self.config.base)
-        clean = worktree_git.status_porcelain() == ""
+        # `.contremaitre/*` is excluded from staging by design and stays
+        # untracked in the worktree for the SIM to read across rounds —
+        # don't count it against clean-worktree.
+        clean = _only_contremaitre_changes(worktree_git.status_porcelain())
         hard_gates = hard_gate_payload(
             diff_scan=diff_scan,
             clean_worktree=clean,
@@ -653,14 +656,18 @@ class Orchestrator:
         self._emit(events.SIMULATED_DIFF_DRIFT)
 
     def _commit_agent_changes(self, repo: GitRepo) -> None:
-        status = repo.status_porcelain()
-        if not status.strip():
+        if _only_contremaitre_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
         title, body = _derive_commit_message(self.paths.worktree, self.run_id)
-        repo.run("add", ".")
-        # Use a HEREDOC-style multi-arg commit so the body lands as the
-        # commit message body, not the headline. GitRepo.run takes a list.
+        # Pathspec exclude keeps `.contremaitre/*` (SETTLED_DESIGN.md,
+        # IMPLEMENTATION_COMPLETE, architecture-review.html) out of the
+        # staged set even though the files stay in the worktree (so the
+        # WORK-phase SIM can keep reading SETTLED via the /app:ro mount,
+        # including across CHANGES_REQUESTED → WORK rounds). The SETTLED
+        # text already lands in the commit body via `_derive_commit_message`
+        # and in the PR description via the publisher.
+        repo.run("add", "--", ".", ":(exclude).contremaitre")
         repo.run("commit", "-m", title, "-m", body)
         self._emit(
             events.HOST_COMMIT_CREATED,
@@ -822,6 +829,32 @@ class Orchestrator:
                 _sp.run(["docker", "stop", "-t", "5", cid], capture_output=True, timeout=15)
             except (OSError, _sp.TimeoutExpired):
                 continue
+
+
+def _only_contremaitre_changes(porcelain: str) -> bool:
+    """True iff every `git status --porcelain` row points at `.contremaitre/`.
+
+    `.contremaitre/*` is host-side orchestration scaffolding (SETTLED,
+    IMPLEMENTATION_COMPLETE, architecture-review.html) excluded from the
+    published commit and PR diff by design. The host-commit step and
+    the clean-worktree hard gate both need to treat a worktree whose
+    only changes are inside `.contremaitre/` as "clean for our purposes":
+
+    - host-commit: skip the commit instead of producing an empty PR
+      (would happen if the agent only wrote scaffolding, no code).
+    - clean-worktree gate: pass — those files are deliberately untracked.
+
+    Empty porcelain (no changes at all) is also "clean".
+    """
+
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        # Porcelain format: "XY <path>" where XY is the two-char status.
+        path = line[3:].strip().strip('"')
+        if not path.startswith(".contremaitre/") and path != ".contremaitre":
+            return False
+    return True
 
 
 def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:

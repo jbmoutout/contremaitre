@@ -176,7 +176,14 @@ class OpencodeBoundaryTest(unittest.TestCase):
             status = subprocess.run(["git", "-C", str(orch.paths.worktree), "status", "--porcelain"], check=True, capture_output=True, text=True)
             log_title = subprocess.run(["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%s"], check=True, capture_output=True, text=True)
             log_body = subprocess.run(["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%b"], check=True, capture_output=True, text=True)
-            self.assertEqual(status.stdout, "")
+            log_files = subprocess.run(["git", "-C", str(orch.paths.worktree), "show", "--name-only", "--pretty="], check=True, capture_output=True, text=True)
+            # `.contremaitre/` is excluded from the commit by pathspec but
+            # stays in the worktree (SIM reads it across WORK rounds), so
+            # status shows it as untracked.
+            self.assertEqual(status.stdout.strip(), "?? .contremaitre/")
+            # README.md is staged + committed; .contremaitre/* is not.
+            self.assertIn("README.md", log_files.stdout)
+            self.assertNotIn(".contremaitre", log_files.stdout)
             # Title is derived from SETTLED_DESIGN.md first line, with the
             # "Settled design — " prefix stripped.
             self.assertEqual(log_title.stdout.strip(), "Consolidate Prisma seam")
