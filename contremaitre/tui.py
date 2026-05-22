@@ -105,6 +105,64 @@ def _fmt_elapsed(seconds: float | None) -> str:
     return f"{h}h{m:02d}m"
 
 
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+def _activity_state(*, container_present: bool, file_age: float | None) -> str:
+    """Classify a pane's per-refresh state for the loader.
+
+    `active`    — container running and stdout file written in the last 2s
+                  (events landing in real time: tool_use, text deltas).
+    `thinking`  — container running but no recent stdout writes (model is
+                  mid-generation; no events to render yet).
+    `idle`      — no container; either pre-launch or already finished.
+    """
+
+    if not container_present:
+        return "idle"
+    if file_age is not None and file_age < 2.0:
+        return "active"
+    return "thinking"
+
+
+def _render_pane_subheader(
+    *,
+    state: str,
+    spinner: str,
+    turns: int,
+    pending_tool: str | None,
+    container_id: str | None,
+    container_uptime: str | None,
+) -> Text:
+    """Per-pane subheader, color-coded by activity state.
+
+    Format: `<spinner> <state>  ·  turns: N  ·  doing: <tool>  ·  container <id> (<uptime>)`
+    The spinner ticks per refresh when state is `active` or `thinking`;
+    it disappears (replaced by a static dot) when `idle` so a finished
+    pane doesn't keep visually animating.
+    """
+
+    sub = Text()
+    if state == "active":
+        sub.append(spinner, style="bold green")
+        sub.append(" streaming", style="green")
+    elif state == "thinking":
+        sub.append(spinner, style="bold cyan")
+        sub.append(" thinking…", style="cyan")
+    else:
+        sub.append("•", style="dim")
+        sub.append(" idle", style="dim")
+    sub.append(f"  ·  turns: {turns}", style="dim")
+    if pending_tool:
+        clipped = pending_tool if len(pending_tool) <= 60 else pending_tool[:57] + "…"
+        sub.append(f"  ·  doing: {clipped}", style="dim")
+    if container_id:
+        sub.append(f"  ·  container {container_id} ({container_uptime})", style="dim")
+    else:
+        sub.append("  ·  no container", style="dim")
+    return sub
+
+
 def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path | None) -> Text:
     """Render INIT > WORK > REVIEW > APPROVED > PUBLISHED progression.
 
@@ -546,6 +604,10 @@ if _TEXTUAL_AVAILABLE:
             # like a stall).
             self._frozen_elapsed: float | None = None
             self._frozen_gr_age: float | None = None
+            # Animated Braille spinner. Cycled once per chrome refresh
+            # (~5Hz default) so the rotation is visible to the operator
+            # without eating CPU. Resets when both containers go idle.
+            self._spin_tick = 0
 
         @property
         def paths(self) -> dict[str, Path]:
@@ -686,34 +748,43 @@ if _TEXTUAL_AVAILABLE:
                 header.append(f"  ·  {self.docker_image} built {img}", style="dim")
             self.query_one("#header", Static).update(header)
 
-            # ----- Agent subheader -----
+            # ----- Pane subheaders with thinking loader -----
             ag = self._docker_state.get("agent_container")
-            ctr = f"  ·  container {ag['id']} ({ag['uptime']})" if ag else "  ·  no container"
-            streaming = "streaming" if (
-                _file_age(self.paths["raw_export"]) is not None
-                and (_file_age(self.paths["raw_export"]) or 0) < 2.0
-            ) else "idle"
-            pending = _latest_pending_tool(agent_events)
-            activity = f"  ·  doing: {pending}" if pending else ""
-            if activity and len(activity) > 60:
-                activity = activity[:57] + "…"
-            self.query_one("#agent-sub", Static).update(
-                Text(f"{streaming}  ·  turns: {agent_turns}{activity}{ctr}", style="dim")
-            )
-
-            # ----- SIM subheader -----
             sm = self._docker_state.get("sim_container")
-            sim_ctr = f"  ·  container {sm['id']} ({sm['uptime']})" if sm else "  ·  no container"
-            sim_streaming = "streaming" if (
-                _file_age(self.paths["sim_raw_export"]) is not None
-                and (_file_age(self.paths["sim_raw_export"]) or 0) < 2.0
-            ) else "idle"
-            sim_pending = _latest_pending_tool(sim_events)
-            sim_activity = f"  ·  doing: {sim_pending}" if sim_pending else ""
-            if sim_activity and len(sim_activity) > 60:
-                sim_activity = sim_activity[:57] + "…"
+            agent_state = _activity_state(
+                container_present=bool(ag),
+                file_age=_file_age(self.paths["raw_export"]),
+            )
+            sim_state = _activity_state(
+                container_present=bool(sm),
+                file_age=_file_age(self.paths["sim_raw_export"]),
+            )
+            # Tick the spinner only while at least one pane is non-idle;
+            # otherwise a finished run would keep visually animating
+            # forever, which contradicts the elapsed-freeze policy below.
+            if agent_state != "idle" or sim_state != "idle":
+                self._spin_tick = (self._spin_tick + 1) % len(_SPINNER_FRAMES)
+            spinner = _SPINNER_FRAMES[self._spin_tick]
+
+            self.query_one("#agent-sub", Static).update(
+                _render_pane_subheader(
+                    state=agent_state,
+                    spinner=spinner,
+                    turns=agent_turns,
+                    pending_tool=_latest_pending_tool(agent_events),
+                    container_id=ag["id"] if ag else None,
+                    container_uptime=ag["uptime"] if ag else None,
+                )
+            )
             self.query_one("#sim-sub", Static).update(
-                Text(f"{sim_streaming}  ·  turns: {sim_turns}{sim_activity}{sim_ctr}", style="dim")
+                _render_pane_subheader(
+                    state=sim_state,
+                    spinner=spinner,
+                    turns=sim_turns,
+                    pending_tool=_latest_pending_tool(sim_events),
+                    container_id=sm["id"] if sm else None,
+                    container_uptime=sm["uptime"] if sm else None,
+                )
             )
 
             # ----- Pane titles + active highlight -----
