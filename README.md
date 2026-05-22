@@ -23,6 +23,16 @@ GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
 
 Add `--check-cmd "<command>"` (repeatable) if your target has a fast deterministic check worth gating publication on — see [ecosystem examples](#executable-checks-per-ecosystem) below. Without it, publication still requires SIM approval + L0 hard gates (diff scan, diff-hash match, clean worktree).
 
+**Shortcut:** a [`justfile`](justfile) at the repo root wraps the long form. `brew install just`, then:
+
+```bash
+just                                                          # list recipes
+just tui-run ~/code/<target> git@github.com:<you>/<target>.git
+just deepdeep tui-run ~/code/<target> git@github.com:<you>/<target>.git
+```
+
+`deepdeep` is a model preset that pins both `--agent-model` and `--sim-model` to `openrouter/deepseek/deepseek-v4-flash`. Add per-target convenience recipes (e.g. `just my-repo`) and more presets as the workflow grows.
+
 **One-time setup** (auto-handled on first run):
 - Runtime image `contremaitre-agent:latest` builds itself on first opencode-mode run. ~3 min on a warm host.
 - TUI requires `textual`: `python3 -m pip install --user textual` (skip if you'd rather watch via JSONL tail).
