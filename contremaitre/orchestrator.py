@@ -23,11 +23,12 @@ import any external orchestration substrate at runtime.
 from __future__ import annotations
 
 import shutil
+import signal
 import time
 from pathlib import Path
 
 from . import prompts
-from .actors import ActorRunner, make_actor_runner
+from .actors import ActorRunner, _kill_orphan_containers_by_mount, make_actor_runner
 from .checks import CheckResult, run_checks
 from .costs import estimate_recorded_cost_usd
 from .diffscan import DiffScanResult, scan_diff
@@ -36,6 +37,7 @@ from .evaluator import (
     sim_review_summary,
     write_eval_reports,
 )
+from .extract import extract_run_artifacts
 from .git_utils import GitRepo
 from .jsonlog import append_jsonl, append_text_event, append_transcript, write_json
 from .models import (
@@ -73,6 +75,22 @@ class Orchestrator:
         self._prepare_run_dir()
         repo = GitRepo(self.config.repo, self.paths.git_log)
         branch = f"{validate_slug(self.config.branch_prefix, 'branch prefix')}/{self.run_id}"
+
+        # SIGTERM handler: when the operator kills us, dump whatever state we
+        # have to disk before exiting so the run isn't a black hole.
+        # (SIGKILL still can't be caught.)
+        prior_handler = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm(_signum, _frame):
+            append_jsonl(
+                self.paths.recoveries,
+                {"kind": "sigterm_emergency_write", "turns": self.turns},
+            )
+            self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, "killed_via_sigterm")
+            self._extract_artifacts_safely()
+            raise SystemExit(143)
+
+        signal.signal(signal.SIGTERM, _on_sigterm)
         try:
             enforce_preflight(self.config, self.paths)
             self._transition(State.INIT, "creating worktree")
@@ -95,8 +113,18 @@ class Orchestrator:
                 reason=str(exc),
             )
         finally:
+            self._extract_artifacts_safely()
             if not self.config.keep_worktree:
                 self._cleanup_worktree()
+            signal.signal(signal.SIGTERM, prior_handler)
+
+    def _extract_artifacts_safely(self) -> None:
+        """Run the subagent + files extractor; swallow extraction errors."""
+
+        try:
+            extract_run_artifacts(self.paths)
+        except Exception as exc:
+            append_jsonl(self.paths.recoveries, {"kind": "extract_failed", "error": repr(exc)})
 
     def _review_rounds(self, *, actor: ActorRunner, worktree_git: GitRepo, branch: str) -> RunResult:
         last_required_changes: list[str] = []
@@ -671,6 +699,15 @@ class Orchestrator:
     def _cleanup_worktree(self) -> None:
         if not self.paths.worktree.name.startswith("contremaitre-"):
             return
+        # Kill any container still holding this worktree as a mount before we
+        # try to remove it — docker --rm doesn't always tear down on parent
+        # death, and a held mount makes `worktree remove` and rmtree fail.
+        killed = _kill_orphan_containers_by_mount(self.paths.worktree)
+        if killed:
+            append_jsonl(
+                self.paths.recoveries,
+                {"kind": "orphan_container_kill", "reason": "cleanup", "container_ids": killed},
+            )
         source_repo = GitRepo(self.config.repo, self.paths.git_log)
         if self.paths.worktree.exists():
             source_repo.run("worktree", "remove", "--force", str(self.paths.worktree), check=False)

@@ -120,6 +120,9 @@ class RunPaths:
     judge_attempts: Path
     cost_report: Path
     preflight_report: Path
+    recoveries: Path
+    subagents_dir: Path
+    extracted_files_dir: Path
 
 
 @dataclass(frozen=True)

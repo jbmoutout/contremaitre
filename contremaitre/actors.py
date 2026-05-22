@@ -262,8 +262,17 @@ class OpencodeActorRunner:
                 _, stderr_bytes = proc.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired as exc:
                 _kill_container_from_cidfile(self._latest_cidfile(role))
+                killed = _kill_orphan_containers_by_mount(self.worktree)
                 proc.kill()
                 _, stderr_bytes = proc.communicate()
+                if killed:
+                    _record_recovery(
+                        self.paths,
+                        kind="orphan_container_kill",
+                        role=role,
+                        reason="timeout",
+                        container_ids=killed,
+                    )
                 raise ActorError(f"{role} opencode timed out after {timeout_seconds}s") from exc
         stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
         if proc.returncode != 0:
@@ -273,7 +282,10 @@ class OpencodeActorRunner:
             setattr(self, session_attr, new_session_id)
         post_text_count = _count_text_events(raw_export)
         if post_text_count == pre_text_count:
-            error = _latest_error(raw_export)
+            # Provider/API error scoped to events emitted DURING this turn
+            # (after pre_text_count). Avoids tripping on stale errors from
+            # earlier turns left in the multi-turn stream.
+            error = _latest_error_after_text_count(raw_export, pre_text_count)
             if error:
                 raise ActorError(f"{role} opencode emitted error without text: {error[:500]}")
             # opencode silent-stall: the text part landed in opencode's sqlite
@@ -287,15 +299,13 @@ class OpencodeActorRunner:
                 _append_synthetic_text_event(
                     raw_export, recovered, msg_id, session_id or new_session_id
                 )
-                append_jsonl(
-                    self.paths.guardrail_events,
-                    {
-                        "event": "sqlite_recovery",
-                        "role": role,
-                        "recovered_chars": len(recovered),
-                        "message_id": msg_id,
-                        "step_finish_completed": completed,
-                    },
+                _record_recovery(
+                    self.paths,
+                    kind="sqlite_recovery_silent_stall",
+                    role=role,
+                    recovered_chars=len(recovered),
+                    message_id=msg_id,
+                    step_finish_completed=completed,
                 )
                 return ActorOutput(
                     stdout=recovered,
@@ -468,11 +478,85 @@ def _latest_session_id(path: Path) -> str | None:
     return None
 
 
-def _latest_error(path: Path) -> str | None:
-    for event in reversed(_read_events(path)):
+def _latest_error_after_text_count(path: Path, baseline_text_count: int) -> str | None:
+    """Return the latest error event that arrived AFTER the Nth text event.
+
+    Multi-turn streams accumulate errors from old turns. When checking
+    whether the *current* turn failed, ignore errors from prior turns.
+    """
+
+    events = _read_events(path)
+    seen_text = 0
+    cutoff_idx = 0
+    for i, event in enumerate(events):
+        if event.get("type") == "text":
+            seen_text += 1
+            if seen_text > baseline_text_count:
+                cutoff_idx = i
+                break
+    else:
+        # No new text event landed; everything after `baseline_text_count` text events counts.
+        cutoff_idx = 0
+        seen_text = 0
+        for i, event in enumerate(events):
+            if event.get("type") == "text":
+                seen_text += 1
+            if seen_text >= baseline_text_count:
+                cutoff_idx = i + 1
+                break
+    for event in reversed(events[cutoff_idx:]):
         if event.get("type") == "error":
             return json.dumps(event, sort_keys=True)
     return None
+
+
+def _record_recovery(paths: RunPaths, *, kind: str, **fields) -> None:
+    """Append a recovery event to both recoveries.jsonl and guardrail_events.
+
+    `recoveries.jsonl` is the forensic capture for sqlite recoveries, orphan
+    kills, SIGTERM emergency writes — events that aren't normal control-plane
+    flow but matter for post-mortem analysis. Mirrored in guardrail_events
+    so a single tail catches them too.
+    """
+
+    record = {"kind": kind, **fields}
+    append_jsonl(paths.recoveries, record)
+    append_jsonl(paths.guardrail_events, {"event": f"recovery_{kind}", **fields})
+
+
+def _kill_orphan_containers_by_mount(mount_path: Path) -> list[str]:
+    """Kill any docker container that has `mount_path` in its mounts.
+
+    `docker run --rm` + python proc.kill() doesn't guarantee the container
+    exits — the docker daemon may keep it alive. Scan `docker ps` for any
+    container whose mount string contains our path and kill them by id.
+    Returns the list of killed container ids.
+    """
+
+    killed: list[str] = []
+    try:
+        proc = subprocess.run(
+            ["docker", "ps", "--no-trunc", "--format", "{{.ID}}\t{{.Mounts}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return killed
+    if proc.returncode != 0:
+        return killed
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        cid, mounts = parts
+        if str(mount_path) in mounts:
+            try:
+                subprocess.run(["docker", "kill", cid], capture_output=True, timeout=10)
+                killed.append(cid)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+    return killed
 
 
 def _recover_text_from_sqlite(

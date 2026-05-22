@@ -78,4 +78,7 @@ def build_run_paths(runs_root: Path, run_id: str) -> RunPaths:
         judge_attempts=eval_dir / "judge_attempts.jsonl",
         cost_report=eval_dir / "cost_report.json",
         preflight_report=eval_dir / "preflight_report.json",
+        recoveries=run_dir / "recoveries.jsonl",
+        subagents_dir=run_dir / "subagents",
+        extracted_files_dir=run_dir / "extracted_files",
     )
