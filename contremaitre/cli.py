@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -129,6 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
     image_build.add_argument("--no-cache", action="store_true")
     image_build.set_defaults(func=_image_build_cmd)
 
+    cleanup_p = sub.add_parser("cleanup", help="Prune stale per-run docker volumes, leftover worktrees, and dangling images")
+    cleanup_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
+    cleanup_p.add_argument("--dry-run", action="store_true", help="Report what would be removed without touching anything")
+    cleanup_p.add_argument("--skip-images", action="store_true", help="Skip docker image prune (volumes + worktrees only)")
+    cleanup_p.set_defaults(func=_cleanup_cmd)
+
     tui_p = sub.add_parser("tui", help="Live Textual TUI (requires `textual`)")
     tui_sub = tui_p.add_subparsers(dest="tui_command", required=True)
     tui_run = tui_sub.add_parser("run", help="Spawn `contremaitre run` and attach the TUI to its run dir")
@@ -193,6 +200,133 @@ def _ensure_default_image_built(config: RunConfig) -> int:
     return _build_image_inline(image_name=config.docker_image, dockerfile=_DEFAULT_DOCKERFILE, no_cache=False)
 
 
+_VOLUME_NAME_RE = re.compile(r"^contremaitre-(\d{8}-\d{6}-[A-Za-z0-9._-]+)-node-modules$")
+_WORKTREE_NAME_RE = re.compile(r"^contremaitre-(\d{8}-\d{6}-[A-Za-z0-9._-]+)$")
+
+
+def _cleanup_cmd(args: argparse.Namespace) -> int:
+    """Prune stale per-run docker volumes + leftover worktrees + dangling images.
+
+    A volume/worktree is "stale" when its corresponding run-dir under
+    `--runs-root` no longer exists — i.e. the orchestrator's `finally`
+    didn't get to clean them up (typically because the parent was
+    SIGKILL'd or the host rebooted mid-run).
+    """
+
+    runs_root = args.runs_root.resolve()
+    dry = args.dry_run
+
+    stale_volumes = _scan_stale_volumes(runs_root)
+    stale_worktrees = _scan_stale_worktrees(runs_root)
+    dangling_images = [] if args.skip_images else _scan_dangling_images()
+
+    if not stale_volumes and not stale_worktrees and not dangling_images:
+        print("contremaitre cleanup: nothing to do")
+        return 0
+
+    action = "would remove (dry-run)" if dry else "removing"
+    print(f"contremaitre cleanup: {action}")
+    for name, reason in stale_volumes:
+        print(f"  volume   {name}  ({reason})")
+    for path in stale_worktrees:
+        print(f"  worktree {path}")
+    if dangling_images:
+        print(f"  {len(dangling_images)} dangling image(s)")
+
+    if dry:
+        return 0
+
+    removed_vols = 0
+    for name, _ in stale_volumes:
+        proc = subprocess.run(
+            ["docker", "volume", "rm", "-f", name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            removed_vols += 1
+
+    removed_wts = 0
+    for path in stale_worktrees:
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(path, ignore_errors=True)
+            removed_wts += 1
+        except OSError:
+            pass
+
+    if dangling_images:
+        _prune_dangling_images()
+
+    print(
+        f"contremaitre cleanup: removed {removed_vols} volume(s), "
+        f"{removed_wts} worktree(s)"
+        + (f", pruned {len(dangling_images)} dangling image(s)" if dangling_images else "")
+    )
+    return 0
+
+
+def _scan_stale_volumes(runs_root: Path) -> list[tuple[str, str]]:
+    """Return [(volume_name, reason), …] for contremaitre-* volumes whose run dir is gone."""
+
+    try:
+        proc = subprocess.run(
+            ["docker", "volume", "ls", "-q", "--filter", "name=contremaitre-"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    stale: list[tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        match = _VOLUME_NAME_RE.match(name)
+        if not match:
+            # Name has our prefix but doesn't fit the per-run pattern; skip
+            # rather than risk killing something we don't recognize.
+            continue
+        run_id = match.group(1)
+        run_dir = runs_root / run_id
+        if not run_dir.exists():
+            stale.append((name, f"run dir gone: {run_dir}"))
+    return stale
+
+
+def _scan_stale_worktrees(runs_root: Path) -> list[Path]:
+    """Return /tmp/contremaitre-* directories whose run dir is gone."""
+
+    stale: list[Path] = []
+    for tmp_root in (Path("/tmp"), Path("/private/tmp")):
+        if not tmp_root.exists():
+            continue
+        for path in tmp_root.glob("contremaitre-*"):
+            if not path.is_dir():
+                continue
+            match = _WORKTREE_NAME_RE.match(path.name)
+            if not match:
+                continue
+            run_id = match.group(1)
+            run_dir = runs_root / run_id
+            if not run_dir.exists() and path not in stale:
+                stale.append(path)
+    return stale
+
+
+def _scan_dangling_images() -> list[str]:
+    try:
+        proc = subprocess.run(
+            ["docker", "images", "-q", "--filter", "dangling=true"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def _build_image_inline(*, image_name: str, dockerfile: Path, no_cache: bool) -> int:
     dockerfile = dockerfile.resolve()
     if not dockerfile.exists():
@@ -209,7 +343,25 @@ def _build_image_inline(*, image_name: str, dockerfile: Path, no_cache: bool) ->
     except FileNotFoundError:
         print("contremaitre: docker binary not found in PATH", file=sys.stderr)
         return 1
+    if proc.returncode == 0:
+        _prune_dangling_images()
     return proc.returncode
+
+
+def _prune_dangling_images() -> None:
+    """Remove dangling images. Rebuilds with the same tag orphan the prior
+    image as <none>:<none>; we don't want those accumulating across rebuilds.
+    """
+
+    try:
+        subprocess.run(
+            ["docker", "image", "prune", "-f"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _doctor_cmd(args: argparse.Namespace) -> int:

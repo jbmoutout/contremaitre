@@ -126,6 +126,19 @@ python3 -m contremaitre tui attach .contremaitre/runs/20260522-023626-first-live
 
 `Ctrl-C` quits the TUI (and sends SIGTERM to the spawned `run` so the orchestrator's emergency-flush handler fires).
 
+## Cleanup
+
+Each opencode-mode run creates a per-run named docker volume (`contremaitre-<run-id>-node-modules`) and a worktree at `/tmp/contremaitre-<run-id>/`. Both are removed by the orchestrator in `finally`. `image build` prunes dangling images after a successful rebuild.
+
+If a parent gets SIGKILL'd mid-run, leftovers can survive. Sweep them with:
+
+```bash
+python3 -m contremaitre cleanup --dry-run   # see what would be removed
+python3 -m contremaitre cleanup             # actually remove
+```
+
+Cleans: stale per-run docker volumes (run dir gone), leftover `/tmp/contremaitre-*` worktrees, dangling docker images (`--skip-images` to keep).
+
 ## Tests
 
 ```bash

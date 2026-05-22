@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import shutil
 import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -714,6 +715,37 @@ class Orchestrator:
         if self.paths.worktree.exists():
             shutil.rmtree(self.paths.worktree)
         source_repo.run("worktree", "prune", check=False)
+        self._cleanup_docker_volume()
+
+    def _cleanup_docker_volume(self) -> None:
+        """Remove the per-run named volume backing /app/node_modules.
+
+        Containers have already exited (--rm) and any orphans were killed in
+        _cleanup_worktree, so the volume is no longer in use. Best-effort:
+        swallow failures so cleanup doesn't mask the real verdict.
+        """
+
+        # Fake-mode runs never touched docker.
+        from .models import ActorMode
+
+        if self.config.actor_mode != ActorMode.OPENCODE:
+            return
+        try:
+            proc = subprocess.run(
+                ["docker", "volume", "rm", "-f", self.paths.docker_volume],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        # `docker volume rm -f` exits 0 even for nonexistent volumes; the
+        # name appears in stdout only on actual removal.
+        if proc.returncode == 0 and self.paths.docker_volume in proc.stdout:
+            append_jsonl(
+                self.paths.recoveries,
+                {"kind": "volume_removed", "name": self.paths.docker_volume},
+            )
 
 
 def run(config: RunConfig) -> RunResult:

@@ -123,6 +123,7 @@ class RunPaths:
     recoveries: Path
     subagents_dir: Path
     extracted_files_dir: Path
+    docker_volume: str
 
 
 @dataclass(frozen=True)

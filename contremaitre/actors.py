@@ -401,8 +401,11 @@ def build_docker_command(
             f"{state_dir}:/root/.local/share/opencode",
             "-v",
             f"{worktree}:/app:{mount_mode}",
+            # Named per-run volume shared by agent + SIM containers. Removed
+            # in the orchestrator's _cleanup_worktree path. Replaces the
+            # anonymous-volume pattern that leaked one volume per turn.
             "-v",
-            "/app/node_modules",
+            f"{paths.docker_volume}:/app/node_modules",
         ]
     )
     if config.opencode_config:
