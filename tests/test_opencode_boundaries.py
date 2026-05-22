@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from contremaitre import prompts
-from contremaitre.actors import _kill_container_from_cidfile, build_docker_command
+from contremaitre.actors import build_docker_command
 from contremaitre.git_utils import GitRepo
 from contremaitre.models import ActorMode, PublishMode, RunConfig
 from contremaitre.orchestrator import Orchestrator
@@ -74,12 +74,17 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 prompt="hello",
                 session_id="sess",
                 extra_mounts=[],
-                cidfile=root / "container.cid",
+                role="agent",
             )
 
             joined = " ".join(cmd)
-            self.assertIn("--cidfile", cmd)
-            self.assertIn(str(root / "container.cid"), cmd)
+            # Detached + label-driven supervision (Phase 3): docker daemon
+            # owns the container lifecycle, signal handlers stop by label.
+            self.assertEqual(cmd[:3], ["docker", "run", "-d"])
+            self.assertIn(f"contremaitre.run-id={paths.run_id}", cmd)
+            self.assertIn("contremaitre.role=agent", cmd)
+            self.assertNotIn("--cidfile", cmd)
+            self.assertNotIn("--rm", cmd)
             self.assertIn(f"{worktree}:/app:ro", joined)
             self.assertIn("OPENROUTER_API_KEY", cmd)
             self.assertNotIn("secret-key", joined)
@@ -116,21 +121,12 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 prompt="hello",
                 session_id=None,
                 extra_mounts=[],
+                role="agent",
             )
 
             self.assertIn("HTTP_PROXY", cmd)
             self.assertEqual(env["HTTP_PROXY"], "http://proxy.local:8080")
             self.assertNotIn("http://proxy.local:8080", " ".join(cmd))
-
-    def test_timeout_cleanup_kills_container_from_cidfile(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cidfile = Path(tmp) / "container.cid"
-            cidfile.write_text("abc123\n", encoding="utf-8")
-            with patch("contremaitre.actors.subprocess.run") as run:
-                _kill_container_from_cidfile(cidfile)
-
-            run.assert_called_once()
-            self.assertEqual(run.call_args.args[0], ["docker", "kill", "abc123"])
 
     def test_orchestrator_commits_actor_left_changes_from_host(self):
         with tempfile.TemporaryDirectory() as tmp:

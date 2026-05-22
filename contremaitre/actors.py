@@ -256,7 +256,7 @@ class OpencodeActorRunner:
             prompt=prompt,
             session_id=session_id,
             extra_mounts=extra_mounts or [],
-            cidfile=self._cidfile(role),
+            role=role,
         )
         append_jsonl(
             self.paths.guardrail_events,
@@ -270,27 +270,15 @@ class OpencodeActorRunner:
             },
         )
         raw_export.parent.mkdir(parents=True, exist_ok=True)
-        with raw_export.open("ab") as stdout_f:
-            proc = subprocess.Popen(cmd, stdout=stdout_f, stderr=subprocess.PIPE, env=env)
-            try:
-                _, stderr_bytes = proc.communicate(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired as exc:
-                _kill_container_from_cidfile(self._latest_cidfile(role))
-                killed = _kill_orphan_containers_by_mount(self.worktree)
-                proc.kill()
-                _, stderr_bytes = proc.communicate()
-                if killed:
-                    _record_recovery(
-                        self.paths,
-                        kind=events.ORPHAN_CONTAINER_KILL,
-                        role=role,
-                        reason="timeout",
-                        container_ids=killed,
-                    )
-                raise ActorError(f"{role} opencode timed out after {timeout_seconds}s") from exc
-        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-        if proc.returncode != 0:
-            raise ActorError(f"{role} opencode exited {proc.returncode}: {stderr[:500]}")
+        returncode, stderr = _run_detached_container(
+            cmd=cmd,
+            env=env,
+            stdout_path=raw_export,
+            timeout_seconds=timeout_seconds,
+            role=role,
+        )
+        if returncode != 0:
+            raise ActorError(f"{role} opencode exited {returncode}: {stderr[:500]}")
         new_session_id = _latest_session_id(raw_export)
         if new_session_id and session_attr:
             setattr(self, session_attr, new_session_id)
@@ -322,13 +310,13 @@ class OpencodeActorRunner:
                     step_finish_completed=completed,
                 )
                 self._append_transcript(role=role, text=recovered)
-                return ActorOutput(text=recovered, stderr=stderr, returncode=proc.returncode)
+                return ActorOutput(text=recovered, stderr=stderr, returncode=returncode)
             raise ActorError(
                 f"{role} opencode emitted no text and sqlite recovery found nothing"
             )
         latest = _latest_text(raw_export)
         self._append_transcript(role=role, text=latest)
-        return ActorOutput(text=latest, stderr=stderr, returncode=proc.returncode)
+        return ActorOutput(text=latest, stderr=stderr, returncode=returncode)
 
     def _append_transcript(self, *, role: str, text: str) -> None:
         # Roles: "agent" / "sim" / "review". The review role is the SIM doing
@@ -337,17 +325,6 @@ class OpencodeActorRunner:
         phase = "REVIEW" if role == "review" else "WORK"
         speaker = "sim" if role == "review" else role
         append_transcript(self.paths.transcript, speaker=speaker, phase=phase, text=text)
-
-    def _cidfile(self, role: str) -> Path:
-        cidfile = self.paths.run_dir / f"opencode-{role}-{time.monotonic_ns()}.cid"
-        _write_latest_cidfile_pointer(self.paths.run_dir, role, cidfile)
-        return cidfile
-
-    def _latest_cidfile(self, role: str) -> Path:
-        pointer = self.paths.run_dir / f"opencode-{role}.latest-cidfile"
-        if pointer.exists():
-            return Path(pointer.read_text(encoding="utf-8").strip())
-        return self.paths.run_dir / f"opencode-{role}.cid"
 
 
 def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
@@ -372,8 +349,8 @@ def build_docker_command(
     model: str,
     prompt: str,
     session_id: str | None,
+    role: str,
     extra_mounts: list[tuple[Path, str, str]] | None = None,
-    cidfile: Path | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     env = os.environ.copy()
     env_var = config.openrouter_env_var
@@ -403,10 +380,13 @@ def build_docker_command(
         opencode_cmd.extend(["--session", session_id])
     opencode_cmd.append(prompt)
 
-    cmd = ["docker", "run", "--rm"]
-    if cidfile:
-        cidfile.unlink(missing_ok=True)
-        cmd.extend(["--cidfile", str(cidfile)])
+    # Detached so the container's lifecycle is owned by the docker daemon,
+    # not by this python process: terminal close / SIGHUP no longer
+    # orphans the run, signal handlers can `docker stop` by label, and
+    # we get the container id back on stdout without a cidfile.
+    cmd = ["docker", "run", "-d"]
+    cmd.extend(["--label", f"contremaitre.run-id={paths.run_id}"])
+    cmd.extend(["--label", f"contremaitre.role={role}"])
     if config.container_user:
         cmd.extend(["--user", config.container_user])
     if config.docker_network:
@@ -438,20 +418,64 @@ def build_docker_command(
     return cmd, env
 
 
-def _write_latest_cidfile_pointer(run_dir: Path, role: str, cidfile: Path) -> None:
-    (run_dir / f"opencode-{role}.latest-cidfile").write_text(str(cidfile), encoding="utf-8")
+def _run_detached_container(
+    *,
+    cmd: list[str],
+    env: dict[str, str],
+    stdout_path: Path,
+    timeout_seconds: int,
+    role: str,
+) -> tuple[int, str]:
+    """Start the detached container, stream its logs, wait for exit.
 
+    Returns (returncode, stderr). On timeout: docker stop the container,
+    then raise — same surface the previous Popen-based runner had so the
+    orchestrator's caller doesn't need to know about the detached model.
+    """
 
-def _kill_container_from_cidfile(cidfile: Path) -> None:
-    if not cidfile.exists():
-        return
-    container_id = cidfile.read_text(encoding="utf-8").strip()
+    create = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
+    if create.returncode != 0:
+        raise ActorError(f"{role} docker run -d failed: {create.stderr[:500]}")
+    container_id = create.stdout.strip()
     if not container_id:
-        return
+        raise ActorError(f"{role} docker run -d produced no container id")
+
+    log_proc: subprocess.Popen[bytes] | None = None
     try:
-        subprocess.run(["docker", "kill", container_id], capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.TimeoutExpired):
-        return
+        with stdout_path.open("ab") as stdout_f:
+            log_proc = subprocess.Popen(
+                ["docker", "logs", "-f", container_id],
+                stdout=stdout_f,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait = subprocess.run(
+                    ["docker", "wait", container_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                subprocess.run(
+                    ["docker", "stop", "-t", "5", container_id],
+                    capture_output=True,
+                    timeout=15,
+                )
+                log_proc.kill()
+                raise ActorError(f"{role} opencode timed out after {timeout_seconds}s") from exc
+            try:
+                log_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log_proc.kill()
+            stderr_bytes = log_proc.stderr.read() if log_proc.stderr else b""
+        returncode = int(wait.stdout.strip() or "1")
+        return returncode, stderr_bytes.decode("utf-8", errors="replace")
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", container_id],
+            capture_output=True,
+            timeout=15,
+        )
 
 
 def redact_command(cmd: list[str]) -> list[str]:
@@ -535,8 +559,8 @@ def _latest_error_after_text_count(path: Path, baseline_text_count: int) -> str 
 def _record_recovery(paths: RunPaths, *, kind: str, **fields) -> None:
     """Append a recovery event to both recoveries.jsonl and guardrail_events.
 
-    `recoveries.jsonl` is the forensic capture for sqlite recoveries, orphan
-    kills, SIGTERM emergency writes — events that aren't normal control-plane
+    `recoveries.jsonl` is the forensic capture for sqlite recoveries +
+    SIGTERM emergency writes — events that aren't normal control-plane
     flow but matter for post-mortem analysis. Mirrored in guardrail_events
     so a single tail catches them too.
     """
@@ -544,41 +568,6 @@ def _record_recovery(paths: RunPaths, *, kind: str, **fields) -> None:
     record = {"kind": kind, **fields}
     append_jsonl(paths.recoveries, record)
     append_jsonl(paths.guardrail_events, {"event": f"recovery_{kind}", **fields})
-
-
-def _kill_orphan_containers_by_mount(mount_path: Path) -> list[str]:
-    """Kill any docker container that has `mount_path` in its mounts.
-
-    `docker run --rm` + python proc.kill() doesn't guarantee the container
-    exits — the docker daemon may keep it alive. Scan `docker ps` for any
-    container whose mount string contains our path and kill them by id.
-    Returns the list of killed container ids.
-    """
-
-    killed: list[str] = []
-    try:
-        proc = subprocess.run(
-            ["docker", "ps", "--no-trunc", "--format", "{{.ID}}\t{{.Mounts}}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return killed
-    if proc.returncode != 0:
-        return killed
-    for line in proc.stdout.splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        cid, mounts = parts
-        if str(mount_path) in mounts:
-            try:
-                subprocess.run(["docker", "kill", cid], capture_output=True, timeout=10)
-                killed.append(cid)
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-    return killed
 
 
 def _recover_text_from_sqlite(

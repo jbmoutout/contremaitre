@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import events, prompts
-from .actors import ActorRunner, _kill_orphan_containers_by_mount, make_actor_runner
+from .actors import ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .costs import estimate_recorded_cost_usd
 from .diffscan import DiffScanResult, scan_diff
@@ -94,31 +94,26 @@ class Orchestrator:
         repo = GitRepo(self.config.repo, self.paths.git_log)
         branch = f"{validate_slug(self.config.branch_prefix, 'branch prefix')}/{self.run_id}"
 
-        # Signal handler for operator-initiated death.
-        #
-        # We catch SIGTERM and SIGHUP because both kill the process without
-        # running `finally` by default. SIGHUP is the silent killer — when
-        # the operator closes the terminal window or an SSH session drops,
-        # the shell sends SIGHUP to the whole process group, Python's
-        # default disposition is to terminate, and the run becomes a black
-        # hole: committed worktree on disk, no stats.json, no recoveries.
-        # We chose this fix after diagnosing exactly that failure mode.
+        # Signal handler for operator-initiated death. SIGTERM is caught so
+        # the in-flight container is `docker stop`'d (by label), the final
+        # stats are written, and the artifact extractor still runs. SIGHUP
+        # is intentionally not caught: detached + labeled containers are
+        # recoverable on the next run via `cleanup --deps` / a label scan,
+        # so we don't pay the complexity of two handlers for a rarer path.
         # SIGKILL remains uncatchable (intentional kernel-level kill).
         prior_term = signal.getsignal(signal.SIGTERM)
-        prior_hup = signal.getsignal(signal.SIGHUP)
 
-        def _on_kill_signal(signum, _frame):
-            name = "sighup" if signum == signal.SIGHUP else "sigterm"
+        def _on_sigterm(_signum, _frame):
+            self._stop_run_containers()
             append_jsonl(
                 self.paths.recoveries,
-                {"kind": events.SIGTERM_EMERGENCY_WRITE, "turns": self.turns, "signal": name},
+                {"kind": events.SIGTERM_EMERGENCY_WRITE, "turns": self.turns, "signal": "sigterm"},
             )
-            self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, f"killed_via_{name}")
+            self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, "killed_via_sigterm")
             self._extract_artifacts_safely()
             raise SystemExit(143)
 
-        signal.signal(signal.SIGTERM, _on_kill_signal)
-        signal.signal(signal.SIGHUP, _on_kill_signal)
+        signal.signal(signal.SIGTERM, _on_sigterm)
         try:
             enforce_preflight(self.config, self.paths)
             self._transition(State.INIT, "creating worktree")
@@ -155,7 +150,6 @@ class Orchestrator:
             if not self.config.keep_worktree:
                 self._cleanup_worktree()
             signal.signal(signal.SIGTERM, prior_term)
-            signal.signal(signal.SIGHUP, prior_hup)
 
     def _extract_artifacts_safely(self) -> None:
         """Run the subagent + files extractor; swallow extraction errors."""
@@ -752,21 +746,42 @@ class Orchestrator:
     def _cleanup_worktree(self) -> None:
         if not self.paths.worktree.name.startswith("contremaitre-"):
             return
-        # Kill any container still holding this worktree as a mount before we
-        # try to remove it — docker --rm doesn't always tear down on parent
-        # death, and a held mount makes `worktree remove` and rmtree fail.
-        killed = _kill_orphan_containers_by_mount(self.paths.worktree)
-        if killed:
-            append_jsonl(
-                self.paths.recoveries,
-                {"kind": events.ORPHAN_CONTAINER_KILL, "reason": "cleanup", "container_ids": killed},
-            )
+        # Stop any container still labeled for this run before removing
+        # the worktree — a container with the worktree mounted blocks
+        # `worktree remove` / rmtree. Normal flow on the happy path is a
+        # no-op (each turn's container is already removed in its
+        # `finally`); this catches the timeout / signal paths.
+        self._stop_run_containers()
         source_repo = GitRepo(self.config.repo, self.paths.git_log)
         if self.paths.worktree.exists():
             source_repo.run("worktree", "remove", "--force", str(self.paths.worktree), check=False)
         if self.paths.worktree.exists():
             shutil.rmtree(self.paths.worktree)
         source_repo.run("worktree", "prune", check=False)
+
+    def _stop_run_containers(self) -> None:
+        """`docker stop` every container labeled with this run-id. Best effort.
+
+        Containers are launched detached + labeled `contremaitre.run-id=<id>`,
+        so signal handlers / cleanup can find and stop them by label without
+        tracking individual container ids.
+        """
+
+        import subprocess as _sp
+
+        try:
+            ps = _sp.run(
+                ["docker", "ps", "-q", "--filter", f"label=contremaitre.run-id={self.run_id}"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, _sp.TimeoutExpired):
+            return
+        ids = [line for line in ps.stdout.split() if line]
+        for cid in ids:
+            try:
+                _sp.run(["docker", "stop", "-t", "5", cid], capture_output=True, timeout=15)
+            except (OSError, _sp.TimeoutExpired):
+                continue
 
 
 def run(config: RunConfig) -> RunResult:

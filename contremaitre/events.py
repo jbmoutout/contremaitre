@@ -73,6 +73,5 @@ INFRA_FAILURE = "infra_failure"
 # _record_recovery so a single tail catches both surfaces.
 
 SQLITE_RECOVERY_SILENT_STALL = "sqlite_recovery_silent_stall"
-ORPHAN_CONTAINER_KILL = "orphan_container_kill"
 SIGTERM_EMERGENCY_WRITE = "sigterm_emergency_write"
 EXTRACT_FAILED = "extract_failed"
