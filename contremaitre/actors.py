@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .jsonlog import append_jsonl
+from .jsonlog import append_jsonl, append_text_event, append_transcript
 from .models import ActorMode, RunConfig, RunPaths
 
 
@@ -39,10 +39,16 @@ class ActorError(RuntimeError):
 
 @dataclass(frozen=True)
 class ActorOutput:
-    stdout: str
-    stderr: str
-    returncode: int
-    raw_export_written: bool = False
+    """One turn's text reply, after the actor has logged itself.
+
+    Adapters own raw_export.jsonl + transcript.md writes for their own turns.
+    The orchestrator just consumes `text` and moves on. No bool field telling
+    the caller "did I log for you?" — that was a leaking-abstraction marker.
+    """
+
+    text: str
+    stderr: str = ""
+    returncode: int = 0
 
 
 class ActorRunner(Protocol):
@@ -70,27 +76,31 @@ class FakeActorRunner:
     implementation, and `.contremaitre/IMPLEMENTATION_COMPLETE` on its first
     turn, so the orchestrator's WORK loop terminates immediately. The fake
     SIM emits canned strings or strict JSON verdicts based on scenario.
+
+    Owns its own raw_export + transcript writes. The orchestrator never
+    reaches into either file on behalf of this adapter.
     """
 
-    def __init__(self, *, worktree: Path, git_log: Path, agent_scenario: str, sim_scenario: str):
-        self.worktree = worktree
-        self.git_log = git_log
+    def __init__(self, *, paths: RunPaths, agent_scenario: str, sim_scenario: str):
+        self.paths = paths
         self.agent_scenario = agent_scenario
         self.sim_scenario = sim_scenario
 
     def agent_turn(self, message: str) -> ActorOutput:
         return self._fake(
-            [
-                "agent",
-                "--worktree",
-                str(self.worktree),
-                "--scenario",
-                self.agent_scenario,
-            ]
+            ["agent", "--worktree", str(self.paths.worktree), "--scenario", self.agent_scenario],
+            role="agent",
+            phase="WORK",
+            raw_export=self.paths.raw_export,
         )
 
     def sim_turn(self, message: str) -> ActorOutput:
-        return self._fake(["sim-turn"])
+        return self._fake(
+            ["sim-turn"],
+            role="sim",
+            phase="WORK",
+            raw_export=self.paths.sim_raw_export,
+        )
 
     def sim_review(
         self,
@@ -103,18 +113,17 @@ class FakeActorRunner:
         return self._fake(
             [
                 "sim-review",
-                "--diff-file",
-                str(diff_file),
-                "--settled-file",
-                str(settled_file),
-                "--scenario",
-                scenario,
-                "--attempt",
-                str(attempt),
-            ]
+                "--diff-file", str(diff_file),
+                "--settled-file", str(settled_file),
+                "--scenario", scenario,
+                "--attempt", str(attempt),
+            ],
+            role="sim",
+            phase="REVIEW",
+            raw_export=self.paths.sim_raw_export,
         )
 
-    def _fake(self, args: list[str]) -> ActorOutput:
+    def _fake(self, args: list[str], *, role: str, phase: str, raw_export: Path) -> ActorOutput:
         package_root = Path(__file__).resolve().parents[1]
         env = {
             **os.environ,
@@ -123,7 +132,7 @@ class FakeActorRunner:
         cmd = [sys.executable, "-m", "contremaitre.fake_actor", *args]
         proc = subprocess.run(
             cmd,
-            cwd=self.worktree,
+            cwd=self.paths.worktree,
             env=env,
             capture_output=True,
             text=True,
@@ -131,7 +140,11 @@ class FakeActorRunner:
         )
         if proc.returncode != 0:
             raise ActorError(f"fake actor failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}")
-        return ActorOutput(stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode)
+        text = proc.stdout.strip()
+        # Wrap in opencode's text-event shape so downstream readers see uniform JSONL.
+        append_text_event(raw_export, role=role, phase=phase, text=text)
+        append_transcript(self.paths.transcript, speaker=role, phase=phase, text=text)
+        return ActorOutput(text=text, stderr=proc.stderr, returncode=proc.returncode)
 
 
 # ----------------------------- Opencode ------------------------------
@@ -307,17 +320,22 @@ class OpencodeActorRunner:
                     message_id=msg_id,
                     step_finish_completed=completed,
                 )
-                return ActorOutput(
-                    stdout=recovered,
-                    stderr=stderr,
-                    returncode=proc.returncode,
-                    raw_export_written=True,
-                )
+                self._append_transcript(role=role, text=recovered)
+                return ActorOutput(text=recovered, stderr=stderr, returncode=proc.returncode)
             raise ActorError(
                 f"{role} opencode emitted no text and sqlite recovery found nothing"
             )
         latest = _latest_text(raw_export)
-        return ActorOutput(stdout=latest, stderr=stderr, returncode=proc.returncode, raw_export_written=True)
+        self._append_transcript(role=role, text=latest)
+        return ActorOutput(text=latest, stderr=stderr, returncode=proc.returncode)
+
+    def _append_transcript(self, *, role: str, text: str) -> None:
+        # Roles: "agent" / "sim" / "review". The review role is the SIM doing
+        # the review pass; transcript speaker stays "sim" so both WORK and
+        # REVIEW SIM turns interleave under one identity.
+        phase = "REVIEW" if role == "review" else "WORK"
+        speaker = "sim" if role == "review" else role
+        append_transcript(self.paths.transcript, speaker=speaker, phase=phase, text=text)
 
     def _cidfile(self, role: str) -> Path:
         cidfile = self.paths.run_dir / f"opencode-{role}-{time.monotonic_ns()}.cid"
@@ -334,8 +352,7 @@ class OpencodeActorRunner:
 def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
     if config.actor_mode == ActorMode.FAKE:
         return FakeActorRunner(
-            worktree=paths.worktree,
-            git_log=paths.git_log,
+            paths=paths,
             agent_scenario=config.agent_scenario,
             sim_scenario=config.sim_scenario,
         )

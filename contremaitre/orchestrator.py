@@ -40,7 +40,7 @@ from .evaluator import (
 )
 from .extract import extract_run_artifacts
 from .git_utils import GitRepo
-from .jsonlog import append_jsonl, append_text_event, append_transcript, write_json
+from .jsonlog import append_jsonl, write_json
 from .models import (
     ParsedVerdict,
     ReviewVerdict,
@@ -272,12 +272,10 @@ class Orchestrator:
         return "max_turns"
 
     def _agent_turn(self, actor: ActorRunner, message: str) -> str:
+        # Actor owns raw_export + transcript writes for its own turn.
         self._before_turn()
         output = actor.agent_turn(message)
-        text = output.stdout.strip()
-        if not output.raw_export_written:
-            append_text_event(self.paths.raw_export, role="agent", phase=State.WORK.value, text=text)
-        append_transcript(self.paths.transcript, speaker="agent", phase=State.WORK.value, text=text)
+        text = output.text
         worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
         label = f"after-agent-turn-{self.turns}"
         self._record_worktree_state(worktree_git, label)
@@ -285,13 +283,10 @@ class Orchestrator:
         return text
 
     def _sim_turn(self, actor: ActorRunner, message: str) -> str:
+        # Actor owns raw_export + transcript writes for its own turn.
         self._before_turn()
         output = actor.sim_turn(message)
-        text = output.stdout.strip()
-        if not output.raw_export_written:
-            append_text_event(self.paths.sim_raw_export, role="sim", phase=State.WORK.value, text=text)
-        append_transcript(self.paths.transcript, speaker="sim", phase=State.WORK.value, text=text)
-        return text
+        return output.text
 
     # ----- review pass -----
 
@@ -318,10 +313,7 @@ class Orchestrator:
                 scenario=self.config.sim_scenario,
                 attempt=attempt,
             )
-            raw = output.stdout.strip()
-            if not output.raw_export_written:
-                append_text_event(self.paths.sim_raw_export, role="sim", phase=State.REVIEW.value, text=raw)
-            append_transcript(self.paths.transcript, speaker="sim", phase=State.REVIEW.value, text=raw)
+            raw = output.text
             try:
                 parsed = parse_sim_verdict(raw)
                 break
