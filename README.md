@@ -64,9 +64,11 @@ just deepdeep tui-run main git@github.com:<you>/<target>.git
 
 | Flag | Default | When to change |
 |---|---|---|
-| `--agent-model` | `openrouter/deepseek/deepseek-v4-flash` | cheap workhorse; bump to `openrouter/anthropic/claude-opus-4.7` for thornier targets |
-| `--sim-model` | same | usually keep matched to agent-model |
+| `--agent-model` | omit to pick interactively at launch (numbered list of OpenRouter free models); CLI fallback is `openrouter/deepseek/deepseek-v4-flash` | bump to `openrouter/anthropic/claude-opus-4.7` for thornier targets |
+| `--sim-model` | omit to pick (second prompt; defaults to your agent pick) | usually keep matched to agent-model |
 | `--docker-image` | `contremaitre-agent:latest` | only when you've built a custom image |
+
+Passing both `--agent-model` and `--sim-model` skips the picker (this is how the `just deepdeep` preset works). The picker is also skipped when stdin isn't a TTY (CI / scripts) or when `--yes` is set.
 
 ### Cross-fork PR (target is upstream, not your fork)
 
