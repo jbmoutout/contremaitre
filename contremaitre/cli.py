@@ -412,7 +412,6 @@ def _launch_screen(
     agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
     sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
 
-    pr_target = getattr(args, "gh_repo", None) or getattr(args, "upstream", None) or getattr(args, "fork", None)
     publish = getattr(args, "publish_mode", "stub")
     cost = getattr(args, "max_cost_usd", None)
     wall = getattr(args, "max_wall_minutes", None)
@@ -423,8 +422,8 @@ def _launch_screen(
     print(_RULE)
     print(f"  {_b('contremaitre')}")
     print(_RULE)
-    print(f"  repo     {source_url}  {_d(f'({base})')}")
-    print(f"  target   {pr_target or '—'}  {_d(f'→  {publish}')}")
+    print(f"  target   {source_url}")
+    print(f"  branch   {base}  {_d(f'({publish})')}")
     caps_parts = []
     if cost is not None:
         caps_parts.append(f"${cost}")
