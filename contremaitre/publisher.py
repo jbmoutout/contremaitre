@@ -181,40 +181,91 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     Title: same shape as the host commit title (first SETTLED line minus
     skill-emitted "Settled design — " prefix) so the PR, the commit, and
     `git log` all agree.
-    Body: SETTLED full text + SIM verdict summary + trailer with run id,
-    diff hash, and pointers to the eval artifacts the reviewer should
-    open. Self-contained so reviewers don't need to clone the run dir.
+    Body: lede stamp + SETTLED design + SIM review (summary + collapsible
+    checklist) + revision callout if the SIM bounced + footer seal.
+    Self-contained so reviewers don't need to clone the run dir.
     """
 
-    # Use the worktree-side SETTLED — that's what was just committed, so
-    # the PR description and the commit body match by construction.
+    import json as _json
     from .orchestrator import _derive_commit_message
 
+    def _read_jsonl(p: Path) -> list[dict]:
+        if not p.exists():
+            return []
+        try:
+            return [_json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        except (OSError, ValueError):
+            return []
+
     title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
-    sim_summary = _read_sim_summary(paths)
-    lines = [settled_body.rstrip()]
-    if sim_summary:
-        lines.append("\n## SIM review\n")
-        lines.append(sim_summary.rstrip())
-    lines.append("\n## Artifacts\n")
-    lines.append(f"- Diff hash: `{diff_hash}`")
-    lines.append(f"- Eval: `eval/pr_eval.md` in the run dir")
-    lines.append("- Architecture review report: `extracted_files/architecture-review.html`")
-    return title, "\n".join(lines) + "\n"
 
+    eval_data: dict = {}
+    if paths.pr_eval.exists():
+        try:
+            eval_data = _json.loads(paths.pr_eval.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    sim = eval_data.get("sim_review") or {}
 
-def _read_sim_summary(paths: RunPaths) -> str | None:
-    """Return the SIM's `summary` field from pr_eval.json (last verdict)."""
+    review_cycles = _read_jsonl(paths.review_cycles)
+    test_runs = _read_jsonl(paths.test_runs)
 
-    if not paths.pr_eval.exists():
-        return None
-    try:
-        import json as _json
-        data = _json.loads(paths.pr_eval.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    sim = data.get("sim_review") or {}
-    return sim.get("summary")
+    # ----- lede -----
+    verdict = sim.get("verdict") or eval_data.get("verdict") or "?"
+    confidence = sim.get("confidence")
+    n_rounds = len(review_cycles)
+    n_tests = len(test_runs)
+    n_pass = sum(1 for t in test_runs if t.get("returncode") == 0)
+
+    lede_parts = [f"֍ **{verdict}**"]
+    if confidence is not None:
+        lede_parts.append(f"confidence {confidence:.1f}")
+    if n_rounds:
+        lede_parts.append(f"{n_rounds} review round{'s' if n_rounds > 1 else ''}")
+    if n_tests:
+        mark = "✓" if n_pass == n_tests else "✗"
+        lede_parts.append(f"tests {n_pass}/{n_tests} {mark}")
+
+    # ----- revision callout (only when SIM bounced at least once) -----
+    bounced = [r for r in review_cycles if (r.get("verdict") or "").upper() == "CHANGES_REQUESTED"]
+    revision_lines: list[str] = []
+    for r in bounced:
+        reqs = r.get("required_changes") or []
+        if reqs:
+            first = reqs[0]
+            note = (first[:117] + "…") if len(first) > 120 else first
+            if len(reqs) > 1:
+                note += f" (+ {len(reqs) - 1} more)"
+            revision_lines.append(f"> Round {r.get('round', '?')} flagged: {note}")
+
+    # ----- SIM checklist (collapsible) -----
+    checks_performed = sim.get("checks_performed") or []
+    checklist_block = ""
+    if checks_performed:
+        items = "\n".join(f"- {c}" for c in checks_performed)
+        checklist_block = (
+            f"\n<details>\n<summary>{len(checks_performed)} checks performed</summary>\n\n"
+            f"{items}\n\n</details>"
+        )
+
+    # ----- assemble -----
+    parts: list[str] = []
+    parts.append(" · ".join(lede_parts))
+    parts.append("\n---\n")
+    parts.append("## Design\n")
+    parts.append(settled_body.rstrip())
+    parts.append("\n---\n")
+    parts.append("## SIM review\n")
+    summary = (sim.get("summary") or "").rstrip()
+    if summary:
+        parts.append(summary)
+    if revision_lines:
+        parts.append("\n" + "\n".join(revision_lines))
+    if checklist_block:
+        parts.append(checklist_block)
+    parts.append(f"\n---\n\n`{paths.run_id}` · diff `{diff_hash[:16]}…`\n")
+
+    return title, "\n".join(parts)
 
 
 def _extract_url(stdout: str) -> str | None:
