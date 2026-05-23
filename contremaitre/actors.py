@@ -515,17 +515,8 @@ def redact_command(cmd: list[str]) -> list[str]:
 
 
 def _read_events(path: Path) -> list[dict[str, object]]:
-    if not path.exists():
-        return []
-    events = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-    return events
+    from .jsonlog import read_jsonl
+    return read_jsonl(path)
 
 
 def _count_text_events(path: Path) -> int:
