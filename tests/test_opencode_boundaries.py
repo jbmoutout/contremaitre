@@ -21,25 +21,38 @@ class OpencodeBoundaryTest(unittest.TestCase):
     def test_initial_prompt_invokes_skill_and_keeps_host_owned_boundaries(self):
         prompt = prompts.INITIAL_PROMPT
 
-        # Skill is now the framework, not a forbidden tool.
+        # Skill is the framework. Specific token survives mutation that
+        # swaps in a different orchestrator/skill name.
         self.assertIn("improve-codebase-architecture", prompt)
-        # Host-owns-git rule remains the architectural invariant.
-        self.assertIn("git", prompt)
-        self.assertIn("gh", prompt)
+        # Host-owns-git policy. The phrases must be specific enough that
+        # reversing the policy (e.g. "host does not own git") would break
+        # the test — bare substring `assertIn("git", prompt)` does not.
+        self.assertIn("Host owns git.", prompt)
+        self.assertIn("Never run `git status`", prompt)
+        self.assertIn("You have no credentials.", prompt)
         # Handoff scaffolds the skill doesn't prescribe.
-        self.assertIn("SETTLED_DESIGN.md", prompt)
-        self.assertIn("IMPLEMENTATION_COMPLETE", prompt)
+        self.assertIn("`.contremaitre/SETTLED_DESIGN.md`", prompt)
+        self.assertIn("`.contremaitre/IMPLEMENTATION_COMPLETE`", prompt)
 
     def test_sim_persona_locks_read_only_tooled_intent(self):
         persona = prompts.SIM_TOOLED_PERSONA
 
-        # Tooled, read-only — not the pre-tooled persona shape.
-        self.assertIn("read", persona)
-        self.assertIn("glob", persona)
-        self.assertIn("grep", persona)
-        # Skill vocabulary is the SIM's language.
-        for term in ("Module", "Interface", "Depth", "Seam", "Adapter"):
-            self.assertIn(term, persona)
+        # Lock the literal allow/deny lines. Bare `assertIn("read", persona)`
+        # matches "already", "thread", "instead" and survives a persona that
+        # grants `write` + `bash` — the policy reversal we care about.
+        self.assertIn(
+            "**Allowed**: `read`, `glob`, `grep`.", persona
+        )
+        self.assertIn(
+            "**Forbidden**: `write`, `edit`, `apply_patch`, `bash`, `task`.",
+            persona,
+        )
+        # Skill vocabulary is the SIM's language — lock the canonical line.
+        self.assertIn(
+            "**Module · Interface · Implementation · Depth · Seam · Adapter · "
+            "Leverage · Locality.**",
+            persona,
+        )
 
     def test_opencode_docker_command_whitelists_env_and_mounts_worktree_read_only(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
@@ -228,6 +241,52 @@ class OpencodeBoundaryTest(unittest.TestCase):
             pr = json.loads(paths.pr_json.read_text(encoding="utf-8"))
             self.assertEqual(pr["kind"], "PUBLISHED")
             self.assertEqual(pr["publish_mode"], "gh")
+
+
+class GhPublisherPreconditionsTest(unittest.TestCase):
+    """Lock the two RuntimeError gates in GhPublisher.publish — neither
+    was covered before, so a regression that removed the auth or fork
+    gate (publishing with no token / wrong remote) could ship silently."""
+
+    def _config(self, *, fork: str | None) -> RunConfig:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            return RunConfig(
+                repo=root,
+                base="main",
+                runs_root=root / "runs",
+                run_slug="gh-fail",
+                fork=fork,
+                publish_mode=PublishMode.GH,
+                gh_repo="owner/repo",
+            )
+
+    def _paths(self, root: Path):
+        paths = build_run_paths(root / "runs", f"20260521-{root.name}")
+        paths.run_dir.mkdir(parents=True)
+        return paths
+
+    def test_publish_without_github_token_raises(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {}, clear=True
+        ):
+            paths = self._paths(Path(tmp))
+            config = self._config(fork="git@github.com:user/repo.git")
+            with self.assertRaisesRegex(RuntimeError, r"GITHUB_TOKEN.*GH_TOKEN"):
+                GhPublisher().publish(
+                    config=config, paths=paths, branch="refactor/x", diff_hash="abc"
+                )
+
+    def test_publish_without_fork_raises(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"GITHUB_TOKEN": "token"}, clear=True
+        ):
+            paths = self._paths(Path(tmp))
+            config = self._config(fork=None)
+            with self.assertRaisesRegex(RuntimeError, r"--fork"):
+                GhPublisher().publish(
+                    config=config, paths=paths, branch="refactor/x", diff_hash="abc"
+                )
 
 
 if __name__ == "__main__":

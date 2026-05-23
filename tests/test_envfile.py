@@ -43,6 +43,25 @@ class EnvFileTest(unittest.TestCase):
             self.assertIn((root / ".env").resolve(), loaded)
             self.assertEqual(os.environ["OPENROUTER_API_KEY"], "from-cwd")
 
+    def test_export_prefix_is_stripped_for_a_fresh_key(self):
+        """The previous suite used `export EXISTING=file` with EXISTING
+        pre-populated, so `setdefault` never wrote — meaning the
+        export-stripping code path could be deleted and the test would
+        still pass. Use a fresh key here to actually exercise it.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
+            path = Path(tmp) / ".env"
+            path.write_text("export FRESH_KEY=stripped\n", encoding="utf-8")
+
+            load_env_file(path)
+
+            self.assertEqual(os.environ["FRESH_KEY"], "stripped")
+            # The literal `"export FRESH_KEY"` (with the prefix kept) must
+            # NOT appear as a key — that would be the "strip failed silently"
+            # regression where the parser fell back to a junk-named key.
+            self.assertNotIn("export FRESH_KEY", os.environ)
+
 
 if __name__ == "__main__":
     unittest.main()

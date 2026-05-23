@@ -14,9 +14,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from contremaitre import events
 from contremaitre.actors import (
     FakeActorRunner,
     _harvest_step_finishes_from_sqlite,
+    _recover_text_from_sqlite,
+    _record_recovery,
 )
 from contremaitre.costs import estimate_recorded_cost_usd
 from contremaitre.fixture import init_fixture
@@ -119,11 +122,16 @@ class FakeActorWritesItsOwnArtifactsTest(unittest.TestCase):
         self.actor.sim_turn("second")
 
         transcript = self.paths.transcript.read_text(encoding="utf-8")
-        # The two rows must land in order, each tagged with their phase.
-        agent_idx = transcript.find("## WORK - agent")
-        sim_idx = transcript.find("## WORK - sim")
-        self.assertNotEqual(agent_idx, -1)
-        self.assertNotEqual(sim_idx, -1)
+        # Full-marker equality (not substring): the downstream viewer/
+        # extractor parse on this exact `\n\n## {phase} - {speaker}\n\n`
+        # shape — a regression that flipped the order to `## agent - WORK`
+        # or dropped a newline would fail here.
+        agent_marker = "\n\n## WORK - agent\n\n"
+        sim_marker = "\n\n## WORK - sim\n\n"
+        agent_idx = transcript.find(agent_marker)
+        sim_idx = transcript.find(sim_marker)
+        self.assertNotEqual(agent_idx, -1, f"agent marker not found in: {transcript!r}")
+        self.assertNotEqual(sim_idx, -1, f"sim marker not found in: {transcript!r}")
         self.assertLess(agent_idx, sim_idx)
 
 
@@ -398,6 +406,179 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
         events_list = self._read_jsonl(self.raw_export)
         self.assertEqual(len(events_list), 1)
         self.assertEqual(events_list[0]["part"]["id"], "prt_sf")
+
+
+# ---------- positive sqlite-recovery surface ----------
+
+
+class RecoverTextFromSqliteTest(unittest.TestCase):
+    """Lock the silent-stall recovery: when opencode persisted the message
+    parts to sqlite but never flushed the corresponding `text` event to
+    stdout, `_recover_text_from_sqlite` must read the parts back and
+    return the concatenated text + a `completed` flag derived from the
+    step-finish part's `reason`.
+
+    Companion to the harvest tests: harvest covers the *cost* leak (the
+    step-finish parts), this covers the *text* leak (the message body).
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name) / "opencode-state"
+        self.state_dir.mkdir()
+
+    def _make_db(
+        self,
+        *,
+        sessions: list[tuple[str, int]],
+        messages: list[tuple[str, str, int]],
+        parts: list[tuple[str, str, dict, int]],
+    ) -> None:
+        """Build a minimal opencode.db with session/message/part tables.
+
+        Mirrors real opencode: `id`, `session_id`, `message_id` are table
+        columns, NOT inside the JSON `data` blob. Per-part `data` carries
+        only the type/text/reason fields the recovery function reads.
+        """
+
+        db_path = self.state_dir / "opencode.db"
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE session (id TEXT, time_created INTEGER)")
+        cur.execute(
+            "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER)"
+        )
+        cur.execute(
+            "CREATE TABLE part (id TEXT, session_id TEXT, message_id TEXT, "
+            "time_created INTEGER, data TEXT)"
+        )
+        for sid, ts in sessions:
+            cur.execute("INSERT INTO session VALUES (?, ?)", (sid, ts))
+        for mid, sid, ts in messages:
+            cur.execute("INSERT INTO message VALUES (?, ?, ?)", (mid, sid, ts))
+        for mid, pid, data, ts in parts:
+            # session_id on `part` is populated by opencode; recovery reads
+            # via message_id so the value is incidental but realistic.
+            cur.execute(
+                "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
+                (pid, "ignored", mid, ts, json.dumps(data)),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_recovers_concatenated_text_and_completed_flag(self):
+        self._make_db(
+            sessions=[("ses_a", 1)],
+            messages=[("msg_1", "ses_a", 100)],
+            parts=[
+                ("msg_1", "prt_t1", {"type": "text", "text": "Hello "}, 101),
+                ("msg_1", "prt_t2", {"type": "text", "text": "world."}, 102),
+                ("msg_1", "prt_sf", {"type": "step-finish", "reason": "stop"}, 103),
+            ],
+        )
+
+        text, msg_id, completed = _recover_text_from_sqlite(self.state_dir, "ses_a")
+
+        self.assertEqual(text, "Hello world.")
+        self.assertEqual(msg_id, "msg_1")
+        self.assertTrue(completed)
+
+    def test_step_finish_with_non_stop_reason_is_not_completed(self):
+        """Mid-stream interrupt → completed=False so the caller knows
+        the recovered text is partial."""
+
+        self._make_db(
+            sessions=[("ses_a", 1)],
+            messages=[("msg_1", "ses_a", 100)],
+            parts=[
+                ("msg_1", "prt_t1", {"type": "text", "text": "partial"}, 101),
+                ("msg_1", "prt_sf", {"type": "step-finish", "reason": "tool-calls"}, 102),
+            ],
+        )
+
+        text, _msg_id, completed = _recover_text_from_sqlite(self.state_dir, "ses_a")
+
+        self.assertEqual(text, "partial")
+        self.assertFalse(completed)
+
+    def test_no_session_id_picks_latest_session(self):
+        """Passing `None` makes recovery fall back to the latest session
+        by `time_created`. Locks the ORDER BY direction — a regression
+        that flipped to ASC would return the oldest session instead."""
+
+        self._make_db(
+            sessions=[("ses_old", 1), ("ses_new", 100)],
+            messages=[
+                ("msg_old", "ses_old", 50),
+                ("msg_new", "ses_new", 200),
+            ],
+            parts=[
+                ("msg_old", "prt_o", {"type": "text", "text": "OLD"}, 51),
+                ("msg_new", "prt_n", {"type": "text", "text": "NEW"}, 201),
+            ],
+        )
+
+        text, msg_id, _completed = _recover_text_from_sqlite(self.state_dir, None)
+
+        self.assertEqual(text, "NEW")
+        self.assertEqual(msg_id, "msg_new")
+
+    def test_no_db_returns_noop(self):
+        text, msg_id, completed = _recover_text_from_sqlite(self.state_dir, "ses_a")
+
+        self.assertIsNone(text)
+        self.assertIsNone(msg_id)
+        self.assertFalse(completed)
+
+
+class RecordRecoveryTest(unittest.TestCase):
+    """Lock the positive case of the recovery-surfacing path. The
+    pre-existing test `test_fake_run_produces_no_recoveries_file` covers
+    only the negative side — fake mode emits no recoveries. This locks
+    that when a recovery IS recorded, it lands in both recoveries.jsonl
+    AND guardrail_events.jsonl (mirrored for single-tail discovery).
+    """
+
+    def test_record_recovery_writes_both_files(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("rec"))
+        paths.run_dir.mkdir(parents=True)
+
+        _record_recovery(
+            paths,
+            kind=events.SQLITE_RECOVERY_SILENT_STALL,
+            role="agent",
+            recovered_chars=42,
+            message_id="msg_x",
+            step_finish_completed=True,
+        )
+
+        rec_lines = [
+            json.loads(line)
+            for line in paths.recoveries.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(rec_lines), 1)
+        self.assertEqual(rec_lines[0]["kind"], events.SQLITE_RECOVERY_SILENT_STALL)
+        self.assertEqual(rec_lines[0]["role"], "agent")
+        self.assertEqual(rec_lines[0]["recovered_chars"], 42)
+        self.assertTrue(rec_lines[0]["step_finish_completed"])
+
+        guard_lines = [
+            json.loads(line)
+            for line in paths.guardrail_events.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(guard_lines), 1)
+        # Mirror naming convention: guardrail event is `recovery_<kind>`.
+        self.assertEqual(
+            guard_lines[0]["event"],
+            f"recovery_{events.SQLITE_RECOVERY_SILENT_STALL}",
+        )
+        self.assertEqual(guard_lines[0]["role"], "agent")
 
 
 if __name__ == "__main__":

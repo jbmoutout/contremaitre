@@ -26,11 +26,36 @@ class ControlPlaneTest(unittest.TestCase):
         self.assertTrue(result.run_dir.exists())
 
     def test_changes_requested_is_safe_no_pr(self):
-        result, _ = self._run_fixture(run_slug="changes", sim_scenario="changes_requested")
+        # Scope to 2 review rounds: one CHANGES_REQUESTED triggers a real
+        # revision-followup turn, the second exhausts the cap. The previous
+        # version used the default (3 rounds) which ran the loop slower
+        # without exercising the revision path more thoroughly.
+        result, _ = self._run_fixture(
+            run_slug="changes",
+            sim_scenario="changes_requested",
+            caps=Caps(max_review_rounds=2),
+        )
 
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_CHANGES_REQUESTED)
         pr = self._read_json(result.run_dir / "pr.json")
         self.assertEqual(pr["kind"], "NO_PR")
+        # Revision flow fired at least once with the SIM's required_changes
+        # surfacing in the guardrail event. A regression that dropped the
+        # bullets from the agent's revision prompt would leave the field
+        # empty here.
+        guardrail_lines = [
+            json.loads(line)
+            for line in (result.run_dir / "guardrail_events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        revisions = [g for g in guardrail_lines if g.get("event") == events.REVISION_REQUESTED]
+        self.assertGreaterEqual(len(revisions), 1)
+        self.assertEqual(
+            revisions[0]["required_changes"],
+            ["Add the missing boundary test before review."],
+        )
 
     def test_malformed_verdict_retries_to_needs_human(self):
         result, _ = self._run_fixture(
