@@ -693,14 +693,16 @@ class Orchestrator:
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
         title, body = _derive_commit_message(self.paths.worktree, self.run_id)
-        # Pathspec exclude keeps `.contremaitre/*` (SETTLED_DESIGN.md,
-        # IMPLEMENTATION_COMPLETE, architecture-review.html) out of the
-        # staged set even though the files stay in the worktree (so the
-        # WORK-phase SIM can keep reading SETTLED via the /app:ro mount,
-        # including across CHANGES_REQUESTED → WORK rounds). The SETTLED
-        # text already lands in the commit body via `_derive_commit_message`
-        # and in the PR description via the publisher.
-        repo.run("add", "--", ".", ":(exclude).contremaitre")
+        # Pathspec excludes keep orchestration-internal files out of the
+        # staged set even though the files stay in the worktree:
+        #
+        # `.contremaitre/*` — SETTLED_DESIGN.md, IMPLEMENTATION_COMPLETE,
+        #   architecture-review.html. Must stay for WORK-phase SIM reads.
+        #
+        # `opencode.json` — opencode may create a local config file in the
+        #   worktree root even though a synthesized config is mounted :ro.
+        #   This is opencode internal state, not part of any design.
+        repo.run("add", "--", ".", ":(exclude).contremaitre", ":(exclude)opencode.json")
         repo.run("commit", "-m", title, "-m", body)
         self._emit(
             events.HOST_COMMIT_CREATED,
@@ -915,27 +917,27 @@ class Orchestrator:
 
 
 def _only_contremaitre_changes(porcelain: str) -> bool:
-    """True iff every `git status --porcelain` row points at `.contremaitre/`.
+    """True iff every `git status --porcelain` row is orchestration-internal.
 
-    `.contremaitre/*` is host-side orchestration scaffolding (SETTLED,
-    IMPLEMENTATION_COMPLETE, architecture-review.html) excluded from the
-    published commit and PR diff by design. The host-commit step and
-    the clean-worktree hard gate both need to treat a worktree whose
-    only changes are inside `.contremaitre/` as "clean for our purposes":
+    Files excluded from commits by pathspec (`.contremaitre/*`,
+    `opencode.json`) are deliberately untracked in the worktree. The
+    host-commit step and the clean-worktree hard gate both need to treat
+    a worktree whose only changes are in these paths as "clean for our
+    purposes":
 
-    - host-commit: skip the commit instead of producing an empty PR
-      (would happen if the agent only wrote scaffolding, no code).
-    - clean-worktree gate: pass — those files are deliberately untracked.
+    - host-commit: skip instead of producing an empty PR.
+    - clean-worktree gate: pass.
 
     Empty porcelain (no changes at all) is also "clean".
     """
 
+    _INTERNAL_PATHS = (".contremaitre/", ".contremaitre", "opencode.json")
+
     for line in porcelain.splitlines():
         if not line.strip():
             continue
-        # Porcelain format: "XY <path>" where XY is the two-char status.
         path = line[3:].strip().strip('"')
-        if not path.startswith(".contremaitre/") and path != ".contremaitre":
+        if not any(path == p or path.startswith(p) for p in _INTERNAL_PATHS):
             return False
     return True
 

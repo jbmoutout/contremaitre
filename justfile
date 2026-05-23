@@ -27,14 +27,17 @@ sim_model       := ""
 default:
     @just --list
 
-# Generic TUI run. Required: base, fork. Optional: check_cmd (default: tsc).
-#   just tui-run main git@github.com:me/foo.git "pnpm typecheck"
-tui-run base fork check_cmd="npx tsc --noEmit":
+# Generic TUI run. Required: base, fork. Optional: check_cmd (no default —
+# pass an ecosystem-appropriate check or omit to skip L1 gating entirely).
+#   just tui-run main git@github.com:me/foo.git "npx tsc --noEmit"
+#   just tui-run main git@github.com:me/foo.git "poetry run pytest -q"
+#   just tui-run main git@github.com:me/foo.git   # no check
+tui-run base fork check_cmd="":
     GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
         --actor {{actor}} \
         --base {{base}} \
         --fork {{fork}} \
-        --check-cmd {{quote(check_cmd)}} \
+        {{ if check_cmd != "" { "--check-cmd " + quote(check_cmd) } else { "" } }} \
         --publish-mode {{publish_mode}} \
         {{ if agent_model != "" { "--agent-model " + agent_model } else { "" } }} \
         {{ if sim_model != "" { "--sim-model " + sim_model } else { "" } }} \
