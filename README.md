@@ -11,7 +11,6 @@ The main command. Watches the run live in a two-pane TUI (Agent | SIM), opens a 
 ```bash
 GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
   --actor opencode \
-  --repo ~/code/<target-repo> \
   --base main \
   --fork git@github.com:<you>/<target-repo>.git \
   --publish-mode gh \
@@ -21,19 +20,24 @@ GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
   --max-cost-usd 5
 ```
 
+The target repo is cloned lazily into `~/.cache/contremaitre/<host>-<owner>-<repo>/` on first run (subsequent runs reuse the cache + `git fetch origin <base>` for freshness). You never need a parallel local checkout — only the `--fork` URL.
+
+Before launching, contremaitre prints a one-screen summary (base branch, source, PR target, caps) and asks `Continue? [Y/n]`. Pass `-y` / `--yes` to skip the prompt (CI / scripts).
+
 Add `--check-cmd "<command>"` (repeatable) if your target has a fast deterministic check worth gating publication on — see [ecosystem examples](#executable-checks-per-ecosystem) below. Without it, publication still requires SIM approval + L0 hard gates (diff scan, diff-hash match, clean worktree).
 
 **Shortcut:** a [`justfile`](justfile) at the repo root wraps the long form. `brew install just`, then:
 
 ```bash
-just                                                          # list recipes
-just tui-run ~/code/<target> git@github.com:<you>/<target>.git
-just deepdeep tui-run ~/code/<target> git@github.com:<you>/<target>.git
+just                                              # list recipes
+just tui-run main git@github.com:<you>/<target>.git
+just deepdeep tui-run main git@github.com:<you>/<target>.git
 ```
 
 `deepdeep` is a model preset that pins both `--agent-model` and `--sim-model` to `openrouter/deepseek/deepseek-v4-flash`. Add per-target convenience recipes (e.g. `just my-repo`) and more presets as the workflow grows.
 
 **One-time setup** (auto-handled on first run):
+- Local clone cache is created on demand under `~/.cache/contremaitre/`.
 - Runtime image `contremaitre-agent:latest` builds itself on first opencode-mode run. ~3 min on a warm host.
 - TUI requires `textual`: `python3 -m pip install --user textual` (skip if you'd rather watch via JSONL tail).
 - `OPENROUTER_API_KEY` in `.env` (cwd or repo root) — bounded by a provider-side daily limit. Preflight refuses to start a run without one.
@@ -43,12 +47,14 @@ just deepdeep tui-run ~/code/<target> git@github.com:<you>/<target>.git
 | Flag | Meaning | Required? |
 |---|---|---|
 | `--actor opencode` | live mode (vs. `--actor fake` for deterministic smoke) | **yes** |
-| `--repo` | local git checkout the worktree is sourced from | **yes** |
-| `--base` | branch the worktree forks off + PR base | **yes** (typical: `main`) |
-| `--fork` | git URL where the run's branch is pushed | **yes** for `--publish-mode gh` |
+| `--base` | branch the worktree is sourced from + PR target | **yes** (typical: `main`) |
+| `--fork` | git URL where the run's branch is pushed; also the default clone source for the cache | **yes** for `--publish-mode gh` |
+| `--upstream` | canonical clone source when `--fork` is your fork of someone else's repo | optional (preferred over `--fork` for cloning when set) |
+| `--repo-cache` | override the auto-derived cache path (default: `~/.cache/contremaitre/<slug>/`) | optional |
 | `--opencode-config` | path to your `opencode.json` (provider + model registry) | **yes** for opencode mode |
 | `--check-cmd` | executable check the post-implementation worktree must pass; repeatable | optional (publication blocked only on a configured-and-failing check) |
 | `--publish-mode gh` | open a real draft PR via `gh pr create --draft` | optional (default: `stub` — no PR, just simulates) |
+| `--yes` / `-y` | skip the pre-launch Y/n prompt | optional (auto-skipped in non-TTY) |
 | `--allow-open-egress` | accept unrestricted container egress; alternative is `--docker-network` / proxy flags | required if no proxy is configured |
 | `--max-turns` | per-actor turn budget | optional (default `30`) |
 | `--max-wall-minutes` | wall-clock budget | optional (default `180`) |
@@ -78,7 +84,8 @@ Drop the `tui run --` prefix and the orchestrator runs headless, printing the ve
 ```bash
 GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre run \
   --actor opencode \
-  --repo ~/code/<target-repo> \
+  --base main \
+  --fork git@github.com:<you>/<target-repo>.git \
   ... (same flags)
 ```
 
@@ -120,7 +127,7 @@ See [docs/control-plane.md](docs/control-plane.md) for the implementation map.
 | Rust | `--check-cmd "cargo check --all-targets"` |
 | Go | `--check-cmd "go build ./..."` |
 
-The check runs inside the post-implementation worktree on the host (not in the agent container), with a 600s timeout per command. Repeat the flag to gate on more than one command.
+The check runs in a sidecar container that mounts the same worktree + lockhash-keyed deps volume the agent used, with a 600s timeout per command. Repeat the flag to gate on more than one command.
 
 ## Smoke run (fake actor, no docker, no spend)
 
@@ -129,10 +136,11 @@ Useful for verifying the install + state machine without launching containers:
 ```bash
 python3 -m contremaitre fixture init /tmp/contremaitre-fixture
 python3 -m contremaitre run \
-  --repo /tmp/contremaitre-fixture \
   --base main \
+  --fork file:///tmp/contremaitre-fixture \
   --run-slug smoke \
-  --check-cmd "python3 -m unittest discover -s tests"
+  --check-cmd "python3 -m unittest discover -s tests" \
+  --yes
 ```
 
 Artifacts land in `.contremaitre/runs/<run-id>/`.
@@ -145,7 +153,8 @@ The doctor runs the same checks as preflight without starting a run:
 
 ```bash
 python3 -m contremaitre doctor \
-  --repo ~/code/<target-repo> \
+  --base main \
+  --fork git@github.com:<you>/<target-repo>.git \
   --opencode-config /path/to/opencode.json \
   --allow-open-egress
 ```
@@ -196,16 +205,18 @@ python3 -m contremaitre viewer .contremaitre/runs/<run-id> --open   # also opens
 
 ### Cleanup
 
-Each opencode-mode run creates a per-run docker volume + a worktree at `/tmp/contremaitre-<run-id>/`; both are removed by the orchestrator in `finally`. `image build` prunes dangling images on success.
+Each opencode-mode run creates a worktree at `/tmp/contremaitre-<run-id>/` and label-tagged containers (`contremaitre.run-id=<id>`); both are removed by the orchestrator in `finally`. `image build` prunes dangling images on success. The lockhash-keyed deps volumes and the auto-managed local clone caches under `~/.cache/contremaitre/` are kept by default (cross-run caches).
 
 If a parent gets SIGKILL'd mid-run, leftovers can survive. Sweep them:
 
 ```bash
-python3 -m contremaitre cleanup --dry-run   # see what would be removed
-python3 -m contremaitre cleanup             # actually remove
+python3 -m contremaitre cleanup --dry-run    # see what would be removed
+python3 -m contremaitre cleanup              # remove stale containers + worktrees + dangling images
+python3 -m contremaitre cleanup --deps       # also nuke lockhash-keyed deps volumes
+python3 -m contremaitre cleanup --repos      # also nuke ~/.cache/contremaitre/<slug>/ clones
 ```
 
-Cleans: stale per-run docker volumes (run dir gone), leftover `/tmp/contremaitre-*` worktrees, dangling docker images (`--skip-images` to keep).
+Cleans, in order: containers labeled `contremaitre.run-id=*` whose run dir is gone, leftover `/tmp/contremaitre-*` worktrees, dangling docker images (`--skip-images` to keep), and optionally the cross-run caches behind `--deps` / `--repos`.
 
 ### Network posture
 

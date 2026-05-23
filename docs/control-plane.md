@@ -21,7 +21,7 @@ The multi-turn loop is self-contained; Contremaitre does not import any external
 
 ## Module Map
 
-- `cli.py` — argument parsing and command dispatch (`run`, `doctor`, `fixture`, `image`, `cleanup`, `tui`, `viewer`).
+- `cli.py` — argument parsing and command dispatch (`run`, `doctor`, `fixture`, `image`, `cleanup`, `tui`, `viewer`). Derives an auto-managed local clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/` from the `--upstream` (preferred) or `--fork` URL; clones lazily on first run, reused thereafter. The operator never points contremaitre at a parallel local checkout. Pre-launch Y/n prompt summarises base / source / publish target / caps (skippable via `-y` or non-TTY stdin).
 - `orchestrator.py` — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven container cleanup, SIGTERM emergency-flush.
 - `prompts/` — INITIAL_PROMPT, SIM tooled persona, SIM review prompt; markdown files loaded into module constants for easy tweaking.
 - `actors.py` — process adapters (`FakeActorRunner`, `OpencodeActorRunner`). Opencode containers run **detached** (`docker run -d`) with `contremaitre.run-id=<id>` + `contremaitre.role=<agent|sim|review>` labels; output streamed via `docker logs -f`, exit awaited via `docker wait`.
@@ -113,9 +113,10 @@ Per opencode-mode run, the orchestrator owns these external artifacts beyond the
 - **Worktree** at `/tmp/contremaitre-<run-id>/` — removed by `_cleanup_worktree` in `finally`.
 - **Detached containers** labeled `contremaitre.run-id=<id>` — agent / SIM / review / check / deps-install. `--rm` (one-shot) for the per-turn ones, explicit `docker rm -f` after `docker wait` for the streamed-log ones. `_stop_run_containers` runs in `finally` and on SIGTERM, scans by label, and `docker stop`s anything still alive.
 - **Lockhash-keyed deps volume** `contremaitre-deps-<lockfile>-<digest>` — labeled `contremaitre.purpose=deps-cache`. **Kept** across runs by design (it's the cross-run dependency cache; populating it is the slowest step of a fresh target). Mounted RO at `/app/node_modules` in agent / SIM / check containers so parallel runs against the same lockfile can't poison each other.
+- **Local clone cache** at `~/.cache/contremaitre/<host>-<owner>-<repo>/` — auto-managed; cloned lazily on first run from `--upstream` (or `--fork`). **Kept** across runs by design. Subsequent runs reuse it and `git fetch origin <base>` for freshness. `--repo-cache` overrides the path.
 - **opencode state dirs** `opencode-{agent,sim,review}-state/` inside the run dir — kept on purpose: `_recover_text_from_sqlite` reads them when opencode silent-stalls, and they're the source of truth for forensic recovery. Not auto-pruned.
 
-If a parent is SIGKILL'd, the worktree + label-tagged containers can survive. `contremaitre cleanup` scans `docker ps -a --filter label=contremaitre.run-id` for containers whose run-dir is gone, sweeps stale `/tmp/contremaitre-*` worktrees, and prunes dangling docker images. Pass `--deps` to also remove the lockhash-keyed deps volumes (forces re-install on the next run). `contremaitre image build` runs `docker image prune -f` after a successful build so rebuilds with the same tag don't accumulate `<none>:<none>` orphans.
+If a parent is SIGKILL'd, the worktree + label-tagged containers can survive. `contremaitre cleanup` scans `docker ps -a --filter label=contremaitre.run-id` for containers whose run-dir is gone, sweeps stale `/tmp/contremaitre-*` worktrees, and prunes dangling docker images. Pass `--deps` to also remove the lockhash-keyed deps volumes, `--repos` to nuke the local clone cache (next run will full re-clone). `contremaitre image build` runs `docker image prune -f` after a successful build so rebuilds with the same tag don't accumulate `<none>:<none>` orphans.
 
 ## Terminal signal
 

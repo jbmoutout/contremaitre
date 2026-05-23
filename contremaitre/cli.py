@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .envfile import load_dotenv_defaults
 from .fixture import init_fixture
@@ -61,8 +63,17 @@ def _shared_run_doctor_parser() -> argparse.ArgumentParser:
     """Flags common to `run` and `doctor`. Single source of truth; attach via parents=[…]."""
 
     p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--repo", required=True, type=Path, help="Local source checkout used for git worktree add")
-    p.add_argument("--base", required=True, help="Base branch for worktree and diff. The orchestrator fetches `origin/<base>` from the source repo and branches the worktree from it, ignoring local refs.")
+    p.add_argument(
+        "--base",
+        required=True,
+        help="Branch that the worktree is sourced from + the PR target. The orchestrator fetches `origin/<base>` fresh before each run; the operator's local checkout state never affects reproducibility.",
+    )
+    p.add_argument(
+        "--repo-cache",
+        type=Path,
+        default=None,
+        help="Override the local clone cache path (default: ~/.cache/contremaitre/<host>-<owner>-<repo>/). Cloned lazily from --upstream (or --fork) on first use; subsequent runs reuse the cache and `git fetch origin <base>` for freshness.",
+    )
     p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     p.add_argument("--docker-image", default=_DEFAULT_IMAGE)
     p.add_argument(
@@ -123,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fake agent behavior (ignored in --actor opencode)",
     )
     run_p.add_argument("--publish-mode", choices=[mode.value for mode in PublishMode], default=PublishMode.STUB.value)
+    run_p.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Skip the pre-launch Y/n prompt. Useful for scripts / CI.",
+    )
     run_p.add_argument("--keep-worktree", action="store_true")
     run_p.add_argument("--simulate-drift-after-approval", action="store_true")
     run_p.add_argument("--container-user", default=None, help="Optional docker --user value, e.g. $(id -u):$(id -g)")
@@ -174,6 +190,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also remove cached lockhash-keyed deps volumes (contremaitre-deps-*). "
              "Off by default — those volumes are the across-run dependency cache.",
     )
+    cleanup_p.add_argument(
+        "--repos",
+        action="store_true",
+        help=f"Also remove auto-managed local clone caches under {_CACHE_ROOT}. "
+             "Off by default — those clones are the across-run object cache; "
+             "removing forces a full re-clone on the next run.",
+    )
     cleanup_p.set_defaults(func=_cleanup_cmd)
 
     tui_p = sub.add_parser("tui", help="Live Textual TUI (requires `textual`)")
@@ -213,7 +236,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_cmd(args: argparse.Namespace) -> int:
-    config = _config_from_args(args)
+    source_url = args.upstream or args.fork
+    if source_url is None:
+        print(
+            "contremaitre: --fork (or --upstream) is required to derive the local clone cache",
+            file=sys.stderr,
+        )
+        return 1
+    cache_path = (args.repo_cache or _default_cache_path(source_url)).resolve()
+    try:
+        _ensure_local_clone(cache_path=cache_path, source_url=source_url)
+    except subprocess.CalledProcessError as exc:
+        print(f"contremaitre: git clone failed: {exc.stderr or exc}", file=sys.stderr)
+        return 1
+    if not _confirm_launch(args=args, source_url=source_url, cache_path=cache_path):
+        print("aborted", file=sys.stderr)
+        return 130
+    config = _config_from_args(args, repo=cache_path)
     rc = _ensure_default_image_built(config)
     if rc != 0:
         return rc
@@ -238,6 +277,91 @@ def _run_cmd(args: argparse.Namespace) -> int:
     if result.pr_created:
         return 0
     return 2 if result.verdict.value.startswith("NO_PR") else 1
+
+
+_CACHE_ROOT = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "contremaitre"
+_URL_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _default_cache_path(source_url: str) -> Path:
+    """`~/.cache/contremaitre/<host>-<owner>-<repo>/` derived from a clone URL.
+
+    Handles both SSH (`git@github.com:owner/repo.git`) and HTTPS
+    (`https://github.com/owner/repo.git`) URL shapes. Falls back to a
+    hash-of-URL slug if parsing fails (degenerate URL — we never want to
+    error here just because the parser didn't recognise a shape).
+    """
+
+    slug = _slug_from_url(source_url)
+    return _CACHE_ROOT / slug
+
+
+def _slug_from_url(source_url: str) -> str:
+    url = source_url.strip()
+    if url.endswith(".git"):
+        url = url[:-4]
+    # SSH form: `git@host:owner/repo` → split on `@` and `:`.
+    if url.startswith("git@") and ":" in url:
+        host_part, _, path_part = url.partition(":")
+        host = host_part.partition("@")[2]
+        path = path_part.lstrip("/")
+    else:
+        parts = urlsplit(url if "://" in url else f"https://{url}")
+        host = parts.hostname or ""
+        path = parts.path.lstrip("/")
+    raw = f"{host}-{path}".strip("-/")
+    safe = _URL_SAFE_RE.sub("-", raw).strip("-")
+    return safe or "contremaitre-target"
+
+
+def _ensure_local_clone(*, cache_path: Path, source_url: str) -> None:
+    """Clone `source_url` into `cache_path` if not already there.
+
+    Idempotent: if `cache_path/.git/` exists, leave it alone — the
+    orchestrator's `git fetch origin <base>` (in `_create_worktree`)
+    handles freshness on every run. If `cache_path` exists but is not a
+    git repo, raise so the operator can choose the resolution; we never
+    silently overwrite an unknown directory.
+    """
+
+    if (cache_path / ".git").exists():
+        return
+    if cache_path.exists():
+        raise RuntimeError(
+            f"cache path exists but is not a git repo: {cache_path}; "
+            "remove it or pass --repo-cache to point somewhere else"
+        )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"contremaitre: cloning {source_url} → {cache_path}", file=sys.stderr)
+    subprocess.run(
+        ["git", "clone", source_url, str(cache_path)],
+        check=True, capture_output=True, text=True, timeout=600,
+    )
+
+
+def _confirm_launch(*, args: argparse.Namespace, source_url: str, cache_path: Path) -> bool:
+    """Pre-launch summary + Y/n. Auto-Y when --yes or stdin isn't a TTY."""
+
+    if args.yes or not sys.stdin.isatty():
+        return True
+    publish = args.publish_mode
+    pr_target = args.gh_repo or (args.upstream or args.fork)
+    cost = getattr(args, "max_cost_usd", None)
+    wall = getattr(args, "max_wall_minutes", None)
+    print()
+    print("contremaitre will run autonomously until a draft PR is opened (or the run terminates).")
+    print(f"  base branch : {args.base}")
+    print(f"  source      : {source_url}")
+    print(f"  cache       : {cache_path}")
+    print(f"  publish to  : {pr_target} ({publish})")
+    if cost is not None or wall is not None:
+        print(f"  caps        : ${cost}, {wall}m wall")
+    print()
+    try:
+        reply = input("Continue? [Y/n] ").strip().lower()
+    except EOFError:
+        return True
+    return reply in ("", "y", "yes")
 
 
 def _ensure_default_image_built(config: RunConfig) -> int:
@@ -298,8 +422,9 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
     stale_worktrees = _scan_stale_worktrees(runs_root)
     dangling_images = [] if args.skip_images else _scan_dangling_images()
     deps_volumes = list_deps_volumes() if args.deps else []
+    cache_clones = _list_cache_clones() if args.repos else []
 
-    if not stale_containers and not stale_worktrees and not dangling_images and not deps_volumes:
+    if not (stale_containers or stale_worktrees or dangling_images or deps_volumes or cache_clones):
         print("contremaitre cleanup: nothing to do")
         return 0
 
@@ -311,11 +436,15 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
         print(f"  worktree  {path}")
     for name in deps_volumes:
         print(f"  deps-vol  {name}")
+    for path in cache_clones:
+        print(f"  clone     {path}")
     if dangling_images:
         print(f"  {len(dangling_images)} dangling image(s)")
 
     if dry:
         return 0
+
+    import shutil as _shutil
 
     removed_containers = 0
     for cid, _ in stale_containers:
@@ -329,7 +458,6 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
     removed_wts = 0
     for path in stale_worktrees:
         try:
-            import shutil as _shutil
             _shutil.rmtree(path, ignore_errors=True)
             removed_wts += 1
         except OSError:
@@ -344,16 +472,34 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
         if proc.returncode == 0:
             removed_vols += 1
 
+    removed_clones = 0
+    for path in cache_clones:
+        try:
+            _shutil.rmtree(path, ignore_errors=True)
+            removed_clones += 1
+        except OSError:
+            pass
+
     if dangling_images:
         _prune_dangling_images()
 
     parts = [f"{removed_containers} container(s)", f"{removed_wts} worktree(s)"]
     if args.deps:
         parts.append(f"{removed_vols} deps-volume(s)")
+    if args.repos:
+        parts.append(f"{removed_clones} clone(s)")
     if dangling_images:
         parts.append(f"{len(dangling_images)} dangling image(s)")
     print("contremaitre cleanup: removed " + ", ".join(parts))
     return 0
+
+
+def _list_cache_clones() -> list[Path]:
+    """Auto-managed local clones under `_CACHE_ROOT`."""
+
+    if not _CACHE_ROOT.is_dir():
+        return []
+    return sorted(p for p in _CACHE_ROOT.iterdir() if p.is_dir() and (p / ".git").exists())
 
 
 def _scan_stale_containers(runs_root: Path) -> list[tuple[str, str]]:
@@ -458,13 +604,28 @@ def _prune_dangling_images() -> None:
 
 
 def _doctor_cmd(args: argparse.Namespace) -> int:
-    config = _config_from_args(args)
+    source_url = args.upstream or args.fork
+    if source_url is None:
+        print(
+            "contremaitre doctor: --fork (or --upstream) is required to derive the local clone cache",
+            file=sys.stderr,
+        )
+        return 1
+    cache_path = (args.repo_cache or _default_cache_path(source_url)).resolve()
+    if not (cache_path / ".git").exists():
+        print(
+            f"contremaitre doctor: cache not cloned yet at {cache_path}. "
+            f"Run `contremaitre run --fork {args.fork or args.upstream} --base <branch>` once to populate.",
+            file=sys.stderr,
+        )
+        return 1
+    config = _config_from_args(args, repo=cache_path)
     report = run_preflight(config)
     print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     return 0 if report.passed else 1
 
 
-def _config_from_args(args: argparse.Namespace) -> RunConfig:
+def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
     caps = Caps(
         max_turns=getattr(args, "max_turns", 30),
         max_wall_minutes=getattr(args, "max_wall_minutes", 180),
@@ -474,7 +635,7 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         max_review_rounds=getattr(args, "max_review_rounds", 3),
     )
     return RunConfig(
-        repo=args.repo.resolve(),
+        repo=repo,
         base=getattr(args, "base", "main"),
         runs_root=args.runs_root.resolve(),
         run_slug=slugify(args.run_slug),
@@ -548,6 +709,42 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     agent_model = _extract_flag_value(forwarded, "--agent-model", "openrouter/deepseek/deepseek-v4-flash")
     sim_model = _extract_flag_value(forwarded, "--sim-model", "openrouter/deepseek/deepseek-v4-flash")
     docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
+    # Confirmation has to happen BEFORE the subprocess spawn, because once
+    # Textual attaches, stdin is owned by the TUI and an `input()` in the
+    # subprocess would block invisibly. Pass --yes downstream so the
+    # subprocess doesn't re-prompt.
+    fork = _extract_flag_value(forwarded, "--fork", "")
+    upstream = _extract_flag_value(forwarded, "--upstream", "")
+    base = _extract_flag_value(forwarded, "--base", "")
+    source_url = upstream or fork
+    if not source_url:
+        print("contremaitre tui run: --fork (or --upstream) is required", file=sys.stderr)
+        return 1
+    if not base:
+        print("contremaitre tui run: --base is required", file=sys.stderr)
+        return 1
+    repo_cache_raw = _extract_flag_value(forwarded, "--repo-cache", "")
+    cache_path = Path(repo_cache_raw).resolve() if repo_cache_raw else _default_cache_path(source_url)
+    try:
+        _ensure_local_clone(cache_path=cache_path, source_url=source_url)
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"contremaitre: {exc}", file=sys.stderr)
+        return 1
+    confirm_args = argparse.Namespace(
+        yes=("--yes" in forwarded or "-y" in forwarded),
+        base=base, fork=fork or None, upstream=upstream or None,
+        gh_repo=_extract_flag_value(forwarded, "--gh-repo", "") or None,
+        publish_mode=_extract_flag_value(forwarded, "--publish-mode", PublishMode.STUB.value),
+        max_cost_usd=_extract_flag_value(forwarded, "--max-cost-usd", "?"),
+        max_wall_minutes=_extract_flag_value(forwarded, "--max-wall-minutes", "?"),
+    )
+    if not _confirm_launch(args=confirm_args, source_url=source_url, cache_path=cache_path):
+        print("aborted", file=sys.stderr)
+        return 130
+    if "--yes" not in forwarded and "-y" not in forwarded:
+        forwarded.append("--yes")
+    if "--repo-cache" not in " ".join(forwarded):
+        forwarded.extend(["--repo-cache", str(cache_path)])
     run_cmd = [sys.executable, "-m", "contremaitre", "run", *forwarded]
     return tui.spawn_and_attach(
         runs_root=runs_root,

@@ -7,9 +7,11 @@ set shell := ["bash", "-uc"]
 
 # Stable defaults — override per-recipe or on the CLI:
 #   just agent_model=openrouter/anthropic/claude-sonnet-4.6 my-repo
-# `base` is intentionally not defaulted — the operator must state the
-# branch every run, and contremaitre fetches `origin/<base>` fresh
-# rather than trusting the source repo's local ref.
+# `base` and `fork` are intentionally not defaulted: the operator must
+# state both every run. Contremaitre clones the target lazily into
+# `~/.cache/contremaitre/<host>-<owner>-<repo>/` and fetches
+# `origin/<base>` fresh, so the operator never needs a parallel local
+# checkout — only the URL.
 publish_mode    := "gh"
 actor           := "opencode"
 max_turns       := "20"
@@ -25,12 +27,11 @@ sim_model       := ""
 default:
     @just --list
 
-# Generic TUI run. Required: repo, base, fork. Optional: check_cmd (default: tsc).
-#   just tui-run ~/code/foo main git@github.com:me/foo.git "pnpm typecheck"
-tui-run repo base fork check_cmd="npx tsc --noEmit":
+# Generic TUI run. Required: base, fork. Optional: check_cmd (default: tsc).
+#   just tui-run main git@github.com:me/foo.git "pnpm typecheck"
+tui-run base fork check_cmd="npx tsc --noEmit":
     GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
         --actor {{actor}} \
-        --repo {{repo}} \
         --base {{base}} \
         --fork {{fork}} \
         --check-cmd {{quote(check_cmd)}} \
@@ -45,13 +46,13 @@ tui-run repo base fork check_cmd="npx tsc --noEmit":
 # Example: copy + rename per target you run against often, e.g.
 #
 #   my-repo:
-#       @just tui-run ~/code/my-repo main git@github.com:<you>/my-repo.git "npx tsc --noEmit"
+#       @just tui-run main git@github.com:<you>/my-repo.git "npx tsc --noEmit"
 #
 # Then: `just my-repo`  (or `just deepdeep my-repo` to pin models).
 
 # === Model presets ============================================================
 # Presets wrap any recipe with a pinned (agent_model, sim_model) pair. Compose:
-#   just deepdeep tui-run ~/code/foo git@github.com:me/foo.git
+#   just deepdeep tui-run main git@github.com:me/foo.git
 # Add more presets (e.g. claude-claude, gpt-claude) by copying the pattern.
 
 # Preset: deepseek-v4-flash for both agent + sim (cheap, fast).
