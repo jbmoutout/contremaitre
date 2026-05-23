@@ -135,6 +135,7 @@ _PAL_VDIM = "#444444"
 _PAL_SUCCESS = "#4ADE80"
 _PAL_WARN = "#FFB830"
 _PAL_ERROR = "#FF3B3B"
+_PAL_ACCENT = "#6B8AFF"
 
 
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -238,9 +239,12 @@ def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path 
             text.append(" › ", style=_PAL_VDIM)
         is_current = stage == current and blocked_or_failed is None
         if is_current:
-            # Red when the run ended in failure at this stage so the breadcrumb
-            # immediately answers "where did it get stuck and why".
-            stage_style = f"bold {_PAL_ERROR}" if failed else f"bold {_PAL_BRIGHT}"
+            if failed:
+                stage_style = f"bold {_PAL_ERROR}"   # stuck here in failure
+            elif stage == "PUBLISHED":
+                stage_style = f"bold {_PAL_SUCCESS}"  # terminal success
+            else:
+                stage_style = f"bold {_PAL_BRIGHT}"   # active / in progress
             text.append(stage, style=stage_style)
         elif stages.index(current) > i and blocked_or_failed is None:
             text.append(stage, style=_PAL_SUCCESS)
@@ -616,31 +620,68 @@ def _render_guardrail(event: dict[str, Any]):
     ts_iso = event.get("ts", "")
     ts = ts_iso[11:19] if len(ts_iso) > 19 else " " * 8
     kind = event.get("event") or event.get("kind") or "?"
-    style = "dim"
-    if "infra_failure" in kind or "blocked" in kind or "malformed" in kind:
-        style = "bold red"
-    elif "recovery" in kind or "orphan" in kind or "sqlite" in kind:
-        style = "bold yellow"
-    elif "work_session_end" in kind or "implementation_complete" in kind:
-        style = "bold green"
+
+    # Semantic style — most events are dim scaffolding; only actionable
+    # signals get color so the operator's eye goes straight to what matters.
+    if any(k in kind for k in ("infra_failure", "blocked", "malformed")):
+        style = f"bold {_PAL_ERROR}"
+    elif any(k in kind for k in ("recovery", "orphan", "sqlite", "cap")):
+        style = f"bold {_PAL_WARN}"
+    elif kind == "published":
+        style = f"bold {_PAL_SUCCESS}"
+    elif kind == "work_session_end" or "implementation_complete" in kind:
+        style = f"bold {_PAL_SUCCESS}"
+    elif kind == "revision_requested":
+        style = _PAL_WARN
+    elif kind == "review_verdict":
+        verdict = (event.get("verdict") or "").upper()
+        style = f"bold {_PAL_SUCCESS}" if verdict == "APPROVED" else f"bold {_PAL_WARN}"
+    elif kind == "check_completed":
+        rc = event.get("returncode")
+        style = f"bold {_PAL_ERROR}" if rc not in (0, None) else _PAL_SUCCESS
+    elif kind == "hard_gates_checked":
+        style = f"bold {_PAL_SUCCESS}" if event.get("passed") else f"bold {_PAL_ERROR}"
+    else:
+        style = "dim"
+
     body = Text()
     body.append(f"{ts} ", style="dim")
+
+    # Prefix icon for the events operators care about most.
+    if kind == "check_completed":
+        rc = event.get("returncode")
+        icon = "✓" if rc in (0, None) else "✗"
+        body.append(f"{icon} ", style=style)
+    elif kind == "review_verdict":
+        verdict = (event.get("verdict") or "").upper()
+        body.append("✓ " if verdict == "APPROVED" else "✗ ", style=style)
+    elif kind == "published":
+        body.append("✓ ", style=style)
+    elif kind == "hard_gates_checked":
+        body.append("✓ " if event.get("passed") else "✗ ", style=style)
+
     body.append(kind, style=style)
-    # Append a few interesting fields for context.
-    for field in ("role", "outcome", "round", "recovered_chars", "container_ids"):
+
+    for field in ("role", "outcome", "round", "verdict", "recovered_chars"):
         if field in event:
             body.append(f"  {field}={event[field]}", style="dim")
-    # Failing check: surface the rc + the head of stdout inline so the
-    # operator sees what broke without grepping test_runs.jsonl.
-    if kind == "check_completed" and event.get("returncode") not in (0, None):
-        body.append(f"  rc={event['returncode']}", style="bold red")
+    if kind == "check_completed":
+        cmd = event.get("cmd", "")
+        if cmd:
+            body.append(f"  {cmd}", style="dim")
+        rc = event.get("returncode")
+        if rc not in (0, None):
+            body.append(f"  rc={rc}", style=f"bold {_PAL_ERROR}")
+        dur = event.get("duration_seconds")
+        if dur is not None:
+            body.append(f"  {dur:.1f}s", style="dim")
     if event.get("error"):
-        body.append(f"  error={event['error'][:120]}", style="red")
+        body.append(f"  error={event['error'][:120]}", style=f"bold {_PAL_ERROR}")
     head = event.get("stdout_head")
     if head:
         for line in str(head).splitlines():
             body.append("\n    ")
-            body.append(line, style="red")
+            body.append(line, style=_PAL_ERROR)
     return body
 
 
@@ -954,8 +995,13 @@ if _TEXTUAL_AVAILABLE:
             # ----- Pane titles + active highlight -----
             agent_pane = self.query_one("#agent-pane")
             sim_pane = self.query_one("#sim-pane")
+            sim_starts = [
+                e for e in guardrails
+                if e.get("event") == "opencode_actor_start" and e.get("role") in ("sim", "review")
+            ]
+            sim_label = "Reviewer" if (sim_starts and sim_starts[-1].get("role") == "review") else "SIM"
             agent_pane.border_title = f"Agent ({_short_model(self.agent_model)})"
-            sim_pane.border_title = f"SIM ({_short_model(self.sim_model)})"
+            sim_pane.border_title = f"{sim_label} ({_short_model(self.sim_model)})"
             active = self._determine_active()
             agent_pane.set_class(active == "agent", "active")
             sim_pane.set_class(active == "sim", "active")
