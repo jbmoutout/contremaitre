@@ -4,8 +4,11 @@ Layout:
     header    run id, agent + SIM models, docker image
     panes     Agent (left) | SIM (right) — RichLog widgets with scrollback
     log       guardrail_events.jsonl + recoveries.jsonl tail (RichLog)
-    footer    turn count, SETTLED + IMPL_COMPLETE flags, subagents,
-              recoveries count, elapsed, status
+    footer    4 zones separated by ` │ ` —
+              (1) pipeline breadcrumb,
+              (2) gates: settled / impl + review rounds + test pass-rate,
+              (3) metrics: A/S turns, sub-agents, recoveries, elapsed, cost,
+              (4) process verdict (running / exited N / terminal state).
 
 Scrollback: mouse wheel / PageUp / PageDown / Home / End inside any pane.
 Auto-sticks to bottom when at bottom; stays put if you've scrolled up.
@@ -122,6 +125,18 @@ def _fmt_elapsed(seconds: float | None) -> str:
     return f"{h}h{m:02d}m"
 
 
+# Footer / chrome palette — mirrors viewer.html CSS vars so footer reads in
+# the same language as agent/SIM panes (which already use these hexes via
+# _TOOL_STYLES below). Kept as module constants so renderers stay terse.
+_PAL_BRIGHT = "#FFFFFF"
+_PAL_TEXT = "#C9C9C9"
+_PAL_DIM = "#555555"
+_PAL_VDIM = "#444444"
+_PAL_SUCCESS = "#4ADE80"
+_PAL_WARN = "#FFB830"
+_PAL_ERROR = "#FF3B3B"
+
+
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
@@ -220,18 +235,54 @@ def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path 
     text = Text()
     for i, stage in enumerate(stages):
         if i > 0:
-            text.append(" › ", style="dim")
+            text.append(" › ", style=_PAL_VDIM)
         is_current = stage == current and blocked_or_failed is None
         if is_current:
-            text.append(stage, style="bold cyan")
+            text.append(stage, style=f"bold {_PAL_BRIGHT}")
         elif stages.index(current) > i and blocked_or_failed is None:
-            text.append(stage, style="green")
+            text.append(stage, style=_PAL_SUCCESS)
         else:
-            text.append(stage, style="dim")
+            text.append(stage, style=_PAL_DIM)
     if blocked_or_failed:
-        text.append("  →  ", style="dim")
-        text.append(blocked_or_failed, style="bold red")
+        text.append("  →  ", style=_PAL_DIM)
+        text.append(blocked_or_failed, style=f"bold {_PAL_ERROR}")
     return text
+
+
+def _review_summary(review_cycles: list[dict[str, Any]]) -> Text | None:
+    """Compact review-rounds indicator: `R N ✓` or `R N ✗`.
+
+    Reads review_cycles.jsonl (one row per SIM review). Last row's verdict
+    sets the icon; the number is the round count so a bounce shows as `R 2`.
+    """
+
+    if not review_cycles:
+        return None
+    last = review_cycles[-1]
+    n = last.get("round") or len(review_cycles)
+    verdict = (last.get("verdict") or "").upper()
+    t = Text()
+    t.append(f"R {n} ", style=_PAL_TEXT)
+    if verdict == "APPROVED":
+        t.append("✓", style=_PAL_SUCCESS)
+    elif verdict == "CHANGES_REQUESTED":
+        t.append("✗", style=_PAL_WARN)
+    else:
+        t.append("·", style=_PAL_DIM)
+    return t
+
+
+def _tests_summary(test_runs: list[dict[str, Any]]) -> Text | None:
+    """Compact test-runs indicator: `tests P/T ✓` (or ✗ if any failed)."""
+
+    if not test_runs:
+        return None
+    total = len(test_runs)
+    passed = sum(1 for r in test_runs if r.get("returncode") == 0)
+    t = Text()
+    t.append(f"tests {passed}/{total} ", style=_PAL_TEXT)
+    t.append("✓" if passed == total else "✗", style=_PAL_SUCCESS if passed == total else _PAL_ERROR)
+    return t
 
 
 # ---------- Event introspection ----------
@@ -672,6 +723,8 @@ if _TEXTUAL_AVAILABLE:
                 "sim_raw_export": self.run_dir / "sim_raw_export.jsonl",
                 "guardrail_events": self.run_dir / "guardrail_events.jsonl",
                 "recoveries": self.run_dir / "recoveries.jsonl",
+                "review_cycles": self.run_dir / "review_cycles.jsonl",
+                "test_runs": self.run_dir / "test_runs.jsonl",
                 "initial_prompt": self.run_dir / "initial_prompt.txt",
                 "stats": self.run_dir / "stats.json",
             }
@@ -894,62 +947,81 @@ if _TEXTUAL_AVAILABLE:
             self.query_one("#activity-panel").border_title = f"orchestrator activity{age_str}"
 
             # ----- Footer -----
+            # Verdict (zone 4) — the one thing you glance at to answer
+            # "did it work?". Bright + bold, parked at the right edge.
             rc = self.proc.poll() if self.proc else None
             if self.proc is None:
                 stats = self.paths["stats"]
                 if stats.exists():
                     try:
                         d = json.loads(stats.read_text(encoding="utf-8"))
-                        status = f"{d.get('terminal_state','?')} · {d.get('verdict','?')}"
-                        style = "bold green" if d.get("verdict") == "READY_FOR_DRAFT_PR" else "bold yellow"
+                        status = f"{d.get('terminal_state', '?')} · {d.get('verdict', '?')}"
+                        verdict_style = (
+                            f"bold {_PAL_SUCCESS}" if d.get("verdict") == "READY_FOR_DRAFT_PR" else f"bold {_PAL_WARN}"
+                        )
                     except (OSError, json.JSONDecodeError):
                         status = "attached"
-                        style = "cyan"
+                        verdict_style = _PAL_TEXT
                 else:
                     status = "attached"
-                    style = "cyan"
+                    verdict_style = _PAL_TEXT
             elif rc is None:
                 status = "running"
-                style = "green"
+                verdict_style = f"bold {_PAL_BRIGHT}"
             elif rc == 0:
                 status = "exited 0"
-                style = "bold green"
+                verdict_style = f"bold {_PAL_SUCCESS}"
             else:
                 status = f"exited {rc}"
-                style = "bold red"
+                verdict_style = f"bold {_PAL_ERROR}"
 
             crumb = _state_breadcrumb(guardrails, terminal_stats=stats_path if terminal else None)
+            sep = Text(" │ ", style=_PAL_VDIM)
 
             footer = Text()
+
+            # ----- Zone 1: pipeline breadcrumb -----
             footer.append(crumb)
-            footer.append("   ")
-            footer.append(f"turns A:{agent_turns} S:{sim_turns}")
-            footer.append(" · ")
-            footer.append("SETTLED" if settled else "no settled", style="bold green" if settled else "dim")
-            footer.append(" · ")
-            footer.append(
-                "IMPL_COMPLETE" if impl_complete else "no impl_complete", style="bold green" if impl_complete else "dim"
-            )
-            footer.append(" · ")
-            footer.append(f"subagents: {subagents}")
-            footer.append(" · ")
-            # Free-tier models report $0 per event; render "free" rather
-            # than `$0.0000` so the footer reads as "this run is free"
-            # instead of "this run costs almost nothing".
+            footer.append(sep)
+
+            # ----- Zone 2: gates & quality (achievements vs not-yet) -----
+            footer.append("● " if settled else "○ ", style=_PAL_SUCCESS if settled else _PAL_VDIM)
+            footer.append("settled", style=_PAL_TEXT if settled else _PAL_DIM)
+            footer.append("  ")
+            footer.append("● " if impl_complete else "○ ", style=_PAL_SUCCESS if impl_complete else _PAL_VDIM)
+            footer.append("impl", style=_PAL_TEXT if impl_complete else _PAL_DIM)
+            review_cycles = _read_jsonl(self.paths["review_cycles"])
+            rev_text = _review_summary(review_cycles)
+            if rev_text is not None:
+                footer.append("  ")
+                footer.append(rev_text)
+            test_runs = _read_jsonl(self.paths["test_runs"])
+            tests_text = _tests_summary(test_runs)
+            if tests_text is not None:
+                footer.append("  ")
+                footer.append(tests_text)
+            footer.append(sep)
+
+            # ----- Zone 3: work metrics (dim by default, color only when anomalous) -----
+            footer.append(f"A{agent_turns} S{sim_turns}", style=_PAL_TEXT)
+            footer.append("  ")
+            footer.append(f"sub {subagents}", style=_PAL_DIM)
+            footer.append("  ")
+            rec_count = len(recoveries)
+            footer.append(f"↻{rec_count}", style=_PAL_WARN if rec_count else _PAL_DIM)
+            footer.append("  ")
+            footer.append(_fmt_elapsed(elapsed), style=_PAL_DIM)
+            footer.append("  ")
             if _is_free_model(self.agent_model) and _is_free_model(self.sim_model):
-                footer.append("free (◕‿◕)", style="bold green")
+                footer.append("free (◕‿◕)", style=_PAL_SUCCESS)
             else:
                 cost_usd = sum_costs_in_events(agent_events, sim_events)
-                footer.append(f"cost ${cost_usd:.4f}", style="cyan" if cost_usd > 0 else "dim")
-            footer.append(" · ")
-            footer.append(f"recoveries: {len(recoveries)}", style="yellow" if recoveries else "dim")
-            footer.append(" · ")
-            footer.append(f"elapsed {_fmt_elapsed(elapsed)}")
-            footer.append(" · ")
-            footer.append(status, style=style)
-            footer.append("  ·  Ctrl-C ", style="dim")
-            footer.append("kills" if self.proc else "exits", style="dim")
-            footer.append("  ·  ↑↓/PgUp/PgDn scroll", style="dim")
+                footer.append(f"${cost_usd:.4f}", style=_PAL_TEXT if cost_usd > 0 else _PAL_DIM)
+            footer.append(sep)
+
+            # ----- Zone 4: process verdict (rightmost, biggest contrast) -----
+            footer.append(status, style=verdict_style)
+
             self.query_one("#footer-line", Static).update(footer)
 
         def action_quit(self) -> None:
