@@ -25,12 +25,14 @@ from __future__ import annotations
 import shutil
 import signal
 import time
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import events, prompts
 from .actors import ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
+from .runtime_image import clone_deps_volume_for_run
 from .costs import estimate_recorded_cost_usd
 from .diffscan import DiffScanResult, scan_diff
 from .evaluator import (
@@ -132,6 +134,7 @@ class Orchestrator:
             enforce_preflight(self.config, self.paths)
             self._transition(State.INIT, "creating worktree")
             self._create_worktree(repo, branch)
+            self._provision_run_deps_volume()
             worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
             actor = make_actor_runner(config=self.config, paths=self.paths)
 
@@ -817,6 +820,30 @@ class Orchestrator:
         )
         write_json(self.paths.trajectory, {"states": self.trajectory})
 
+    def _provision_run_deps_volume(self) -> None:
+        """Clone the pristine deps cache into a per-run volume.
+
+        Mutates `self.config.deps_volume` to point at the per-run
+        clone so downstream actor + check container mounts use the
+        ephemeral volume. The pristine cache is untouched (RO in the
+        clone step) and survives for the next run. The per-run
+        volume is labeled with this run's id; `_remove_run_volumes`
+        in `finally` removes it.
+
+        Skipped when no pristine volume was set (no lockfile detected
+        for this target, or fake-mode tests).
+        """
+
+        pristine = self.config.deps_volume
+        if not pristine:
+            return
+        per_run = clone_deps_volume_for_run(
+            pristine=pristine,
+            run_id=self.run_id,
+            base_image=self.config.docker_image,
+        )
+        self.config = dataclasses.replace(self.config, deps_volume=per_run)
+
     def _cleanup_worktree(self) -> None:
         if not self.paths.worktree.name.startswith("contremaitre-"):
             return
@@ -826,6 +853,7 @@ class Orchestrator:
         # no-op (each turn's container is already removed in its
         # `finally`); this catches the timeout / signal paths.
         self._stop_run_containers()
+        self._remove_run_volumes()
         source_repo = GitRepo(self.config.repo, self.paths.git_log)
         worktree_existed = self.paths.worktree.exists()
         if worktree_existed:
@@ -835,6 +863,31 @@ class Orchestrator:
         source_repo.run("worktree", "prune", check=False)
         if worktree_existed:
             self._emit(events.WORKTREE_REMOVED, path=str(self.paths.worktree))
+
+    def _remove_run_volumes(self) -> None:
+        """Remove docker volumes labeled with this run-id.
+
+        Catches the per-run deps clone created by
+        `_provision_run_deps_volume`. Best-effort: a volume still in
+        use (e.g. by a container `_stop_run_containers` didn't fully
+        stop) won't delete; we swallow that so cleanup doesn't mask
+        the real run outcome.
+        """
+
+        import subprocess as _sp
+
+        try:
+            ls = _sp.run(
+                ["docker", "volume", "ls", "-q", "--filter", f"label=contremaitre.run-id={self.run_id}"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, _sp.TimeoutExpired):
+            return
+        for name in (line for line in ls.stdout.split() if line):
+            try:
+                _sp.run(["docker", "volume", "rm", "-f", name], capture_output=True, timeout=15)
+            except (OSError, _sp.TimeoutExpired):
+                continue
 
     def _stop_run_containers(self) -> None:
         """`docker stop` every container labeled with this run-id. Best effort.

@@ -201,6 +201,48 @@ def _prune_stale_deps_volumes(*, lockfile_name: str, current_volume: str) -> Non
             print(f"contremaitre: pruned stale deps volume {name}", file=sys.stderr)
 
 
+def clone_deps_volume_for_run(*, pristine: str, run_id: str, base_image: str) -> str:
+    """Clone the pristine deps cache into a per-run volume, return its name.
+
+    Why a clone per run instead of mounting pristine RW: mounts are
+    shared across container runs against the same lockhash. If run N's
+    agent does `npm install vitest`, vitest persists into the cache and
+    run N+1 sees it even though its lockfile doesn't list it. That's
+    silent state-leak between runs. Per-run clone keeps the cache
+    pristine (no mutation) and gives each run a fresh RW workspace.
+
+    The clone is a one-shot `cp -a` of one docker volume into another,
+    both running inside the contremaitre runtime image so the copy
+    happens over the docker storage filesystem (fast — ~5-15s for a
+    typical Node project, not the 60-90s of a fresh `npm ci`).
+
+    Per-run volume is labeled `contremaitre.run-id=<id>` so the
+    orchestrator's label-based cleanup removes it in `finally`.
+    """
+
+    per_run = f"contremaitre-run-{run_id}-deps"
+    subprocess.run(
+        ["docker", "volume", "create",
+         "--label", "contremaitre.purpose=deps-run",
+         "--label", f"contremaitre.run-id={run_id}",
+         per_run],
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "--label", f"contremaitre.run-id={run_id}",
+            "--label", "contremaitre.role=deps-clone",
+            "-v", f"{pristine}:/src:ro",
+            "-v", f"{per_run}:/dst",
+            base_image,
+            "sh", "-lc", "cp -a /src/. /dst/",
+        ],
+        check=True, capture_output=True, text=True, timeout=300,
+    )
+    return per_run
+
+
 def _volume_exists(name: str) -> bool:
     try:
         proc = subprocess.run(
