@@ -650,12 +650,20 @@ class Orchestrator:
                 shutil.rmtree(self.paths.worktree)
             else:
                 raise RuntimeError(f"refusing to remove non-Contremaitre path: {self.paths.worktree}")
-        # Fetch the base branch fresh from the source repo's `origin` and
-        # branch the worktree from the remote-tracking ref, NOT the local
-        # `<base>` ref. Local refs are operator-mutable (HEAD may sit on a
-        # prior contremaitre run's branch; local main may be stale or
-        # ahead of upstream) — anchoring on `origin/<base>` makes runs
-        # reproducible regardless of the source repo's checkout state.
+        # Re-pin the cache's `origin` URL to the canonical source for
+        # this run BEFORE fetching. The previous run's worktree rewired
+        # `origin` to `--fork` (so the publisher could `git push origin
+        # HEAD:<branch>`), and since worktrees share git config with the
+        # cache, that URL persists. Without this step, run N+1's fetch
+        # would target run N's `--fork` URL even if the operator passed
+        # a different `--fork` (or set `--upstream`) on the new CLI.
+        source_url = self.config.upstream or self.config.fork
+        if source_url:
+            repo.run("remote", "set-url", "origin", source_url, check=False)
+        # Fetch the base branch fresh from `origin` and branch the
+        # worktree from the remote-tracking ref — never from local refs.
+        # Local refs are operator-mutable and were the root cause of
+        # earlier run-to-run check flakiness.
         repo.run("fetch", "origin", self.config.base)
         base_ref = f"origin/{self.config.base}"
         self._base_sha = repo.run("rev-parse", base_ref).stdout.strip()
