@@ -759,9 +759,9 @@ if _TEXTUAL_AVAILABLE:
             if now - self._docker_ts > DOCKER_REFRESH_S:
                 self._docker_state = _docker_info(self.docker_image, self.worktree)
                 self._docker_ts = now
+            self._update_turn_separators()
             self._update_agent_log()
             self._update_sim_log()
-            self._update_turn_separators()
             self._update_activity_log()
             self._update_chrome()
 
@@ -808,12 +808,12 @@ if _TEXTUAL_AVAILABLE:
 
         def _update_turn_separators(self) -> None:
             # Drive handover separators off `opencode_actor_start` in
-            # guardrail_events — each one marks the orchestrator handing
-            # control to a new role. Running after the per-pane log
-            # updates means the separator lands at the end of the
-            # just-finished turn's events (the previous container has
-            # exited by the time the next start is logged, so turn N's
-            # tail is flushed before start N+1 appears).
+            # guardrail_events. Runs BEFORE the per-pane log updates so
+            # the separator lands between turn N and turn N+1: the
+            # orchestrator guarantees all of turn N's events are in
+            # raw_export before writing agent_start[N+1], so the previous
+            # tick already flushed them; the separator then precedes any
+            # turn N+1 events written in this tick.
             guardrails = _read_jsonl(self.paths["guardrail_events"])
             agent_starts = [
                 e for e in guardrails
