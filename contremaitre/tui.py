@@ -740,13 +740,13 @@ if _TEXTUAL_AVAILABLE:
             yield Static("", id="header")
             with Horizontal(id="panes"):
                 with Vertical(classes="pane", id="agent-pane"):
-                    yield RichLog(id="agent-log", auto_scroll=True, markup=False, wrap=True, highlight=False)
+                    yield RichLog(id="agent-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
                     yield Static("", classes="pane-sub", id="agent-sub")
                 with Vertical(classes="pane", id="sim-pane"):
-                    yield RichLog(id="sim-log", auto_scroll=True, markup=False, wrap=True, highlight=False)
+                    yield RichLog(id="sim-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
                     yield Static("", classes="pane-sub", id="sim-sub")
             with Vertical(id="activity-panel"):
-                yield RichLog(id="activity-log", auto_scroll=True, markup=False, wrap=True, highlight=False)
+                yield RichLog(id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
             yield Static("", id="footer-line")
 
         def on_mount(self) -> None:
@@ -765,9 +765,14 @@ if _TEXTUAL_AVAILABLE:
             self._update_activity_log()
             self._update_chrome()
 
+        @staticmethod
+        def _at_bottom(widget: RichLog) -> bool:
+            return widget.scroll_y >= widget.max_scroll_y
+
         def _update_agent_log(self) -> None:
             events = _read_jsonl(self.paths["raw_export"])
             widget = self.query_one("#agent-log", RichLog)
+            at_bottom = self._at_bottom(widget)
             if not events and not self._showed_initial_prompt:
                 ip = self.paths["initial_prompt"]
                 if ip.exists():
@@ -788,13 +793,18 @@ if _TEXTUAL_AVAILABLE:
             for e in events[self._agent_idx :]:
                 widget.write(_render_event(e))
             self._agent_idx = len(events)
+            if at_bottom:
+                widget.scroll_end(animate=False)
 
         def _update_sim_log(self) -> None:
             events = _read_jsonl(self.paths["sim_raw_export"])
             widget = self.query_one("#sim-log", RichLog)
+            at_bottom = self._at_bottom(widget)
             for e in events[self._sim_idx :]:
                 widget.write(_render_event(e))
             self._sim_idx = len(events)
+            if at_bottom:
+                widget.scroll_end(animate=False)
 
         def _update_turn_separators(self) -> None:
             # Drive handover separators off `opencode_actor_start` in
@@ -816,6 +826,8 @@ if _TEXTUAL_AVAILABLE:
             ]
             agent_widget = self.query_one("#agent-log", RichLog)
             sim_widget = self.query_one("#sim-log", RichLog)
+            agent_at_bottom = self._at_bottom(agent_widget)
+            sim_at_bottom = self._at_bottom(sim_widget)
             while self._agent_separators_rendered < len(agent_starts) - 1:
                 n = self._agent_separators_rendered + 1
                 role = agent_starts[n - 1].get("role", "agent")
@@ -826,9 +838,14 @@ if _TEXTUAL_AVAILABLE:
                 role = sim_starts[n - 1].get("role", "sim")
                 sim_widget.write(_turn_separator(n, _role_label(role)))
                 self._sim_separators_rendered += 1
+            if agent_at_bottom:
+                agent_widget.scroll_end(animate=False)
+            if sim_at_bottom:
+                sim_widget.scroll_end(animate=False)
 
         def _update_activity_log(self) -> None:
             widget = self.query_one("#activity-log", RichLog)
+            at_bottom = self._at_bottom(widget)
             guardrails = _read_jsonl(self.paths["guardrail_events"])
             for e in guardrails[self._guardrail_idx :]:
                 widget.write(_render_guardrail(e))
@@ -837,6 +854,8 @@ if _TEXTUAL_AVAILABLE:
             for e in recoveries[self._recoveries_idx :]:
                 widget.write(_render_guardrail(e))
             self._recoveries_idx = len(recoveries)
+            if at_bottom:
+                widget.scroll_end(animate=False)
 
         def _determine_active(self) -> str | None:
             ag = self._docker_state.get("agent_container")
