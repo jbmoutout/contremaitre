@@ -142,6 +142,13 @@ def ensure_deps_volume(*, repo: Path, base_image: str, runs_root: Path) -> str |
         [
             "docker", "run", "--rm",
             "--label", "contremaitre.role=deps-install",
+            # Prevent lifecycle hooks that try to write to the source
+            # repo (which is mounted RO). Husky's `prepare` script calls
+            # `husky install` → writes to `.git/hooks/` → EACCES on the
+            # RO mount. HUSKY=0 is the canonical opt-out; CI=1 is the
+            # broader signal for "don't run interactive setup hooks".
+            "-e", "HUSKY=0",
+            "-e", "CI=1",
             "-v", f"{repo.resolve()}:/install:ro",
             "-v", f"{volume}:/install/node_modules",
             "-w", "/install",

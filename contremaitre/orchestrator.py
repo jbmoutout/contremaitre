@@ -693,16 +693,29 @@ class Orchestrator:
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
         title, body = _derive_commit_message(self.paths.worktree, self.run_id)
-        # Pathspec excludes keep orchestration-internal files out of the
-        # staged set even though the files stay in the worktree:
+        # Pathspec excludes keep orchestration-internal and build-output
+        # files out of the staged set. These stay in the worktree (SIM can
+        # read them; agent can produce them) but must never land in the
+        # PR diff — the SIM correctly rejects them as "unrelated drift".
         #
         # `.contremaitre/*` — SETTLED_DESIGN.md, IMPLEMENTATION_COMPLETE,
-        #   architecture-review.html. Must stay for WORK-phase SIM reads.
-        #
-        # `opencode.json` — opencode may create a local config file in the
-        #   worktree root even though a synthesized config is mounted :ro.
-        #   This is opencode internal state, not part of any design.
-        repo.run("add", "--", ".", ":(exclude).contremaitre", ":(exclude)opencode.json")
+        #   architecture-review.html.
+        # `opencode.json` — opencode config written by the agent runtime.
+        # `dist/`, `build/`, `out/`, `.next/` — compiled / bundled output
+        #   that agents sometimes produce as a verification step. All are
+        #   conventionally gitignored in upstream repos, but the worktree
+        #   may not carry the upstream .gitignore for all of them.
+        # `__pycache__/` — Python bytecode.
+        repo.run(
+            "add", "--", ".",
+            ":(exclude).contremaitre",
+            ":(exclude)opencode.json",
+            ":(exclude)dist",
+            ":(exclude)build",
+            ":(exclude)out",
+            ":(exclude).next",
+            ":(exclude)__pycache__",
+        )
         repo.run("commit", "-m", title, "-m", body)
         self._emit(
             events.HOST_COMMIT_CREATED,
@@ -931,13 +944,18 @@ def _only_contremaitre_changes(porcelain: str) -> bool:
     Empty porcelain (no changes at all) is also "clean".
     """
 
-    _INTERNAL_PATHS = (".contremaitre/", ".contremaitre", "opencode.json")
+    _INTERNAL_PREFIXES = (
+        ".contremaitre/", ".contremaitre",
+        "opencode.json",
+        "dist/", "build/", "out/", ".next/",
+        "__pycache__/",
+    )
 
     for line in porcelain.splitlines():
         if not line.strip():
             continue
         path = line[3:].strip().strip('"')
-        if not any(path == p or path.startswith(p) for p in _INTERNAL_PATHS):
+        if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
             return False
     return True
 
