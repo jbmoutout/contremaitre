@@ -44,16 +44,16 @@ class ControlPlaneTest(unittest.TestCase):
         # bullets from the agent's revision prompt would leave the field
         # empty here.
         guardrail_lines = [
-            json.loads(line)
+            events.load(json.loads(line))
             for line in (result.run_dir / "guardrail_events.jsonl")
             .read_text(encoding="utf-8")
             .splitlines()
             if line.strip()
         ]
-        revisions = [g for g in guardrail_lines if g.get("event") == events.REVISION_REQUESTED]
+        revisions = [g for g in guardrail_lines if isinstance(g, events.RevisionRequested)]
         self.assertGreaterEqual(len(revisions), 1)
         self.assertEqual(
-            revisions[0]["required_changes"],
+            revisions[0].required_changes,
             ["Add the missing boundary test before review."],
         )
 
@@ -65,8 +65,12 @@ class ControlPlaneTest(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_NEEDS_HUMAN)
-        guardrails = (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8")
-        self.assertIn(events.MALFORMED_VERDICT, guardrails)
+        guardrails = [
+            events.load(json.loads(line))
+            for line in (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertTrue(any(isinstance(g, events.MalformedVerdict) for g in guardrails))
 
     def test_forbidden_path_blocks_approved_publication(self):
         result, _ = self._run_fixture(run_slug="forbidden", agent_scenario="forbidden_path")
@@ -92,8 +96,12 @@ class ControlPlaneTest(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_NEEDS_HUMAN)
-        guardrails = (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8")
-        self.assertIn(events.TURN_CAP, guardrails)
+        guardrails = [
+            events.load(json.loads(line))
+            for line in (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertTrue(any(isinstance(g, events.TurnCap) for g in guardrails))
 
     def _run_fixture(
         self,

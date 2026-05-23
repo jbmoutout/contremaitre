@@ -547,14 +547,12 @@ class RecordRecoveryTest(unittest.TestCase):
         paths = build_run_paths(root / "runs", new_run_id("rec"))
         paths.run_dir.mkdir(parents=True)
 
-        _record_recovery(
-            paths,
-            kind=events.SQLITE_RECOVERY_SILENT_STALL,
+        _record_recovery(paths, event=events.SqliteRecoverySilentStall(
             role="agent",
             recovered_chars=42,
             message_id="msg_x",
             step_finish_completed=True,
-        )
+        ))
 
         rec_lines = [
             json.loads(line)
@@ -562,10 +560,12 @@ class RecordRecoveryTest(unittest.TestCase):
             if line.strip()
         ]
         self.assertEqual(len(rec_lines), 1)
-        self.assertEqual(rec_lines[0]["kind"], events.SQLITE_RECOVERY_SILENT_STALL)
-        self.assertEqual(rec_lines[0]["role"], "agent")
-        self.assertEqual(rec_lines[0]["recovered_chars"], 42)
-        self.assertTrue(rec_lines[0]["step_finish_completed"])
+        loaded = events.load(rec_lines[0])
+        self.assertIsInstance(loaded, events.SqliteRecoverySilentStall)
+        assert isinstance(loaded, events.SqliteRecoverySilentStall)
+        self.assertEqual(loaded.role, "agent")
+        self.assertEqual(loaded.recovered_chars, 42)
+        self.assertTrue(loaded.step_finish_completed)
 
         guard_lines = [
             json.loads(line)
@@ -574,10 +574,7 @@ class RecordRecoveryTest(unittest.TestCase):
         ]
         self.assertEqual(len(guard_lines), 1)
         # Mirror naming convention: guardrail event is `recovery_<kind>`.
-        self.assertEqual(
-            guard_lines[0]["event"],
-            f"recovery_{events.SQLITE_RECOVERY_SILENT_STALL}",
-        )
+        self.assertEqual(guard_lines[0]["event"], "recovery_sqlite_recovery_silent_stall")
         self.assertEqual(guard_lines[0]["role"], "agent")
 
 

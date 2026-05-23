@@ -56,7 +56,7 @@ def run_checks(
     in_container = config.actor_mode == ActorMode.OPENCODE
     for index, cmd in enumerate(config.check_cmds):
         if emit_event is not None:
-            emit_event(events.CHECK_STARTED, cmd=cmd, index=index, in_container=in_container)
+            emit_event(events.CheckStarted(cmd=cmd, index=index, in_container=in_container))
         started = time.monotonic()
         try:
             if in_container:
@@ -65,14 +65,13 @@ def run_checks(
                 proc = _run_host(cmd, worktree=paths.worktree)
         except subprocess.TimeoutExpired:
             if emit_event is not None:
-                emit_event(
-                    events.CHECK_COMPLETED,
+                emit_event(events.CheckCompleted(
                     cmd=cmd,
                     index=index,
                     returncode=None,
                     duration_seconds=round(time.monotonic() - started, 3),
                     timed_out=True,
-                )
+                ))
             raise
         result = CheckResult(
             cmd=cmd,
@@ -96,18 +95,19 @@ def run_checks(
             # On failure, include the head of stdout so the TUI's activity
             # panel surfaces the actual error without the operator having
             # to grep test_runs.jsonl. Full output is always in that file.
-            payload = {
-                "cmd": cmd,
-                "index": index,
-                "returncode": result.returncode,
-                "duration_seconds": result.duration_seconds,
-                "timed_out": False,
-            }
+            stdout_head: str | None = None
             if result.returncode != 0:
                 head = "\n".join((result.stdout or result.stderr or "").splitlines()[:8])
                 if head:
-                    payload["stdout_head"] = head
-            emit_event(events.CHECK_COMPLETED, **payload)
+                    stdout_head = head
+            emit_event(events.CheckCompleted(
+                cmd=cmd,
+                index=index,
+                returncode=result.returncode,
+                duration_seconds=result.duration_seconds,
+                timed_out=False,
+                stdout_head=stdout_head,
+            ))
         results.append(result)
     return results
 

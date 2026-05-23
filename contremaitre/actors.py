@@ -260,14 +260,13 @@ class OpencodeActorRunner:
         )
         append_jsonl(
             self.paths.guardrail_events,
-            {
-                "event": events.OPENCODE_ACTOR_START,
-                "role": role,
-                "mount_mode": mount_mode,
-                "model": model,
-                "timeout_seconds": timeout_seconds,
-                "cmd_redacted": redact_command(cmd),
-            },
+            events.dump(events.OpencodeActorStart(
+                role=role,
+                mount_mode=mount_mode,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                cmd_redacted=redact_command(cmd),
+            )),
         )
         raw_export.parent.mkdir(parents=True, exist_ok=True)
         returncode, stderr = _run_detached_container(
@@ -301,14 +300,12 @@ class OpencodeActorRunner:
                 _append_synthetic_text_event(
                     raw_export, recovered, msg_id, session_id or new_session_id
                 )
-                _record_recovery(
-                    self.paths,
-                    kind=events.SQLITE_RECOVERY_SILENT_STALL,
+                _record_recovery(self.paths, event=events.SqliteRecoverySilentStall(
                     role=role,
                     recovered_chars=len(recovered),
                     message_id=msg_id,
                     step_finish_completed=completed,
-                )
+                ))
                 self._append_transcript(role=role, text=recovered)
                 self._harvest_step_finishes(role=role, state_dir=state_dir, raw_export=raw_export)
                 return ActorOutput(text=recovered, stderr=stderr, returncode=returncode)
@@ -334,11 +331,7 @@ class OpencodeActorRunner:
         if count:
             append_jsonl(
                 self.paths.guardrail_events,
-                {
-                    "event": events.SUBAGENT_STEP_FINISH_HARVESTED,
-                    "role": role,
-                    "count": count,
-                },
+                events.dump(events.SubagentStepFinishHarvested(role=role, count=count)),
             )
 
     def _append_transcript(self, *, role: str, text: str) -> None:
@@ -583,7 +576,7 @@ def _latest_error_after_text_count(path: Path, baseline_text_count: int) -> str 
     return None
 
 
-def _record_recovery(paths: RunPaths, *, kind: str, **fields) -> None:
+def _record_recovery(paths: RunPaths, *, event: events.RecoveryEvent) -> None:
     """Append a recovery event to both recoveries.jsonl and guardrail_events.
 
     `recoveries.jsonl` is the forensic capture for sqlite recoveries +
@@ -592,8 +585,10 @@ def _record_recovery(paths: RunPaths, *, kind: str, **fields) -> None:
     so a single tail catches them too.
     """
 
-    record = {"kind": kind, **fields}
-    append_jsonl(paths.recoveries, record)
+    rec_dict = events.dump(event)
+    kind = rec_dict["kind"]
+    fields = {k: v for k, v in rec_dict.items() if k != "kind"}
+    append_jsonl(paths.recoveries, {"kind": kind, **fields})
     append_jsonl(paths.guardrail_events, {"event": f"recovery_{kind}", **fields})
 
 
