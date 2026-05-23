@@ -1002,7 +1002,7 @@ if _TEXTUAL_AVAILABLE:
             sim_label = "Reviewer" if (sim_starts and sim_starts[-1].get("role") == "review") else "SIM"
             agent_pane.border_title = f"Agent ({_short_model(self.agent_model)})"
             sim_pane.border_title = f"{sim_label} ({_short_model(self.sim_model)})"
-            active = self._determine_active()
+            active = None if terminal else self._determine_active()
             agent_pane.set_class(active == "agent", "active")
             sim_pane.set_class(active == "sim", "active")
 
@@ -1043,7 +1043,12 @@ if _TEXTUAL_AVAILABLE:
                 status = "running"
                 verdict_style = f"bold {_PAL_BRIGHT}"
             elif rc == 0:
-                status = "exited 0"
+                if stats_data.get("verdict") == "READY_FOR_DRAFT_PR":
+                    status = "PUBLISHED"
+                elif stats_data:
+                    status = f"{stats_data.get('terminal_state', '?')} · {stats_data.get('verdict', '?')}"
+                else:
+                    status = "exited 0"
                 verdict_style = f"bold {_PAL_SUCCESS}"
             else:
                 if stats_data:
