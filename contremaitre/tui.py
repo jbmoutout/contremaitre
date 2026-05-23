@@ -1057,6 +1057,14 @@ if _TEXTUAL_AVAILABLE:
             # ----- Zone 4: process verdict (rightmost, biggest contrast) -----
             footer.append(status, style=verdict_style)
 
+            viewer = self.run_dir / "viewer.html"
+            if terminal and viewer.exists():
+                footer.append("  ")
+                footer.append(
+                    "viewer ↗",
+                    style=f"{_PAL_ACCENT} link file://{viewer.resolve()}",
+                )
+
             self.query_one("#footer-line", Static).update(footer)
 
         def action_quit(self) -> None:
