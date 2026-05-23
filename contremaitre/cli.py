@@ -711,38 +711,49 @@ def _has_flag_in(argv: list[str], flag: str) -> bool:
 
 
 def _fetch_free_models() -> list[dict] | None:
-    """Pull OpenRouter's public model catalog, return the $0/$0 entries.
+    """Pull OpenCode Zen's catalog, return the free entries.
 
-    None on network or parse failure — caller falls through to defaults
-    so a picker UI never blocks a run that would otherwise have launched.
+    Why OpenCode Zen and not OpenRouter: the OpenRouter `:free` models
+    route through third-party providers (Crucible, Lambda, etc.) whose
+    daily free quota is shared across all OpenRouter users. We hit
+    `"Out of credits"` mid-run when the upstream is exhausted, even
+    though the model is free and the operator's account has budget.
+    OpenCode Zen's free tier is served by OpenCode itself with no
+    OPENCODE_API_KEY required — the opencode binary in our runtime
+    image has built-in access.
+
+    Filter heuristic: id ends in `-free` (the convention for
+    NVIDIA-trial / DeepSeek / Qwen tiers) plus a small allow-list for
+    stealth-named free models (e.g. `big-pickle`).
+
+    None on network or parse failure — caller falls through to
+    defaults so a picker UI never blocks a run that would otherwise
+    have launched.
     """
 
     import urllib.error
     import urllib.request
 
+    # OpenCode Zen rejects Python's default User-Agent with 403, set our own.
+    req = urllib.request.Request(
+        "https://opencode.ai/zen/v1/models",
+        headers={"User-Agent": "contremaitre"},
+    )
     try:
-        with urllib.request.urlopen("https://openrouter.ai/api/v1/models", timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
         return None
     free: list[dict] = []
+    stealth = {"big-pickle"}
     for m in payload.get("data", []):
-        pricing = m.get("pricing") or {}
-        if pricing.get("prompt") == "0" and pricing.get("completion") == "0":
-            free.append({
-                "id": m.get("id") or "?",
-                "ctx": int(m.get("context_length") or 0),
-            })
+        mid = m.get("id") or ""
+        if not mid:
+            continue
+        if mid.endswith("-free") or mid in stealth:
+            free.append({"id": mid})
     free.sort(key=lambda m: m["id"])
     return free
-
-
-def _format_ctx(n: int) -> str:
-    if n >= 1_000_000:
-        return f"{n/1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n//1_000}k"
-    return str(n)
 
 
 def _pick_model(*, role: str, default_id: str, free_models: list[dict]) -> str:
@@ -759,29 +770,31 @@ def _pick_model(*, role: str, default_id: str, free_models: list[dict]) -> str:
     """
 
     print()
-    print(f"contremaitre: pick a free OpenRouter model for {role}")
+    print(f"contremaitre: pick a free OpenCode Zen model for {role}")
     print()
-    bare_default = default_id.removeprefix("openrouter/") if default_id else ""
-    # Try exact match first, then the `:free` variant — the CLI default is
-    # typically the paid model name; its free analog is `<name>:free`.
+    # OpenCode Zen ids are bare (`deepseek-v4-flash-free`); opencode
+    # addresses them as `opencode/<id>`. The operator's CLI default is
+    # typically the openrouter paid form — try matching its bare model
+    # name (e.g. `deepseek-v4-flash`) against the `-free` variants.
+    bare = default_id.rsplit("/", 1)[-1] if default_id else ""
+    candidates = {bare, f"{bare}-free"}
     default_idx = next(
-        (i for i, m in enumerate(free_models)
-         if m["id"] == bare_default or m["id"] == f"{bare_default}:free"),
+        (i for i, m in enumerate(free_models) if m["id"] in candidates),
         None,
     )
     width = len(str(len(free_models) - 1))
     for i, m in enumerate(free_models):
         marker = "  ← default" if i == default_idx else ""
-        print(f"  {i:>{width}}) {m['id']:<55} ctx {_format_ctx(m['ctx']):>5}{marker}")
+        print(f"  {i:>{width}}) opencode/{m['id']}{marker}")
     if default_idx is None:
-        print(f"  (CLI default `{default_id}` not in free list; Enter keeps it anyway)")
+        print(f"  (CLI default `{default_id}` has no free analog; Enter keeps it anyway)")
     print()
     # Enter normalises to the highlighted free variant when one matched
     # (so the picker's display and its return value agree). When no
     # match was found, fall back to the raw default_id — operator
     # explicitly opted into a non-free model on the CLI.
     enter_choice = (
-        f"openrouter/{free_models[default_idx]['id']}"
+        f"opencode/{free_models[default_idx]['id']}"
         if default_idx is not None
         else default_id
     )
@@ -795,7 +808,7 @@ def _pick_model(*, role: str, default_id: str, free_models: list[dict]) -> str:
         if reply == "q":
             raise KeyboardInterrupt
         if reply.isdigit() and 0 <= int(reply) < len(free_models):
-            return f"openrouter/{free_models[int(reply)]['id']}"
+            return f"opencode/{free_models[int(reply)]['id']}"
         print(f"  not a valid index — try a number 0–{len(free_models)-1}, Enter, or q")
 
 

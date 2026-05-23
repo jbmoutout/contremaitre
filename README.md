@@ -64,7 +64,7 @@ just deepdeep tui-run main git@github.com:<you>/<target>.git
 
 | Flag | Default | When to change |
 |---|---|---|
-| `--agent-model` | omit to pick interactively at launch (numbered list of OpenRouter free models); CLI fallback is `openrouter/deepseek/deepseek-v4-flash` | bump to `openrouter/anthropic/claude-opus-4.7` for thornier targets |
+| `--agent-model` | omit to pick interactively at launch (numbered list of [OpenCode Zen](https://opencode.ai/docs/zen/) free models — no auth needed, served by OpenCode); CLI fallback is `openrouter/deepseek/deepseek-v4-flash` | bump to `openrouter/anthropic/claude-opus-4.7` for thornier targets |
 | `--sim-model` | omit to pick (second prompt; defaults to your agent pick) | usually keep matched to agent-model |
 | `--docker-image` | `contremaitre-agent:latest` | only when you've built a custom image |
 
