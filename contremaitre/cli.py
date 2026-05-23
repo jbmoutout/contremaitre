@@ -19,6 +19,7 @@ from .models import ActorMode, Caps, PublishMode, RunConfig
 from .orchestrator import run
 from .paths import slugify
 from .preflight import run_preflight
+from .cleanup import prune_dangling_images, run_cleanup
 from .runtime_image import DepsInstallError, ensure_deps_volume, list_deps_volumes
 from .viewer import VIEWER_FILENAME, build_viewer
 
@@ -530,190 +531,16 @@ def _ensure_default_image_built(config: RunConfig) -> int:
     return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
 
 
-_WORKTREE_NAME_RE = re.compile(r"^contremaitre-(\d{8}-\d{6}-[A-Za-z0-9._-]+)$")
-
-
 def _cleanup_cmd(args: argparse.Namespace) -> int:
-    """Prune stale containers + worktrees + dangling images (+ deps volumes).
+    """Dispatch to cleanup module after extracting typed args from Namespace."""
 
-    A container/worktree is "stale" when its corresponding run-dir under
-    `--runs-root` no longer exists — i.e. the orchestrator's `finally`
-    didn't get to clean it up (typically because the parent was
-    SIGKILL'd or the host rebooted mid-run).
-
-    Containers are identified by their `contremaitre.run-id=<id>` label,
-    set at launch on every contremaitre-managed docker run. Worktrees
-    are identified by their `/tmp/contremaitre-<run-id>/` path.
-
-    Lockhash-keyed deps volumes (`contremaitre-deps-*`) are the
-    across-run dependency cache and are kept by default. Pass `--deps`
-    to nuke them too (forces re-install on the next run).
-    """
-
-    runs_root = args.runs_root.resolve()
-    dry = args.dry_run
-
-    stale_containers = _scan_stale_containers(runs_root)
-    stale_worktrees = _scan_stale_worktrees(runs_root)
-    dangling_images = [] if args.skip_images else _scan_dangling_images()
-    deps_volumes = list_deps_volumes() if args.deps else []
-    cache_clones = _list_cache_clones() if args.repos else []
-
-    if not (stale_containers or stale_worktrees or dangling_images or deps_volumes or cache_clones):
-        print("contremaitre cleanup: nothing to do")
-        return 0
-
-    action = "would remove (dry-run)" if dry else "removing"
-    print(f"contremaitre cleanup: {action}")
-    for cid, run_id in stale_containers:
-        print(f"  container {cid}  (run-id {run_id})")
-    for path in stale_worktrees:
-        print(f"  worktree  {path}")
-    for name in deps_volumes:
-        print(f"  deps-vol  {name}")
-    for path in cache_clones:
-        print(f"  clone     {path}")
-    if dangling_images:
-        print(f"  {len(dangling_images)} dangling image(s)")
-
-    if dry:
-        return 0
-
-    import shutil as _shutil
-
-    removed_containers = 0
-    for cid, _ in stale_containers:
-        proc = subprocess.run(
-            ["docker", "rm", "-f", cid],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if proc.returncode == 0:
-            removed_containers += 1
-
-    removed_wts = 0
-    for path in stale_worktrees:
-        try:
-            _shutil.rmtree(path, ignore_errors=True)
-            removed_wts += 1
-        except OSError:
-            pass
-
-    removed_vols = 0
-    for name in deps_volumes:
-        proc = subprocess.run(
-            ["docker", "volume", "rm", "-f", name],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode == 0:
-            removed_vols += 1
-
-    removed_clones = 0
-    for path in cache_clones:
-        try:
-            _shutil.rmtree(path, ignore_errors=True)
-            removed_clones += 1
-        except OSError:
-            pass
-
-    if dangling_images:
-        _prune_dangling_images()
-
-    parts = [f"{removed_containers} container(s)", f"{removed_wts} worktree(s)"]
-    if args.deps:
-        parts.append(f"{removed_vols} deps-volume(s)")
-    if args.repos:
-        parts.append(f"{removed_clones} clone(s)")
-    if dangling_images:
-        parts.append(f"{len(dangling_images)} dangling image(s)")
-    print("contremaitre cleanup: removed " + ", ".join(parts))
-    return 0
-
-
-def _list_cache_clones() -> list[Path]:
-    """Auto-managed local clones under `_CACHE_ROOT`."""
-
-    if not _CACHE_ROOT.is_dir():
-        return []
-    return sorted(p for p in _CACHE_ROOT.iterdir() if p.is_dir() and (p / ".git").exists())
-
-
-def _scan_stale_containers(runs_root: Path) -> list[tuple[str, str]]:
-    """Containers labeled `contremaitre.run-id=<id>` whose run-dir is gone.
-
-    Returns [(container_id, run_id), …]. Includes stopped/exited containers
-    so left-behind `--rm` containers that the daemon didn't auto-remove
-    (rare, but happens on daemon crash) get cleaned too.
-    """
-
-    try:
-        proc = subprocess.run(
-            [
-                "docker",
-                "ps",
-                "-aq",
-                "--filter",
-                "label=contremaitre.run-id",
-                "--format",
-                '{{.ID}}\t{{.Label "contremaitre.run-id"}}',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
-        return []
-    stale: list[tuple[str, str]] = []
-    for line in proc.stdout.splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        cid, run_id = parts[0].strip(), parts[1].strip()
-        if not cid or not run_id:
-            continue
-        if not (runs_root / run_id).exists():
-            stale.append((cid, run_id))
-    return stale
-
-
-def _scan_stale_worktrees(runs_root: Path) -> list[Path]:
-    """Return /tmp/contremaitre-* directories whose run dir is gone."""
-
-    stale: list[Path] = []
-    for tmp_root in (Path("/tmp"), Path("/private/tmp")):
-        if not tmp_root.exists():
-            continue
-        for path in tmp_root.glob("contremaitre-*"):
-            if not path.is_dir():
-                continue
-            match = _WORKTREE_NAME_RE.match(path.name)
-            if not match:
-                continue
-            run_id = match.group(1)
-            run_dir = runs_root / run_id
-            if not run_dir.exists() and path not in stale:
-                stale.append(path)
-    return stale
-
-
-def _scan_dangling_images() -> list[str]:
-    try:
-        proc = subprocess.run(
-            ["docker", "images", "-q", "--filter", "dangling=true"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return run_cleanup(
+        runs_root=args.runs_root.resolve(),
+        dry_run=args.dry_run,
+        skip_images=args.skip_images,
+        deps=args.deps,
+        repos=args.repos,
+    )
 
 
 def _build_image_inline(*, image_name: str, dockerfile: Path, no_cache: bool) -> int:
@@ -733,24 +560,8 @@ def _build_image_inline(*, image_name: str, dockerfile: Path, no_cache: bool) ->
         print("contremaitre: docker binary not found in PATH", file=sys.stderr)
         return 1
     if proc.returncode == 0:
-        _prune_dangling_images()
+        prune_dangling_images()
     return proc.returncode
-
-
-def _prune_dangling_images() -> None:
-    """Remove dangling images. Rebuilds with the same tag orphan the prior
-    image as <none>:<none>; we don't want those accumulating across rebuilds.
-    """
-
-    try:
-        subprocess.run(
-            ["docker", "image", "prune", "-f"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
 
 
 def _doctor_cmd(args: argparse.Namespace) -> int:
