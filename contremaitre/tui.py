@@ -211,7 +211,11 @@ def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path 
     if terminal_stats is not None and current == "REVIEW" and blocked_or_failed is None:
         # Terminal reached but no PUBLISHED event — common when SIM
         # disapproved or hard gates failed before publication.
-        current = "APPROVED" if (terminal_stats and "READY_FOR_DRAFT_PR" in terminal_stats.read_text(encoding="utf-8", errors="replace")) else current
+        current = (
+            "APPROVED"
+            if (terminal_stats and "READY_FOR_DRAFT_PR" in terminal_stats.read_text(encoding="utf-8", errors="replace"))
+            else current
+        )
 
     text = Text()
     for i, stage in enumerate(stages):
@@ -238,11 +242,7 @@ def _text_event_count(events: list[dict[str, Any]]) -> int:
 
 
 def _task_count(events: list[dict[str, Any]]) -> int:
-    return sum(
-        1
-        for e in events
-        if e.get("type") == "tool_use" and (e.get("part") or {}).get("tool") == "task"
-    )
+    return sum(1 for e in events if e.get("type") == "tool_use" and (e.get("part") or {}).get("tool") == "task")
 
 
 def _settled_in(events: list[dict[str, Any]]) -> bool:
@@ -337,8 +337,11 @@ def _docker_info(image_name: str, worktree: Path) -> dict[str, Any]:
     try:
         proc = subprocess.run(
             [
-                "docker", "ps", "--no-trunc",
-                "--format", "{{.ID}}\t{{.Mounts}}\t{{.RunningFor}}",
+                "docker",
+                "ps",
+                "--no-trunc",
+                "--format",
+                "{{.ID}}\t{{.Mounts}}\t{{.RunningFor}}",
             ],
             capture_output=True,
             text=True,
@@ -377,8 +380,7 @@ def _container_mount_mode(cid: str, worktree_str: str) -> str:
 
     try:
         proc = subprocess.run(
-            ["docker", "inspect", cid, "--format",
-             "{{range .Mounts}}{{.Source}}|{{.Mode}};{{end}}"],
+            ["docker", "inspect", cid, "--format", "{{range .Mounts}}{{.Source}}|{{.Mode}};{{end}}"],
             capture_output=True,
             text=True,
             timeout=2,
@@ -400,16 +402,16 @@ def _container_mount_mode(cid: str, worktree_str: str) -> str:
 
 
 _TOOL_STYLES = {
-    "read":        "#6B8AFF",
-    "grep":        "#6B8AFF",
-    "glob":        "#6B8AFF",
-    "edit":        "#FFB830",
-    "write":       "#FFB830",
+    "read": "#6B8AFF",
+    "grep": "#6B8AFF",
+    "glob": "#6B8AFF",
+    "edit": "#FFB830",
+    "write": "#FFB830",
     "apply_patch": "#FFB830",
-    "bash":        "#4ADE80",
-    "task":        "#C792EA",
-    "skill":       "#FF3B3B",
-    "todowrite":   "#888888",
+    "bash": "#4ADE80",
+    "task": "#C792EA",
+    "skill": "#FF3B3B",
+    "todowrite": "#888888",
 }
 
 
@@ -483,16 +485,14 @@ def _build_event_row(event: dict[str, Any]):
         ]
         if cost is not None:
             bits.append(f"cost ${cost:.4f}")
-        return ("", ts, Text("step_finish", style="dim"), "",
-                Text(" ".join(bits), style="dim"))
+        return ("", ts, Text("step_finish", style="dim"), "", Text(" ".join(bits), style="dim"))
 
     if t == "tool_use":
         tool = p.get("tool") or "?"
         state = p.get("state") or {}
         inp = state.get("input") or {}
         body = _tool_body(tool, inp, state)
-        return ("", ts, Text("tool_use", style="dim"),
-                Text(tool, style=f"bold {_tool_style(tool)}"), body)
+        return ("", ts, Text("tool_use", style="dim"), Text(tool, style=f"bold {_tool_style(tool)}"), body)
 
     if t == "text":
         txt = p.get("text") or ""
@@ -500,8 +500,7 @@ def _build_event_row(event: dict[str, Any]):
         body.append(f"{len(txt):,} chars\n", style="dim")
         body.append(txt)
         marker_style = "magenta" if event.get("_recovered_from_sqlite") else "blue"
-        return (Text("▍", style=marker_style), ts, Text("text", style="bold"),
-                "", body)
+        return (Text("▍", style=marker_style), ts, Text("text", style="bold"), "", body)
 
     if t == "error":
         err = p.get("error") or event.get("error") or {}
@@ -510,8 +509,7 @@ def _build_event_row(event: dict[str, Any]):
             msg = data.get("message") or err.get("name") or str(err)[:200]
         else:
             msg = str(err)[:200]
-        return (Text("▍", style="red"), ts, Text("error", style="bold red"),
-                "", Text(msg, style="red"))
+        return (Text("▍", style="red"), ts, Text("error", style="bold red"), "", Text(msg, style="red"))
 
     return ("", ts, Text(t or "?", style="dim"), "", "")
 
@@ -534,13 +532,15 @@ def _render_event(event: dict[str, Any]):
 
 
 def _turn_separator(turn_number: int, role: str) -> Text:
-    """Visual break between turns within a pane's RichLog.
+    """Visual break at an orchestrator-driven handover boundary.
 
-    Each opencode invocation ends with exactly one `text` event (the
-    model's final reply); the next event in the file is the first step
-    of the next turn. Rendering a separator right after each text event
-    gives the operator a clear "the conversation just came back" cue
-    instead of an undifferentiated stream of step_start/tool_use rows.
+    Driven by `opencode_actor_start` events in guardrail_events.jsonl —
+    each one marks the orchestrator handing the conversation to a new
+    role (agent → sim, sim → agent, sim → reviewer). The separator is
+    written into the pane that just finished a turn, so the operator
+    sees a clear "this turn ended, handover" cue. A single opencode
+    invocation can emit multiple `text` events, so we drive off the
+    orchestrator's own boundary marker rather than text events.
     """
 
     label = f"turn {turn_number} · {role} ✓"
@@ -548,6 +548,12 @@ def _turn_separator(turn_number: int, role: str) -> Text:
     sep = Text()
     sep.append(body, style="bold cyan")
     return sep
+
+
+def _role_label(role: str) -> str:
+    # `review` is the SIM doing the review pass — surfaced as `reviewer`
+    # so the operator can tell a review turn from a WORK-loop sim turn.
+    return "reviewer" if role == "review" else role
 
 
 def _render_guardrail(event: dict[str, Any]):
@@ -651,12 +657,13 @@ if _TEXTUAL_AVAILABLE:
             # (~5Hz default) so the rotation is visible to the operator
             # without eating CPU. Resets when both containers go idle.
             self._spin_tick = 0
-            # Per-pane turn counters for the inter-turn separator. One
-            # `text` event ends one opencode invocation, so these tick
-            # exactly once per turn and the label stays in sync with the
-            # footer's `turns A:N S:N`.
-            self._agent_turn_separators = 0
-            self._sim_turn_separators = 0
+            # Per-pane handover separator counters. Each orchestrator
+            # turn handover emits one `opencode_actor_start` event with
+            # role agent/sim/review; we render a separator into the
+            # *just-finished* pane each time a new start event appears
+            # for it, so the label corresponds to the turn that ended.
+            self._agent_separators_rendered = 0
+            self._sim_separators_rendered = 0
 
         @property
         def paths(self) -> dict[str, Path]:
@@ -677,16 +684,13 @@ if _TEXTUAL_AVAILABLE:
             yield Static("", id="header")
             with Horizontal(id="panes"):
                 with Vertical(classes="pane", id="agent-pane"):
-                    yield RichLog(id="agent-log", auto_scroll=True, markup=False,
-                                  wrap=True, highlight=False)
+                    yield RichLog(id="agent-log", auto_scroll=True, markup=False, wrap=True, highlight=False)
                     yield Static("", classes="pane-sub", id="agent-sub")
                 with Vertical(classes="pane", id="sim-pane"):
-                    yield RichLog(id="sim-log", auto_scroll=True, markup=False,
-                                  wrap=True, highlight=False)
+                    yield RichLog(id="sim-log", auto_scroll=True, markup=False, wrap=True, highlight=False)
                     yield Static("", classes="pane-sub", id="sim-sub")
             with Vertical(id="activity-panel"):
-                yield RichLog(id="activity-log", auto_scroll=True, markup=False,
-                              wrap=True, highlight=False)
+                yield RichLog(id="activity-log", auto_scroll=True, markup=False, wrap=True, highlight=False)
             yield Static("", id="footer-line")
 
         def on_mount(self) -> None:
@@ -701,6 +705,7 @@ if _TEXTUAL_AVAILABLE:
                 self._docker_ts = now
             self._update_agent_log()
             self._update_sim_log()
+            self._update_turn_separators()
             self._update_activity_log()
             self._update_chrome()
 
@@ -716,37 +721,64 @@ if _TEXTUAL_AVAILABLE:
                         text = ""
                     widget.write(Text("── initial prompt (sent to agent) ──", style="bold dim"))
                     widget.write(Text(text))
-                    widget.write(Text(
-                        f"[initial prompt · {len(text):,} chars · awaiting first event]",
-                        style="dim",
-                    ))
+                    widget.write(
+                        Text(
+                            f"[initial prompt · {len(text):,} chars · awaiting first event]",
+                            style="dim",
+                        )
+                    )
                     self._showed_initial_prompt = True
                 return
-            for e in events[self._agent_idx:]:
+            for e in events[self._agent_idx :]:
                 widget.write(_render_event(e))
-                if e.get("type") == "text":
-                    self._agent_turn_separators += 1
-                    widget.write(_turn_separator(self._agent_turn_separators, "agent"))
             self._agent_idx = len(events)
 
         def _update_sim_log(self) -> None:
             events = _read_jsonl(self.paths["sim_raw_export"])
             widget = self.query_one("#sim-log", RichLog)
-            for e in events[self._sim_idx:]:
+            for e in events[self._sim_idx :]:
                 widget.write(_render_event(e))
-                if e.get("type") == "text":
-                    self._sim_turn_separators += 1
-                    widget.write(_turn_separator(self._sim_turn_separators, "sim"))
             self._sim_idx = len(events)
+
+        def _update_turn_separators(self) -> None:
+            # Drive handover separators off `opencode_actor_start` in
+            # guardrail_events — each one marks the orchestrator handing
+            # control to a new role. Running after the per-pane log
+            # updates means the separator lands at the end of the
+            # just-finished turn's events (the previous container has
+            # exited by the time the next start is logged, so turn N's
+            # tail is flushed before start N+1 appears).
+            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            agent_starts = [
+                e for e in guardrails
+                if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
+            ]
+            sim_starts = [
+                e for e in guardrails
+                if e.get("event") == "opencode_actor_start"
+                and e.get("role") in ("sim", "review")
+            ]
+            agent_widget = self.query_one("#agent-log", RichLog)
+            sim_widget = self.query_one("#sim-log", RichLog)
+            while self._agent_separators_rendered < len(agent_starts) - 1:
+                n = self._agent_separators_rendered + 1
+                role = agent_starts[n - 1].get("role", "agent")
+                agent_widget.write(_turn_separator(n, _role_label(role)))
+                self._agent_separators_rendered += 1
+            while self._sim_separators_rendered < len(sim_starts) - 1:
+                n = self._sim_separators_rendered + 1
+                role = sim_starts[n - 1].get("role", "sim")
+                sim_widget.write(_turn_separator(n, _role_label(role)))
+                self._sim_separators_rendered += 1
 
         def _update_activity_log(self) -> None:
             widget = self.query_one("#activity-log", RichLog)
             guardrails = _read_jsonl(self.paths["guardrail_events"])
-            for e in guardrails[self._guardrail_idx:]:
+            for e in guardrails[self._guardrail_idx :]:
                 widget.write(_render_guardrail(e))
             self._guardrail_idx = len(guardrails)
             recoveries = _read_jsonl(self.paths["recoveries"])
-            for e in recoveries[self._recoveries_idx:]:
+            for e in recoveries[self._recoveries_idx :]:
                 widget.write(_render_guardrail(e))
             self._recoveries_idx = len(recoveries)
 
@@ -788,7 +820,9 @@ if _TEXTUAL_AVAILABLE:
                 self._frozen_elapsed = time.time() - self.t_start
                 gr_age_at_freeze = _file_age(self.paths["guardrail_events"])
                 self._frozen_gr_age = gr_age_at_freeze if gr_age_at_freeze is not None else 0.0
-            elapsed = self._frozen_elapsed if terminal and self._frozen_elapsed is not None else (time.time() - self.t_start)
+            elapsed = (
+                self._frozen_elapsed if terminal and self._frozen_elapsed is not None else (time.time() - self.t_start)
+            )
 
             # ----- Header -----
             img = self._docker_state.get("image_created")
@@ -893,8 +927,9 @@ if _TEXTUAL_AVAILABLE:
             footer.append(" · ")
             footer.append("SETTLED" if settled else "no settled", style="bold green" if settled else "dim")
             footer.append(" · ")
-            footer.append("IMPL_COMPLETE" if impl_complete else "no impl_complete",
-                          style="bold green" if impl_complete else "dim")
+            footer.append(
+                "IMPL_COMPLETE" if impl_complete else "no impl_complete", style="bold green" if impl_complete else "dim"
+            )
             footer.append(" · ")
             footer.append(f"subagents: {subagents}")
             footer.append(" · ")
@@ -902,14 +937,12 @@ if _TEXTUAL_AVAILABLE:
             # than `$0.0000` so the footer reads as "this run is free"
             # instead of "this run costs almost nothing".
             if _is_free_model(self.agent_model) and _is_free_model(self.sim_model):
-                footer.append("free", style="bold green")
+                footer.append("free (◕‿◕)", style="bold green")
             else:
                 cost_usd = sum_costs_in_events(agent_events, sim_events)
-                footer.append(f"cost ${cost_usd:.4f}",
-                              style="cyan" if cost_usd > 0 else "dim")
+                footer.append(f"cost ${cost_usd:.4f}", style="cyan" if cost_usd > 0 else "dim")
             footer.append(" · ")
-            footer.append(f"recoveries: {len(recoveries)}",
-                          style="yellow" if recoveries else "dim")
+            footer.append(f"recoveries: {len(recoveries)}", style="yellow" if recoveries else "dim")
             footer.append(" · ")
             footer.append(f"elapsed {_fmt_elapsed(elapsed)}")
             footer.append(" · ")
@@ -938,10 +971,7 @@ if _TEXTUAL_AVAILABLE:
 
 def _require_textual() -> None:
     if not _TEXTUAL_AVAILABLE:
-        raise SystemExit(
-            "contremaitre tui requires textual.\n"
-            "Install with: python3 -m pip install --user textual"
-        )
+        raise SystemExit("contremaitre tui requires textual.\n" "Install with: python3 -m pip install --user textual")
 
 
 def attach(run_dir: Path, *, refresh_hz: float = 5.0) -> int:

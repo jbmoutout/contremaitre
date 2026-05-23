@@ -81,16 +81,24 @@ def _shared_run_doctor_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to opencode.json. If omitted, a minimal config is "
-             "synthesized from --agent-model and --openrouter-env-var.",
+        "synthesized from --agent-model and --openrouter-env-var.",
     )
     p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
     p.add_argument("--docker-network", default=None, help="Optional docker --network value")
     p.add_argument("--http-proxy", default=None, help="Optional HTTP_PROXY value passed by env name to containers")
     p.add_argument("--https-proxy", default=None, help="Optional HTTPS_PROXY value passed by env name to containers")
     p.add_argument("--no-proxy", default=None, help="Optional NO_PROXY value passed by env name to containers")
-    p.add_argument("--allow-open-egress", action="store_true", help="Allow opencode containers without explicit network/proxy policy")
+    p.add_argument(
+        "--allow-open-egress",
+        action="store_true",
+        help="Allow opencode containers without explicit network/proxy policy",
+    )
     p.add_argument("--skip-openrouter-key-check", action="store_true", help="Do not query OpenRouter key metadata")
-    p.add_argument("--allow-unlimited-openrouter-key", action="store_true", help="Allow OpenRouter keys with no provider-side credit limit")
+    p.add_argument(
+        "--allow-unlimited-openrouter-key",
+        action="store_true",
+        help="Allow OpenRouter keys with no provider-side credit limit",
+    )
     p.add_argument("--openrouter-key-url", default="https://openrouter.ai/api/v1/key")
     p.add_argument("--max-cost-usd", type=float, default=30.0)
     return p
@@ -135,7 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument("--publish-mode", choices=[mode.value for mode in PublishMode], default=PublishMode.STUB.value)
     run_p.add_argument(
-        "-y", "--yes",
+        "-y",
+        "--yes",
         action="store_true",
         help="Skip the pre-launch Y/n prompt. Useful for scripts / CI.",
     )
@@ -182,20 +191,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     cleanup_p = sub.add_parser("cleanup", help="Prune stale containers + worktrees + dangling images")
     cleanup_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
-    cleanup_p.add_argument("--dry-run", action="store_true", help="Report what would be removed without touching anything")
-    cleanup_p.add_argument("--skip-images", action="store_true", help="Skip docker image prune (containers + worktrees only)")
+    cleanup_p.add_argument(
+        "--dry-run", action="store_true", help="Report what would be removed without touching anything"
+    )
+    cleanup_p.add_argument(
+        "--skip-images", action="store_true", help="Skip docker image prune (containers + worktrees only)"
+    )
     cleanup_p.add_argument(
         "--deps",
         action="store_true",
         help="Also remove cached lockhash-keyed deps volumes (contremaitre-deps-*). "
-             "Off by default — those volumes are the across-run dependency cache.",
+        "Off by default — those volumes are the across-run dependency cache.",
     )
     cleanup_p.add_argument(
         "--repos",
         action="store_true",
         help=f"Also remove auto-managed local clone caches under {_CACHE_ROOT}. "
-             "Off by default — those clones are the across-run object cache; "
-             "removing forces a full re-clone on the next run.",
+        "Off by default — those clones are the across-run object cache; "
+        "removing forces a full re-clone on the next run.",
     )
     cleanup_p.set_defaults(func=_cleanup_cmd)
 
@@ -208,8 +221,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Flags forwarded to `contremaitre run` (e.g. --actor opencode --repo /path …)",
     )
     tui_run.add_argument("--refresh-hz", type=float, default=5.0)
-    tui_run.add_argument("--discover-timeout", type=float, default=30.0,
-                         help="Seconds to wait for the spawned run to create its dir")
+    tui_run.add_argument(
+        "--discover-timeout", type=float, default=30.0, help="Seconds to wait for the spawned run to create its dir"
+    )
     tui_run.set_defaults(func=_tui_run_cmd)
     tui_attach = tui_sub.add_parser("attach", help="Read-only attach to an existing run directory")
     tui_attach.add_argument("run_dir", type=Path)
@@ -340,7 +354,10 @@ def _ensure_local_clone(*, cache_path: Path, source_url: str) -> None:
     print(f"contremaitre: cloning {source_url} → {cache_path}", file=sys.stderr)
     subprocess.run(
         ["git", "clone", source_url, str(cache_path)],
-        check=True, capture_output=True, text=True, timeout=600,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=600,
     )
 
 
@@ -455,7 +472,9 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
     for cid, _ in stale_containers:
         proc = subprocess.run(
             ["docker", "rm", "-f", cid],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if proc.returncode == 0:
             removed_containers += 1
@@ -472,7 +491,9 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
     for name in deps_volumes:
         proc = subprocess.run(
             ["docker", "volume", "rm", "-f", name],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if proc.returncode == 0:
             removed_vols += 1
@@ -517,9 +538,18 @@ def _scan_stale_containers(runs_root: Path) -> list[tuple[str, str]]:
 
     try:
         proc = subprocess.run(
-            ["docker", "ps", "-aq", "--filter", "label=contremaitre.run-id",
-             "--format", "{{.ID}}\t{{.Label \"contremaitre.run-id\"}}"],
-            capture_output=True, text=True, timeout=10,
+            [
+                "docker",
+                "ps",
+                "-aq",
+                "--filter",
+                "label=contremaitre.run-id",
+                "--format",
+                '{{.ID}}\t{{.Label "contremaitre.run-id"}}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
@@ -562,7 +592,9 @@ def _scan_dangling_images() -> list[str]:
     try:
         proc = subprocess.run(
             ["docker", "images", "-q", "--filter", "dangling=true"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
@@ -699,7 +731,7 @@ def _extract_flag_value(args: list[str], flag: str, default: str) -> str:
             return args[i + 1]
         prefix = f"{flag}="
         if item.startswith(prefix):
-            return item[len(prefix):]
+            return item[len(prefix) :]
     return default
 
 
@@ -793,11 +825,7 @@ def _pick_model(*, role: str, default_id: str, free_models: list[dict]) -> str:
     # (so the picker's display and its return value agree). When no
     # match was found, fall back to the raw default_id — operator
     # explicitly opted into a non-free model on the CLI.
-    enter_choice = (
-        f"opencode/{free_models[default_idx]['id']}"
-        if default_idx is not None
-        else default_id
-    )
+    enter_choice = f"opencode/{free_models[default_idx]['id']}" if default_idx is not None else default_id
     while True:
         try:
             reply = input(f"Pick [0-{len(free_models)-1}, Enter for default, q to abort]: ").strip().lower()
@@ -838,7 +866,7 @@ def _resolve_models_interactive(
         return
     chosen_agent = args.agent_model
     if not agent_explicit:
-        chosen_agent = _pick_model(role="agent", default_id=args.agent_model, free_models=free)
+        chosen_agent = _pick_model(role="AGENT", default_id=args.agent_model, free_models=free)
         args.agent_model = chosen_agent
         if forwarded_to_subprocess is not None:
             forwarded_to_subprocess.extend(["--agent-model", chosen_agent])
@@ -883,7 +911,9 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         return 1
     confirm_args = argparse.Namespace(
         yes=("--yes" in forwarded or "-y" in forwarded),
-        base=base, fork=fork or None, upstream=upstream or None,
+        base=base,
+        fork=fork or None,
+        upstream=upstream or None,
         gh_repo=_extract_flag_value(forwarded, "--gh-repo", "") or None,
         publish_mode=_extract_flag_value(forwarded, "--publish-mode", PublishMode.STUB.value),
         max_cost_usd=_extract_flag_value(forwarded, "--max-cost-usd", "?"),
