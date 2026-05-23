@@ -117,6 +117,10 @@ def ensure_deps_volume(*, repo: Path, base_image: str, runs_root: Path) -> str |
     volume = f"contremaitre-deps-{_safe_name(lockfile.name)}-{digest}"
 
     if _volume_exists(volume):
+        # Self-heal even on cache hit: an older hash may have lingered
+        # from before the operator's last lockfile bump and there's no
+        # other moment we'd prune it.
+        _prune_stale_deps_volumes(lockfile_name=lockfile.name, current_volume=volume)
         return volume
 
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -156,7 +160,45 @@ def ensure_deps_volume(*, repo: Path, base_image: str, runs_root: Path) -> str |
             capture_output=True, timeout=10,
         )
         raise DepsInstallError(lockfile=lockfile.name, log_path=log_path, returncode=proc.returncode)
+    _prune_stale_deps_volumes(lockfile_name=lockfile.name, current_volume=volume)
     return volume
+
+
+def _prune_stale_deps_volumes(*, lockfile_name: str, current_volume: str) -> None:
+    """Remove same-lockfile-kind deps volumes whose hash isn't current.
+
+    Lockfile-hash bumps (e.g. `npm install` adds a dep, lockfile digest
+    changes) create a fresh volume; the previous one becomes garbage —
+    no future run against this target will reuse it. Sweep them here so
+    `docker volume ls` doesn't grow linearly with lockfile churn.
+
+    Scoped to the SAME lockfile kind (`package-lock-json-*` doesn't
+    touch `yarn-lock-*`) so a target that has multiple ecosystems keeps
+    each cache. Best-effort: a volume in use by another container won't
+    delete, and we swallow that — never the auto-prune's job to break
+    parallel runs.
+    """
+
+    prefix = f"contremaitre-deps-{_safe_name(lockfile_name)}-"
+    try:
+        proc = subprocess.run(
+            ["docker", "volume", "ls", "-q", "--filter", f"name={prefix}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if proc.returncode != 0:
+        return
+    for name in proc.stdout.splitlines():
+        name = name.strip()
+        if not name or name == current_volume or not name.startswith(prefix):
+            continue
+        rm = subprocess.run(
+            ["docker", "volume", "rm", name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if rm.returncode == 0:
+            print(f"contremaitre: pruned stale deps volume {name}", file=sys.stderr)
 
 
 def _volume_exists(name: str) -> bool:
