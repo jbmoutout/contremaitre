@@ -26,6 +26,11 @@ from .viewer import VIEWER_FILENAME, build_viewer
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _DEFAULT_DOCKERFILE = _PACKAGE_DIR / "Dockerfile"
 _DEFAULT_IMAGE = "contremaitre-agent:latest"
+_RUST_IMAGE = "contremaitre-agent-rust:latest"
+_VARIANT_DOCKERFILES: dict[str, Path] = {
+    "base": _PACKAGE_DIR / "Dockerfile",
+    "rust": _PACKAGE_DIR / "Dockerfile.rust",
+}
 
 
 def _synthesize_opencode_config(*, agent_model: str, openrouter_env_var: str) -> Path:
@@ -179,12 +184,26 @@ def build_parser() -> argparse.ArgumentParser:
     image_p = sub.add_parser("image", help="Manage the opencode runtime image")
     image_sub = image_p.add_subparsers(dest="image_command", required=True)
     image_build = image_sub.add_parser("build", help="Build the runtime docker image from the package's Dockerfile")
-    image_build.add_argument("--image-name", default=_DEFAULT_IMAGE, help="Tag for the built image")
+    image_build.add_argument(
+        "--variant",
+        choices=list(_VARIANT_DOCKERFILES),
+        default="base",
+        help=(
+            "Image variant to build. "
+            "`base` (default) builds contremaitre-agent:latest. "
+            "`rust` builds contremaitre-agent-rust:latest (extends base, adds Rust toolchain)."
+        ),
+    )
+    image_build.add_argument(
+        "--image-name",
+        default=None,
+        help="Override the output tag (default: derived from --variant)",
+    )
     image_build.add_argument(
         "--dockerfile",
         type=Path,
         default=None,
-        help=f"Override Dockerfile path (default: {_DEFAULT_DOCKERFILE})",
+        help="Override Dockerfile path (default: derived from --variant)",
     )
     image_build.add_argument("--no-cache", action="store_true")
     image_build.set_defaults(func=_image_build_cmd)
@@ -387,34 +406,38 @@ def _confirm_launch(*, args: argparse.Namespace, source_url: str, cache_path: Pa
 
 
 def _ensure_default_image_built(config: RunConfig) -> int:
-    """Auto-build the default image before opencode-mode runs if it's missing.
+    """Auto-build a known contremaitre image before opencode-mode runs if missing.
 
-    Only fires for `--actor opencode` AND `--docker-image contremaitre-agent:latest`
-    (the default). Custom images are the operator's responsibility — preflight
+    Fires for `--actor opencode` and any image name that matches a shipped
+    variant (`contremaitre-agent:latest` or `contremaitre-agent-rust:latest`).
+    Custom / third-party images are the operator's responsibility — preflight
     will surface a clean failure with the build hint.
     """
 
     if config.actor_mode != ActorMode.OPENCODE:
         return 0
-    if config.docker_image != _DEFAULT_IMAGE:
+    # Map known image names to their Dockerfile.
+    auto_build_map = {
+        _DEFAULT_IMAGE: _VARIANT_DOCKERFILES["base"],
+        _RUST_IMAGE: _VARIANT_DOCKERFILES["rust"],
+    }
+    dockerfile = auto_build_map.get(config.docker_image)
+    if dockerfile is None:
         return 0
     try:
         inspect = subprocess.run(
             ["docker", "image", "inspect", config.docker_image, "--format", "{{.Id}}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
+            capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        # Docker daemon not reachable — let preflight surface a clean message.
         return 0
     if inspect.returncode == 0:
         return 0
     print(
-        f"contremaitre: default image {config.docker_image} not found — building inline",
+        f"contremaitre: image {config.docker_image} not found — building inline",
         file=sys.stderr,
     )
-    return _build_image_inline(image_name=config.docker_image, dockerfile=_DEFAULT_DOCKERFILE, no_cache=False)
+    return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
 
 
 _WORKTREE_NAME_RE = re.compile(r"^contremaitre-(\d{8}-\d{6}-[A-Za-z0-9._-]+)$")
@@ -994,9 +1017,11 @@ def _viewer_cmd(args: argparse.Namespace) -> int:
 
 
 def _image_build_cmd(args: argparse.Namespace) -> int:
+    variant_dockerfile = _VARIANT_DOCKERFILES.get(args.variant, _DEFAULT_DOCKERFILE)
+    variant_default_tag = _RUST_IMAGE if args.variant == "rust" else _DEFAULT_IMAGE
     return _build_image_inline(
-        image_name=args.image_name,
-        dockerfile=args.dockerfile or _DEFAULT_DOCKERFILE,
+        image_name=args.image_name or variant_default_tag,
+        dockerfile=args.dockerfile or variant_dockerfile,
         no_cache=args.no_cache,
     )
 

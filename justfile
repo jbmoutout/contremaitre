@@ -22,6 +22,7 @@ max_cost_usd    := "5"
 #   just agent_model=openrouter/anthropic/claude-sonnet-4.6 my-repo
 agent_model     := ""
 sim_model       := ""
+docker_image    := ""   # e.g. "contremaitre-agent-rust:latest"; empty → CLI default
 
 # Default recipe: show available recipes
 default:
@@ -41,6 +42,7 @@ tui-run base fork check_cmd="":
         --publish-mode {{publish_mode}} \
         {{ if agent_model != "" { "--agent-model " + agent_model } else { "" } }} \
         {{ if sim_model != "" { "--sim-model " + sim_model } else { "" } }} \
+        {{ if docker_image != "" { "--docker-image " + docker_image } else { "" } }} \
         --allow-open-egress \
         --max-turns {{max_turns}} \
         --max-wall-minutes {{max_wall_min}} \
@@ -63,3 +65,13 @@ deepdeep target *args:
     @just agent_model="openrouter/deepseek/deepseek-v4-flash" \
           sim_model="openrouter/deepseek/deepseek-v4-flash" \
           {{target}} {{args}}
+
+# === Runtime-image presets ====================================================
+# These wrap any recipe with --docker-image so the Rust-capable image
+# is used. Build the image first: `contremaitre image build --variant rust`
+
+# Use the Rust-capable image (contremaitre-agent-rust:latest).
+# Example:
+#   just rust tui-run main git@github.com:me/rust-repo.git "cargo check --all-targets"
+rust target *args:
+    @just docker_image="contremaitre-agent-rust:latest" {{target}} {{args}}

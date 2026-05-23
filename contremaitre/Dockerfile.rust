@@ -1,0 +1,29 @@
+# Contremaitre Rust-capable runtime image.
+#
+# Extends contremaitre-agent:latest with a minimal Rust toolchain
+# (rustup stable, no docs). Use when the target repo has a Cargo.lock
+# and the check-cmd is `cargo check --all-targets` or similar.
+#
+# Build:
+#   contremaitre image build --variant rust
+#   contremaitre image build --variant rust --no-cache
+#
+# Use: pass --docker-image contremaitre-agent-rust:latest to `run` /
+# `tui run`, or use the `just rust` preset in the justfile.
+#
+# Crate dependencies are downloaded at check time from crates.io (the
+# per-run container has network access via --allow-open-egress). A
+# CARGO_HOME volume cache is a possible future optimisation but not
+# implemented — cargo check on a cold cache typically adds 10-60s
+# depending on the crate graph.
+
+FROM contremaitre-agent:latest
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal \
+    && rm -rf /root/.rustup/toolchains/*/share/doc
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Smoke-test the install.
+RUN rustc --version && cargo --version
