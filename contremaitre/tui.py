@@ -195,7 +195,7 @@ def _render_pane_subheader(
     return sub
 
 
-def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path | None) -> Text:
+def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path | None, failed: bool = False) -> Text:
     """Render INIT > WORK > REVIEW > APPROVED > PUBLISHED progression.
 
     Derived from guardrail_events (cheap inference, no orchestrator state
@@ -238,7 +238,10 @@ def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path 
             text.append(" › ", style=_PAL_VDIM)
         is_current = stage == current and blocked_or_failed is None
         if is_current:
-            text.append(stage, style=f"bold {_PAL_BRIGHT}")
+            # Red when the run ended in failure at this stage so the breadcrumb
+            # immediately answers "where did it get stuck and why".
+            stage_style = f"bold {_PAL_ERROR}" if failed else f"bold {_PAL_BRIGHT}"
+            text.append(stage, style=stage_style)
         elif stages.index(current) > i and blocked_or_failed is None:
             text.append(stage, style=_PAL_SUCCESS)
         else:
@@ -947,21 +950,27 @@ if _TEXTUAL_AVAILABLE:
             self.query_one("#activity-panel").border_title = f"orchestrator activity{age_str}"
 
             # ----- Footer -----
-            # Verdict (zone 4) — the one thing you glance at to answer
-            # "did it work?". Bright + bold, parked at the right edge.
+            # Read stats once; reused for verdict text, color, and breadcrumb
+            # failure flag. Stats is written before the process exits so it is
+            # available for both the proc=None (attach) and rc!=0 (run) paths.
+            stats_data: dict = {}
+            if terminal:
+                try:
+                    stats_data = json.loads(stats_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+            run_failed = stats_data.get("terminal_state") in ("NO_PR", "FAILED")
+
             rc = self.proc.poll() if self.proc else None
             if self.proc is None:
-                stats = self.paths["stats"]
-                if stats.exists():
-                    try:
-                        d = json.loads(stats.read_text(encoding="utf-8"))
-                        status = f"{d.get('terminal_state', '?')} · {d.get('verdict', '?')}"
-                        verdict_style = (
-                            f"bold {_PAL_SUCCESS}" if d.get("verdict") == "READY_FOR_DRAFT_PR" else f"bold {_PAL_WARN}"
-                        )
-                    except (OSError, json.JSONDecodeError):
-                        status = "attached"
-                        verdict_style = _PAL_TEXT
+                if stats_data:
+                    status = f"{stats_data.get('terminal_state', '?')} · {stats_data.get('verdict', '?')}"
+                    verdict_style = (
+                        f"bold {_PAL_SUCCESS}" if stats_data.get("verdict") == "READY_FOR_DRAFT_PR"
+                        else f"bold {_PAL_ERROR}" if run_failed
+                        else f"bold {_PAL_WARN}"
+                    )
                 else:
                     status = "attached"
                     verdict_style = _PAL_TEXT
@@ -972,10 +981,17 @@ if _TEXTUAL_AVAILABLE:
                 status = "exited 0"
                 verdict_style = f"bold {_PAL_SUCCESS}"
             else:
-                status = f"exited {rc}"
+                if stats_data:
+                    status = f"{stats_data.get('terminal_state', '?')} · {stats_data.get('verdict', '?')}"
+                else:
+                    status = f"exited {rc}"
                 verdict_style = f"bold {_PAL_ERROR}"
 
-            crumb = _state_breadcrumb(guardrails, terminal_stats=stats_path if terminal else None)
+            crumb = _state_breadcrumb(
+                guardrails,
+                terminal_stats=stats_path if terminal else None,
+                failed=run_failed,
+            )
             sep = Text(" │ ", style=_PAL_VDIM)
 
             footer = Text()
