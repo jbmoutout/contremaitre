@@ -283,11 +283,10 @@ def _run_cmd(args: argparse.Namespace) -> int:
         print(f"contremaitre: git clone failed: {exc.stderr or exc}", file=sys.stderr)
         return 1
     try:
-        _resolve_models_interactive(args=args, argv_for_explicit_check=sys.argv)
+        if not _launch_screen(args=args, source_url=source_url, cache_path=cache_path, argv_for_explicit_check=sys.argv):
+            print("aborted", file=sys.stderr)
+            return 130
     except KeyboardInterrupt:
-        print("aborted", file=sys.stderr)
-        return 130
-    if not _confirm_launch(args=args, source_url=source_url, cache_path=cache_path):
         print("aborted", file=sys.stderr)
         return 130
     config = _config_from_args(args, repo=cache_path)
@@ -380,28 +379,120 @@ def _ensure_local_clone(*, cache_path: Path, source_url: str) -> None:
     )
 
 
-def _confirm_launch(*, args: argparse.Namespace, source_url: str, cache_path: Path) -> bool:
-    """Pre-launch summary + Y/n. Auto-Y when --yes or stdin isn't a TTY."""
+_RULE = "─" * 52
 
-    if args.yes or not sys.stdin.isatty():
+
+def _b(s: str) -> str:
+    return f"\033[1m{s}\033[0m" if sys.stdout.isatty() else s
+
+
+def _d(s: str) -> str:
+    return f"\033[2m{s}\033[0m" if sys.stdout.isatty() else s
+
+
+def _launch_screen(
+    *,
+    args: argparse.Namespace,
+    source_url: str,
+    cache_path: Path,
+    argv_for_explicit_check: list[str],
+    forwarded_to_subprocess: list[str] | None = None,
+) -> bool:
+    """Unified pre-launch screen: run summary → model picker → Y/n.
+
+    Returns True to proceed, False to abort. Auto-proceeds when --yes or
+    stdin is not a TTY. Replaces the old _confirm_launch +
+    _resolve_models_interactive pair, which split information across two
+    disconnected prompts and rendered the model list twice.
+    """
+
+    if getattr(args, "yes", False) or not sys.stdin.isatty():
         return True
-    publish = args.publish_mode
-    pr_target = args.gh_repo or (args.upstream or args.fork)
+
+    agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
+    sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
+
+    pr_target = getattr(args, "gh_repo", None) or getattr(args, "upstream", None) or getattr(args, "fork", None)
+    publish = getattr(args, "publish_mode", "stub")
     cost = getattr(args, "max_cost_usd", None)
     wall = getattr(args, "max_wall_minutes", None)
+    base = getattr(args, "base", "?")
+
+    # ----- run summary -----
     print()
-    print("contremaitre will run autonomously until a draft PR is opened (or the run terminates).")
-    print(f"  base branch : {args.base}")
-    print(f"  source      : {source_url}")
-    print(f"  cache       : {cache_path}")
-    print(f"  publish to  : {pr_target} ({publish})")
-    if cost is not None or wall is not None:
-        print(f"  caps        : ${cost}, {wall}m wall")
+    print(_RULE)
+    print(f"  {_b('contremaitre')}")
+    print(_RULE)
+    print(f"  repo     {source_url}  {_d(f'({base})')}")
+    print(f"  target   {pr_target or '—'}  {_d(f'→  {publish}')}")
+    caps_parts = []
+    if cost is not None:
+        caps_parts.append(f"${cost}")
+    if wall is not None:
+        caps_parts.append(f"{wall}m wall")
+    if caps_parts:
+        print(f"  caps     {_d('  ·  '.join(caps_parts))}")
+
+    # ----- model picker (single list, agent then SIM) -----
+    if not (agent_explicit and sim_explicit):
+        free = _fetch_free_models()
+        if free is None:
+            print()
+            print(_d("  (model catalog unavailable — using CLI defaults)"))
+        else:
+            print(_RULE)
+            print(f"  free models  {_d('(OpenCode Zen — no key needed)')}")
+            print()
+            bare = (args.agent_model or "").rsplit("/", 1)[-1]
+            candidates = {bare, f"{bare}-free"}
+            default_idx = next((i for i, m in enumerate(free) if m["id"] in candidates), 0)
+            width = len(str(len(free) - 1))
+            for i, m in enumerate(free):
+                marker = f"  {_d('← default')}" if i == default_idx else ""
+                print(f"    {i:>{width}}  {m['id']}{marker}")
+            print()
+
+            def _pick_inline(role: str, current_idx: int) -> tuple[str, int]:
+                while True:
+                    try:
+                        reply = input(f"  {role:<6}[{current_idx}] : ").strip().lower()
+                    except EOFError:
+                        return f"opencode/{free[current_idx]['id']}", current_idx
+                    if reply == "":
+                        return f"opencode/{free[current_idx]['id']}", current_idx
+                    if reply == "q":
+                        raise KeyboardInterrupt
+                    if reply.isdigit() and 0 <= int(reply) < len(free):
+                        idx = int(reply)
+                        return f"opencode/{free[idx]['id']}", idx
+                    print(f"  enter a number 0–{len(free) - 1}, Enter, or q")
+
+            agent_idx = default_idx
+            if not agent_explicit:
+                chosen_agent, agent_idx = _pick_inline("agent", default_idx)
+                args.agent_model = chosen_agent
+                if forwarded_to_subprocess is not None:
+                    forwarded_to_subprocess.extend(["--agent-model", chosen_agent])
+
+            if not sim_explicit:
+                chosen_sim, _ = _pick_inline("sim", agent_idx)
+                args.sim_model = chosen_sim
+                if forwarded_to_subprocess is not None:
+                    forwarded_to_subprocess.extend(["--sim-model", chosen_sim])
+
+    # ----- confirm -----
+    print()
+    print(_RULE)
+    print(f"  agent   {_b(args.agent_model)}")
+    print(f"  sim     {_b(args.sim_model)}")
+    print()
+    print(_d("  will run autonomously — Ctrl-C to abort"))
     print()
     try:
-        reply = input("Continue? [Y/n] ").strip().lower()
+        reply = input("  proceed? [Y/n] ").strip().lower()
     except EOFError:
         return True
+    print()
     return reply in ("", "y", "yes")
 
 
@@ -811,93 +902,6 @@ def _fetch_free_models() -> list[dict] | None:
     return free
 
 
-def _pick_model(*, role: str, default_id: str, free_models: list[dict]) -> str:
-    """Numbered-list picker. Returns the chosen id, normalised for opencode.
-
-    OpenRouter's `/api/v1/models` returns ids without a provider prefix
-    (e.g. `deepseek/deepseek-v4-flash:free`). opencode addresses the
-    same model as `openrouter/deepseek/deepseek-v4-flash:free` — the
-    provider name is the routing key. We always return the
-    `openrouter/<id>` form so opencode resolves it.
-
-    Default-highlight tolerates both forms in the operator's CLI
-    default by stripping a leading `openrouter/`.
-    """
-
-    print()
-    print(f"contremaitre: pick a free OpenCode Zen model for {role}")
-    print()
-    # OpenCode Zen ids are bare (`deepseek-v4-flash-free`); opencode
-    # addresses them as `opencode/<id>`. The operator's CLI default is
-    # typically the openrouter paid form — try matching its bare model
-    # name (e.g. `deepseek-v4-flash`) against the `-free` variants.
-    bare = default_id.rsplit("/", 1)[-1] if default_id else ""
-    candidates = {bare, f"{bare}-free"}
-    default_idx = next(
-        (i for i, m in enumerate(free_models) if m["id"] in candidates),
-        None,
-    )
-    width = len(str(len(free_models) - 1))
-    for i, m in enumerate(free_models):
-        marker = "  ← default" if i == default_idx else ""
-        print(f"  {i:>{width}}) opencode/{m['id']}{marker}")
-    if default_idx is None:
-        print(f"  (CLI default `{default_id}` has no free analog; Enter keeps it anyway)")
-    print()
-    # Enter normalises to the highlighted free variant when one matched
-    # (so the picker's display and its return value agree). When no
-    # match was found, fall back to the raw default_id — operator
-    # explicitly opted into a non-free model on the CLI.
-    enter_choice = f"opencode/{free_models[default_idx]['id']}" if default_idx is not None else default_id
-    while True:
-        try:
-            reply = input(f"Pick [0-{len(free_models)-1}, Enter for default, q to abort]: ").strip().lower()
-        except EOFError:
-            return enter_choice
-        if reply == "":
-            return enter_choice
-        if reply == "q":
-            raise KeyboardInterrupt
-        if reply.isdigit() and 0 <= int(reply) < len(free_models):
-            return f"opencode/{free_models[int(reply)]['id']}"
-        print(f"  not a valid index — try a number 0–{len(free_models)-1}, Enter, or q")
-
-
-def _resolve_models_interactive(
-    *,
-    args: argparse.Namespace,
-    argv_for_explicit_check: list[str],
-    forwarded_to_subprocess: list[str] | None = None,
-) -> None:
-    """Mutate `args` (and optionally extend `forwarded_to_subprocess`) with picker choices.
-
-    Skip when stdin isn't a TTY, `--yes` is set, or both model flags
-    were explicitly passed. Net-fail on the model catalog → warn + skip.
-    Two prompts: agent first, then SIM (SIM default = chosen agent so
-    Enter twice is the common "same model for both" path).
-    """
-
-    if not sys.stdin.isatty() or getattr(args, "yes", False):
-        return
-    agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
-    sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
-    if agent_explicit and sim_explicit:
-        return
-    free = _fetch_free_models()
-    if not free:
-        print("contremaitre: skipping model picker (couldn't fetch OpenRouter catalog)", file=sys.stderr)
-        return
-    chosen_agent = args.agent_model
-    if not agent_explicit:
-        chosen_agent = _pick_model(role="AGENT", default_id=args.agent_model, free_models=free)
-        args.agent_model = chosen_agent
-        if forwarded_to_subprocess is not None:
-            forwarded_to_subprocess.extend(["--agent-model", chosen_agent])
-    if not sim_explicit:
-        chosen_sim = _pick_model(role="SIM", default_id=chosen_agent, free_models=free)
-        args.sim_model = chosen_sim
-        if forwarded_to_subprocess is not None:
-            forwarded_to_subprocess.extend(["--sim-model", chosen_sim])
 
 
 def _tui_run_cmd(args: argparse.Namespace) -> int:
@@ -945,11 +949,15 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         sim_model=sim_model,
     )
     try:
-        _resolve_models_interactive(
+        if not _launch_screen(
             args=confirm_args,
+            source_url=source_url,
+            cache_path=cache_path,
             argv_for_explicit_check=forwarded,
             forwarded_to_subprocess=forwarded,
-        )
+        ):
+            print("aborted", file=sys.stderr)
+            return 130
     except KeyboardInterrupt:
         print("aborted", file=sys.stderr)
         return 130
@@ -957,9 +965,6 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     # refresh the locals so the TUI header displays the chosen models.
     agent_model = _extract_flag_value(forwarded, "--agent-model", agent_model)
     sim_model = _extract_flag_value(forwarded, "--sim-model", sim_model)
-    if not _confirm_launch(args=confirm_args, source_url=source_url, cache_path=cache_path):
-        print("aborted", file=sys.stderr)
-        return 130
     if "--yes" not in forwarded and "-y" not in forwarded:
         forwarded.append("--yes")
     if "--repo-cache" not in " ".join(forwarded):
