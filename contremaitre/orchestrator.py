@@ -123,7 +123,7 @@ class Orchestrator:
             self._stop_run_containers()
             append_jsonl(
                 self.paths.recoveries,
-                {"kind": events.SIGTERM_EMERGENCY_WRITE, "turns": self.turns, "signal": "sigterm"},
+                events.dump(events.SigtermEmergencyWrite(turns=self.turns, signal="sigterm")),
             )
             self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, "killed_via_sigterm")
             self._extract_artifacts_safely()
@@ -179,11 +179,11 @@ class Orchestrator:
         try:
             extract_run_artifacts(self.paths)
         except Exception as exc:
-            append_jsonl(self.paths.recoveries, {"kind": events.EXTRACT_FAILED, "error": repr(exc)})
+            append_jsonl(self.paths.recoveries, events.dump(events.ExtractFailed(error=repr(exc))))
         try:
             build_viewer(self.paths)
         except Exception as exc:
-            append_jsonl(self.paths.recoveries, {"kind": events.VIEWER_BUILD_FAILED, "error": repr(exc)})
+            append_jsonl(self.paths.recoveries, events.dump(events.ViewerBuildFailed(error=repr(exc))))
 
     def _review_rounds(self, *, actor: ActorRunner, worktree_git: GitRepo, branch: str) -> RunResult:
         last_required_changes: list[str] = []
