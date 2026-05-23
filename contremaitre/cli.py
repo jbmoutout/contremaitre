@@ -62,7 +62,7 @@ def _shared_run_doctor_parser() -> argparse.ArgumentParser:
 
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--repo", required=True, type=Path, help="Local source checkout used for git worktree add")
-    p.add_argument("--base", default="main", help="Base branch for worktree and diff")
+    p.add_argument("--base", required=True, help="Base branch for worktree and diff. The orchestrator fetches `origin/<base>` from the source repo and branches the worktree from it, ignoring local refs.")
     p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     p.add_argument("--docker-image", default=_DEFAULT_IMAGE)
     p.add_argument(

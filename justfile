@@ -7,7 +7,9 @@ set shell := ["bash", "-uc"]
 
 # Stable defaults — override per-recipe or on the CLI:
 #   just agent_model=openrouter/anthropic/claude-sonnet-4.6 my-repo
-base            := "main"
+# `base` is intentionally not defaulted — the operator must state the
+# branch every run, and contremaitre fetches `origin/<base>` fresh
+# rather than trusting the source repo's local ref.
 publish_mode    := "gh"
 actor           := "opencode"
 max_turns       := "20"
@@ -23,9 +25,9 @@ sim_model       := ""
 default:
     @just --list
 
-# Generic TUI run. Required: repo, fork. Optional: check_cmd (default: tsc).
-#   just tui-run repo=~/code/foo fork=git@github.com:me/foo.git check_cmd="pnpm typecheck"
-tui-run repo fork check_cmd="npx tsc --noEmit":
+# Generic TUI run. Required: repo, base, fork. Optional: check_cmd (default: tsc).
+#   just tui-run ~/code/foo main git@github.com:me/foo.git "pnpm typecheck"
+tui-run repo base fork check_cmd="npx tsc --noEmit":
     GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
         --actor {{actor}} \
         --repo {{repo}} \
@@ -43,7 +45,7 @@ tui-run repo fork check_cmd="npx tsc --noEmit":
 # Example: copy + rename per target you run against often, e.g.
 #
 #   my-repo:
-#       @just tui-run ~/code/my-repo git@github.com:<you>/my-repo.git "npx tsc --noEmit"
+#       @just tui-run ~/code/my-repo main git@github.com:<you>/my-repo.git "npx tsc --noEmit"
 #
 # Then: `just my-repo`  (or `just deepdeep my-repo` to pin models).
 

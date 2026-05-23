@@ -26,5 +26,11 @@ def init_fixture(path: Path, *, overwrite: bool = False) -> Path:
     git.run("init", "-b", "main")
     git.run("add", ".")
     git.run("commit", "-m", "Initial fixture")
+    # The orchestrator's `_create_worktree` fetches `origin/<base>` and
+    # branches the worktree from it (to avoid trusting the source repo's
+    # local refs). Self-origin makes the fetch a no-op while keeping the
+    # contract uniform between fake-mode tests and live runs.
+    git.run("remote", "add", "origin", f"file://{path.resolve()}")
+    git.run("fetch", "origin", "main")
     return path
 

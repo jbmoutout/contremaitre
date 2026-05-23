@@ -88,6 +88,25 @@ class Orchestrator:
         self.no_progress_streak = 0
         self._last_progress_key: tuple[str, str] | None = None
 
+    @property
+    def _diff_base(self) -> str:
+        """Ref against which all diff operations compute.
+
+        We anchor on `origin/<base>` (fetched fresh at worktree creation)
+        rather than the bare branch name. The bare name resolves to the
+        source repo's local ref, which is operator-mutable and was the
+        root cause of run-to-run check flakiness (run 20260523-021155
+        diagnosis): the local `main` had moved relative to upstream and
+        the diff base / typecheck saw a different codebase than prior
+        runs against the "same" main.
+
+        Publisher-side, the bare `config.base` is still used as the PR's
+        target branch name — GitHub expects a plain branch name, not a
+        remote-tracking ref.
+        """
+
+        return f"origin/{self.config.base}"
+
     # ----- top-level run -----
 
     def run(self) -> RunResult:
@@ -339,9 +358,9 @@ class Orchestrator:
         review_round: int,
     ) -> tuple[ParsedVerdict, str] | None:
         self._transition(State.REVIEW, f"SIM review round {review_round}")
-        current_hash = diff_hash(worktree_git, self.config.base)
+        current_hash = diff_hash(worktree_git, self._diff_base)
         diff_file = self.paths.run_dir / f"review_diff_round{review_round}.diff"
-        write_review_diff(worktree_git, self.config.base, diff_file)
+        write_review_diff(worktree_git, self._diff_base, diff_file)
 
         parsed: ParsedVerdict | None = None
         last_error: str | None = None
@@ -405,9 +424,9 @@ class Orchestrator:
         if self.config.simulate_drift_after_approval:
             self._commit_drift(worktree_git)
 
-        recomputed_hash = diff_hash(worktree_git, self.config.base)
+        recomputed_hash = diff_hash(worktree_git, self._diff_base)
         diff_hash_matched = recomputed_hash == approved_hash
-        diff_scan = scan_diff(worktree_git, self.config.base)
+        diff_scan = scan_diff(worktree_git, self._diff_base)
         # `.contremaitre/*` is excluded from staging by design and stays
         # untracked in the worktree for the SIM to read across rounds —
         # don't count it against clean-worktree.
@@ -637,7 +656,15 @@ class Orchestrator:
                 shutil.rmtree(self.paths.worktree)
             else:
                 raise RuntimeError(f"refusing to remove non-Contremaitre path: {self.paths.worktree}")
-        repo.run("worktree", "add", str(self.paths.worktree), "-b", branch, self.config.base)
+        # Fetch the base branch fresh from the source repo's `origin` and
+        # branch the worktree from the remote-tracking ref, NOT the local
+        # `<base>` ref. Local refs are operator-mutable (HEAD may sit on a
+        # prior contremaitre run's branch; local main may be stale or
+        # ahead of upstream) — anchoring on `origin/<base>` makes runs
+        # reproducible regardless of the source repo's checkout state.
+        repo.run("fetch", "origin", self.config.base)
+        base_ref = f"origin/{self.config.base}"
+        repo.run("worktree", "add", str(self.paths.worktree), "-b", branch, base_ref)
         worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
         if self.config.fork:
             worktree_git.run("remote", "remove", "origin", check=False)
@@ -744,7 +771,7 @@ class Orchestrator:
     def _snapshot_worktree(self, repo: GitRepo) -> _WorktreeSnapshot:
         return _WorktreeSnapshot(
             status=repo.run("status", "--porcelain", check=False).stdout,
-            diff_stat=repo.run("diff", "--stat", f"{self.config.base}...HEAD", check=False).stdout,
+            diff_stat=repo.run("diff", "--stat", f"{self._diff_base}...HEAD", check=False).stdout,
         )
 
     def _record_progress(self, snapshot: _WorktreeSnapshot, label: str, text: str) -> None:
