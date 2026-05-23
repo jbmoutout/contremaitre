@@ -570,8 +570,17 @@ def _render_guardrail(event: dict[str, Any]):
     for field in ("role", "outcome", "round", "recovered_chars", "container_ids"):
         if field in event:
             body.append(f"  {field}={event[field]}", style="dim")
+    # Failing check: surface the rc + the head of stdout inline so the
+    # operator sees what broke without grepping test_runs.jsonl.
+    if kind == "check_completed" and event.get("returncode") not in (0, None):
+        body.append(f"  rc={event['returncode']}", style="bold red")
     if event.get("error"):
         body.append(f"  error={event['error'][:120]}", style="red")
+    head = event.get("stdout_head")
+    if head:
+        for line in str(head).splitlines():
+            body.append("\n    ")
+            body.append(line, style="red")
     return body
 
 

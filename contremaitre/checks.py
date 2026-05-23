@@ -93,14 +93,21 @@ def run_checks(
             },
         )
         if emit_event is not None:
-            emit_event(
-                events.CHECK_COMPLETED,
-                cmd=cmd,
-                index=index,
-                returncode=result.returncode,
-                duration_seconds=result.duration_seconds,
-                timed_out=False,
-            )
+            # On failure, include the head of stdout so the TUI's activity
+            # panel surfaces the actual error without the operator having
+            # to grep test_runs.jsonl. Full output is always in that file.
+            payload = {
+                "cmd": cmd,
+                "index": index,
+                "returncode": result.returncode,
+                "duration_seconds": result.duration_seconds,
+                "timed_out": False,
+            }
+            if result.returncode != 0:
+                head = "\n".join((result.stdout or result.stderr or "").splitlines()[:8])
+                if head:
+                    payload["stdout_head"] = head
+            emit_event(events.CHECK_COMPLETED, **payload)
         results.append(result)
     return results
 
@@ -132,7 +139,9 @@ def _run_sidecar(
         docker_cmd.extend(["--network", config.docker_network])
     docker_cmd.extend(["-v", f"{paths.worktree}:/app:rw"])
     if config.deps_volume:
-        docker_cmd.extend(["-v", f"{config.deps_volume}:/app/node_modules:ro"])
+        # RW so a check that needs to install something (rare but real)
+        # doesn't hit EACCES. Matches the agent-side mount mode.
+        docker_cmd.extend(["-v", f"{config.deps_volume}:/app/node_modules:rw"])
     docker_cmd.extend(["-w", "/app", config.docker_image, "sh", "-lc", cmd])
     return subprocess.run(
         docker_cmd,

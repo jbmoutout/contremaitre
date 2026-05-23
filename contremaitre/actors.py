@@ -425,11 +425,15 @@ def build_docker_command(
         ]
     )
     if config.deps_volume:
-        # Lockhash-keyed deps volume, RO so parallel runs against the same
-        # lockfile don't poison each other. Mounted over the worktree bind
-        # at /app/node_modules; the worktree's own node_modules (if any)
-        # is shadowed.
-        cmd.extend(["-v", f"{config.deps_volume}:/app/node_modules:ro"])
+        # Lockhash-keyed deps volume, RW so the agent can `npm install`
+        # mid-run when the design genuinely needs a new dep (test
+        # framework, lint plugin, etc.). The trade-off: parallel runs
+        # against the same lockfile share the volume and can race on
+        # writes. Acceptable for solo-operator sequential workflow;
+        # revisit if multi-run-in-parallel becomes a real pattern.
+        # Mounted over the worktree bind at /app/node_modules; the
+        # worktree's own node_modules (if any) is shadowed.
+        cmd.extend(["-v", f"{config.deps_volume}:/app/node_modules:rw"])
     if config.opencode_config:
         cmd.extend(["-v", f"{config.opencode_config}:/app/opencode.json:ro"])
     for host_path, container_path, mode in extra_mounts or []:
