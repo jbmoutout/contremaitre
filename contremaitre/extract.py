@@ -14,11 +14,11 @@ The orchestrator owns git/worktree; this module only reads JSONL.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
 
+from .jsonlog import read_jsonl
 from .models import RunPaths
 
 
@@ -59,20 +59,7 @@ def parse_apply_patch(patch_text: str):
 
 
 def _read_events(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    events: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-    return events
+    return read_jsonl(path)
 
 
 def _host_name(fp: str) -> str:
