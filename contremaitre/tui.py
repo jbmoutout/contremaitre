@@ -86,6 +86,21 @@ def _short_model(model: str) -> str:
     return model.split("/")[-1] if model else "?"
 
 
+def _is_free_model(model: str) -> bool:
+    """True for OpenCode Zen free tier or OpenRouter `:free` variants.
+
+    Matches:
+      - `opencode/<name>-free` (Zen's free tier convention)
+      - `opencode/big-pickle` (stealth free model)
+      - `openrouter/<name>:free` (legacy OpenRouter free routing)
+    """
+
+    if not model:
+        return False
+    bare = model.rsplit("/", 1)[-1]
+    return bare.endswith("-free") or bare == "big-pickle" or bare.endswith(":free")
+
+
 def _fmt_ts(ts_ms: int | None) -> str:
     if not ts_ms:
         return "        "
@@ -874,9 +889,15 @@ if _TEXTUAL_AVAILABLE:
             footer.append(" · ")
             footer.append(f"subagents: {subagents}")
             footer.append(" · ")
-            cost_usd = sum_costs_in_events(agent_events, sim_events)
-            footer.append(f"cost ${cost_usd:.4f}",
-                          style="cyan" if cost_usd > 0 else "dim")
+            # Free-tier models report $0 per event; render "free" rather
+            # than `$0.0000` so the footer reads as "this run is free"
+            # instead of "this run costs almost nothing".
+            if _is_free_model(self.agent_model) and _is_free_model(self.sim_model):
+                footer.append("free", style="bold green")
+            else:
+                cost_usd = sum_costs_in_events(agent_events, sim_events)
+                footer.append(f"cost ${cost_usd:.4f}",
+                              style="cyan" if cost_usd > 0 else "dim")
             footer.append(" · ")
             footer.append(f"recoveries: {len(recoveries)}",
                           style="yellow" if recoveries else "dim")
