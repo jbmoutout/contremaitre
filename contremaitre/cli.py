@@ -746,12 +746,29 @@ def _format_ctx(n: int) -> str:
 
 
 def _pick_model(*, role: str, default_id: str, free_models: list[dict]) -> str:
-    """Numbered-list picker. Returns the chosen id. Empty input → default."""
+    """Numbered-list picker. Returns the chosen id, normalised for opencode.
+
+    OpenRouter's `/api/v1/models` returns ids without a provider prefix
+    (e.g. `deepseek/deepseek-v4-flash:free`). opencode addresses the
+    same model as `openrouter/deepseek/deepseek-v4-flash:free` — the
+    provider name is the routing key. We always return the
+    `openrouter/<id>` form so opencode resolves it.
+
+    Default-highlight tolerates both forms in the operator's CLI
+    default by stripping a leading `openrouter/`.
+    """
 
     print()
     print(f"contremaitre: pick a free OpenRouter model for {role}")
     print()
-    default_idx = next((i for i, m in enumerate(free_models) if m["id"] == default_id), None)
+    bare_default = default_id.removeprefix("openrouter/") if default_id else ""
+    # Try exact match first, then the `:free` variant — the CLI default is
+    # typically the paid model name; its free analog is `<name>:free`.
+    default_idx = next(
+        (i for i, m in enumerate(free_models)
+         if m["id"] == bare_default or m["id"] == f"{bare_default}:free"),
+        None,
+    )
     width = len(str(len(free_models) - 1))
     for i, m in enumerate(free_models):
         marker = "  ← default" if i == default_idx else ""
@@ -759,17 +776,26 @@ def _pick_model(*, role: str, default_id: str, free_models: list[dict]) -> str:
     if default_idx is None:
         print(f"  (CLI default `{default_id}` not in free list; Enter keeps it anyway)")
     print()
+    # Enter normalises to the highlighted free variant when one matched
+    # (so the picker's display and its return value agree). When no
+    # match was found, fall back to the raw default_id — operator
+    # explicitly opted into a non-free model on the CLI.
+    enter_choice = (
+        f"openrouter/{free_models[default_idx]['id']}"
+        if default_idx is not None
+        else default_id
+    )
     while True:
         try:
             reply = input(f"Pick [0-{len(free_models)-1}, Enter for default, q to abort]: ").strip().lower()
         except EOFError:
-            return default_id
+            return enter_choice
         if reply == "":
-            return default_id
+            return enter_choice
         if reply == "q":
             raise KeyboardInterrupt
         if reply.isdigit() and 0 <= int(reply) < len(free_models):
-            return free_models[int(reply)]["id"]
+            return f"openrouter/{free_models[int(reply)]['id']}"
         print(f"  not a valid index — try a number 0–{len(free_models)-1}, Enter, or q")
 
 
