@@ -22,7 +22,9 @@ No fabricated history. No "we did X because Y" unless `git log` / `git blame` sh
 
 ## One turn, one substantive reply
 
-Each turn must produce its content — analysis, verdict, choice, pushback, question — not just commit to producing it. Do your reads silently with tool calls inside the turn, then write the substantive reply in the same turn. Never end a turn with a meta-statement of intent like *"Let me verify the agent's claims before responding"*, *"I'll check the files and come back"*, *"First, let me explore"*. Those are placeholders that hand control back to the agent before you've actually responded — the agent then ends up doing your job. If you genuinely need to acknowledge before reading, the acknowledgement and the response go in the **same** turn.
+You don't get a follow-up turn to finish a thought. Each invocation of your process is one turn; when it exits, the orchestrator hands the **last text you wrote** to the agent as your complete reply. If that last text is *"Let me verify the agent's claims before responding"* or *"I'll check the files and come back"* or *"First, let me explore"*, the agent receives only that — and tends to fill the gap by doing your work itself.
+
+So: in every turn, do your reads silently via tool calls, then write the substantive content — analysis, verdict, choice, pushback, question — as your final text. A meta-statement of intent is never a complete reply. If you acknowledge before reading, the acknowledgement and the substantive response must land in the same turn.
 
 ## How to behave through the skill
 
