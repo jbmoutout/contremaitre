@@ -249,6 +249,11 @@ def _run_cmd(args: argparse.Namespace) -> int:
     except subprocess.CalledProcessError as exc:
         print(f"contremaitre: git clone failed: {exc.stderr or exc}", file=sys.stderr)
         return 1
+    try:
+        _resolve_models_interactive(args=args, argv_for_explicit_check=sys.argv)
+    except KeyboardInterrupt:
+        print("aborted", file=sys.stderr)
+        return 130
     if not _confirm_launch(args=args, source_url=source_url, cache_path=cache_path):
         print("aborted", file=sys.stderr)
         return 130
@@ -698,6 +703,113 @@ def _extract_flag_value(args: list[str], flag: str, default: str) -> str:
     return default
 
 
+def _has_flag_in(argv: list[str], flag: str) -> bool:
+    """True iff `--flag value` or `--flag=value` is present in argv."""
+
+    prefix = f"{flag}="
+    return any(item == flag or item.startswith(prefix) for item in argv)
+
+
+def _fetch_free_models() -> list[dict] | None:
+    """Pull OpenRouter's public model catalog, return the $0/$0 entries.
+
+    None on network or parse failure — caller falls through to defaults
+    so a picker UI never blocks a run that would otherwise have launched.
+    """
+
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen("https://openrouter.ai/api/v1/models", timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
+        return None
+    free: list[dict] = []
+    for m in payload.get("data", []):
+        pricing = m.get("pricing") or {}
+        if pricing.get("prompt") == "0" and pricing.get("completion") == "0":
+            free.append({
+                "id": m.get("id") or "?",
+                "ctx": int(m.get("context_length") or 0),
+            })
+    free.sort(key=lambda m: m["id"])
+    return free
+
+
+def _format_ctx(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n//1_000}k"
+    return str(n)
+
+
+def _pick_model(*, role: str, default_id: str, free_models: list[dict]) -> str:
+    """Numbered-list picker. Returns the chosen id. Empty input → default."""
+
+    print()
+    print(f"contremaitre: pick a free OpenRouter model for {role}")
+    print()
+    default_idx = next((i for i, m in enumerate(free_models) if m["id"] == default_id), None)
+    width = len(str(len(free_models) - 1))
+    for i, m in enumerate(free_models):
+        marker = "  ← default" if i == default_idx else ""
+        print(f"  {i:>{width}}) {m['id']:<55} ctx {_format_ctx(m['ctx']):>5}{marker}")
+    if default_idx is None:
+        print(f"  (CLI default `{default_id}` not in free list; Enter keeps it anyway)")
+    print()
+    while True:
+        try:
+            reply = input(f"Pick [0-{len(free_models)-1}, Enter for default, q to abort]: ").strip().lower()
+        except EOFError:
+            return default_id
+        if reply == "":
+            return default_id
+        if reply == "q":
+            raise KeyboardInterrupt
+        if reply.isdigit() and 0 <= int(reply) < len(free_models):
+            return free_models[int(reply)]["id"]
+        print(f"  not a valid index — try a number 0–{len(free_models)-1}, Enter, or q")
+
+
+def _resolve_models_interactive(
+    *,
+    args: argparse.Namespace,
+    argv_for_explicit_check: list[str],
+    forwarded_to_subprocess: list[str] | None = None,
+) -> None:
+    """Mutate `args` (and optionally extend `forwarded_to_subprocess`) with picker choices.
+
+    Skip when stdin isn't a TTY, `--yes` is set, or both model flags
+    were explicitly passed. Net-fail on the model catalog → warn + skip.
+    Two prompts: agent first, then SIM (SIM default = chosen agent so
+    Enter twice is the common "same model for both" path).
+    """
+
+    if not sys.stdin.isatty() or getattr(args, "yes", False):
+        return
+    agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
+    sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
+    if agent_explicit and sim_explicit:
+        return
+    free = _fetch_free_models()
+    if not free:
+        print("contremaitre: skipping model picker (couldn't fetch OpenRouter catalog)", file=sys.stderr)
+        return
+    chosen_agent = args.agent_model
+    if not agent_explicit:
+        chosen_agent = _pick_model(role="agent", default_id=args.agent_model, free_models=free)
+        args.agent_model = chosen_agent
+        if forwarded_to_subprocess is not None:
+            forwarded_to_subprocess.extend(["--agent-model", chosen_agent])
+    if not sim_explicit:
+        chosen_sim = _pick_model(role="SIM", default_id=chosen_agent, free_models=free)
+        args.sim_model = chosen_sim
+        if forwarded_to_subprocess is not None:
+            forwarded_to_subprocess.extend(["--sim-model", chosen_sim])
+
+
 def _tui_run_cmd(args: argparse.Namespace) -> int:
     from . import tui  # imported lazily so the rest of the CLI works without textual
 
@@ -737,7 +849,22 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         publish_mode=_extract_flag_value(forwarded, "--publish-mode", PublishMode.STUB.value),
         max_cost_usd=_extract_flag_value(forwarded, "--max-cost-usd", "?"),
         max_wall_minutes=_extract_flag_value(forwarded, "--max-wall-minutes", "?"),
+        agent_model=agent_model,
+        sim_model=sim_model,
     )
+    try:
+        _resolve_models_interactive(
+            args=confirm_args,
+            argv_for_explicit_check=forwarded,
+            forwarded_to_subprocess=forwarded,
+        )
+    except KeyboardInterrupt:
+        print("aborted", file=sys.stderr)
+        return 130
+    # Picker may have appended --agent-model / --sim-model to `forwarded`;
+    # refresh the locals so the TUI header displays the chosen models.
+    agent_model = _extract_flag_value(forwarded, "--agent-model", agent_model)
+    sim_model = _extract_flag_value(forwarded, "--sim-model", sim_model)
     if not _confirm_launch(args=confirm_args, source_url=source_url, cache_path=cache_path):
         print("aborted", file=sys.stderr)
         return 130

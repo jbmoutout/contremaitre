@@ -87,25 +87,19 @@ class Orchestrator:
         self.trajectory: list[dict[str, object]] = []
         self.no_progress_streak = 0
         self._last_progress_key: tuple[str, str] | None = None
+        # SHA of `origin/<base>` captured at worktree creation, right
+        # after `git fetch origin <base>` and before any remote rewiring.
+        # Used as the diff base by all later operations — pinning to a
+        # commit instead of a ref name survives the `git remote remove
+        # origin && git remote add origin <fork>` swap (which deletes
+        # `refs/remotes/origin/<base>`).
+        self._base_sha: str = ""
 
     @property
     def _diff_base(self) -> str:
-        """Ref against which all diff operations compute.
+        """SHA against which all diff operations compute. Pinned at fetch time."""
 
-        We anchor on `origin/<base>` (fetched fresh at worktree creation)
-        rather than the bare branch name. The bare name resolves to the
-        source repo's local ref, which is operator-mutable and was the
-        root cause of run-to-run check flakiness (run 20260523-021155
-        diagnosis): the local `main` had moved relative to upstream and
-        the diff base / typecheck saw a different codebase than prior
-        runs against the "same" main.
-
-        Publisher-side, the bare `config.base` is still used as the PR's
-        target branch name — GitHub expects a plain branch name, not a
-        remote-tracking ref.
-        """
-
-        return f"origin/{self.config.base}"
+        return self._base_sha or self.config.base
 
     # ----- top-level run -----
 
@@ -664,6 +658,7 @@ class Orchestrator:
         # reproducible regardless of the source repo's checkout state.
         repo.run("fetch", "origin", self.config.base)
         base_ref = f"origin/{self.config.base}"
+        self._base_sha = repo.run("rev-parse", base_ref).stdout.strip()
         repo.run("worktree", "add", str(self.paths.worktree), "-b", branch, base_ref)
         worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
         if self.config.fork:
