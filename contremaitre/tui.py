@@ -582,7 +582,7 @@ if _TEXTUAL_AVAILABLE:
 
     class ContremaitreTUI(App):
         CSS = """
-        Screen { layout: vertical; }
+        Screen { layout: vertical; padding: 1 2; }
         #header { height: 1; padding: 0 1; }
         #panes { height: 1fr; }
         .pane { width: 1fr; border: heavy white; }
@@ -668,13 +668,13 @@ if _TEXTUAL_AVAILABLE:
             yield Static("", id="header")
             with Horizontal(id="panes"):
                 with Vertical(classes="pane", id="agent-pane"):
-                    yield Static("", classes="pane-sub", id="agent-sub")
                     yield RichLog(id="agent-log", auto_scroll=True, markup=False,
                                   wrap=True, highlight=False)
+                    yield Static("", classes="pane-sub", id="agent-sub")
                 with Vertical(classes="pane", id="sim-pane"):
-                    yield Static("", classes="pane-sub", id="sim-sub")
                     yield RichLog(id="sim-log", auto_scroll=True, markup=False,
                                   wrap=True, highlight=False)
+                    yield Static("", classes="pane-sub", id="sim-sub")
             with Vertical(id="activity-panel"):
                 yield RichLog(id="activity-log", auto_scroll=True, markup=False,
                               wrap=True, highlight=False)
