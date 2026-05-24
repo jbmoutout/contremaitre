@@ -16,7 +16,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install
-        run: uv pip install --system -e ".[tui]" pytest
+        run: uv sync --extra tui
 
       - name: Test
-        run: pytest tests/ -q
+        run: uv run --with pytest pytest tests/ -q
