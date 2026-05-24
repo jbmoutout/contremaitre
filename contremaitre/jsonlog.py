@@ -75,14 +75,17 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def read_json(path: Path) -> Any | None:
-    """Load a JSON file, return None when it doesn't exist.
+    """Load a JSON file, return None when it doesn't exist or is unreadable.
 
-    Strict parser (no silent fallback) — the callers that tolerate
-    missing files handle it via the None return. Malformed JSON
-    raises rather than silently returning None, so format bugs
-    surface in tests instead of hiding in a None-propagating chain.
+    Returns None on missing/unreadable file so callers don't need
+    try/except for the common case. Malformed JSON still raises
+    rather than silently returning None, so format bugs surface in
+    tests instead of hiding in a None-propagating chain.
     """
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
 
