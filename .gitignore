@@ -22,3 +22,5 @@ skills-lock.json
 
 # Claude Code: symlinks into .agents/skills (gitignored above)
 .claude/
+
+DUMP.md

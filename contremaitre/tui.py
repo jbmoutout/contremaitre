@@ -870,12 +870,12 @@ if _TEXTUAL_AVAILABLE:
             agent_at_bottom = self._at_bottom(agent_widget)
             sim_at_bottom = self._at_bottom(sim_widget)
             while self._agent_separators_rendered < len(agent_starts) - 1:
-                n = self._agent_separators_rendered + 1
+                n = self._agent_separators_rendered + 2
                 role = agent_starts[n - 1].get("role", "agent")
                 agent_widget.write(_turn_separator(n, _role_label(role)))
                 self._agent_separators_rendered += 1
             while self._sim_separators_rendered < len(sim_starts) - 1:
-                n = self._sim_separators_rendered + 1
+                n = self._sim_separators_rendered + 2
                 role = sim_starts[n - 1].get("role", "sim")
                 sim_widget.write(_turn_separator(n, _role_label(role)))
                 self._sim_separators_rendered += 1
