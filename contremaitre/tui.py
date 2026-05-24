@@ -33,6 +33,7 @@ from typing import Any
 
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
+from .jsonlog import read_jsonl
 
 try:
     from rich.table import Table
@@ -61,27 +62,6 @@ DOCKER_REFRESH_S = 2.0
 
 
 # ---------- JSONL helpers ----------
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    out: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
 
 
 def _file_age(path: Path | None) -> float | None:
@@ -858,7 +838,7 @@ if _TEXTUAL_AVAILABLE:
             return widget.scroll_y >= widget.max_scroll_y
 
         def _update_agent_log(self) -> None:
-            events = _read_jsonl(self.paths["raw_export"])
+            events = read_jsonl(self.paths["raw_export"])
             widget = self.query_one("#agent-log", RichLog)
             at_bottom = self._at_bottom(widget)
             if not events and not self._showed_initial_prompt:
@@ -885,7 +865,7 @@ if _TEXTUAL_AVAILABLE:
                 widget.scroll_end(animate=False)
 
         def _update_sim_log(self) -> None:
-            events = _read_jsonl(self.paths["sim_raw_export"])
+            events = read_jsonl(self.paths["sim_raw_export"])
             widget = self.query_one("#sim-log", RichLog)
             at_bottom = self._at_bottom(widget)
             for e in events[self._sim_idx :]:
@@ -902,7 +882,7 @@ if _TEXTUAL_AVAILABLE:
             # raw_export before writing agent_start[N+1], so the previous
             # tick already flushed them; the separator then precedes any
             # turn N+1 events written in this tick.
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            guardrails = read_jsonl(self.paths["guardrail_events"])
             agent_starts = [
                 e for e in guardrails
                 if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
@@ -934,11 +914,11 @@ if _TEXTUAL_AVAILABLE:
         def _update_activity_log(self) -> None:
             widget = self.query_one("#activity-log", RichLog)
             at_bottom = self._at_bottom(widget)
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            guardrails = read_jsonl(self.paths["guardrail_events"])
             for e in guardrails[self._guardrail_idx :]:
                 widget.write(_render_guardrail(e))
             self._guardrail_idx = len(guardrails)
-            recoveries = _read_jsonl(self.paths["recoveries"])
+            recoveries = read_jsonl(self.paths["recoveries"])
             for e in recoveries[self._recoveries_idx :]:
                 widget.write(_render_guardrail(e))
             self._recoveries_idx = len(recoveries)
@@ -963,10 +943,10 @@ if _TEXTUAL_AVAILABLE:
             return "agent" if a <= s else "sim"
 
         def _update_chrome(self) -> None:
-            agent_events = _read_jsonl(self.paths["raw_export"])
-            sim_events = _read_jsonl(self.paths["sim_raw_export"])
-            recoveries = _read_jsonl(self.paths["recoveries"])
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            agent_events = read_jsonl(self.paths["raw_export"])
+            sim_events = read_jsonl(self.paths["sim_raw_export"])
+            recoveries = read_jsonl(self.paths["recoveries"])
+            guardrails = read_jsonl(self.paths["guardrail_events"])
 
             agent_turns = _text_event_count(agent_events)
             sim_turns = _text_event_count(sim_events)
@@ -1129,12 +1109,12 @@ if _TEXTUAL_AVAILABLE:
             _tested_style = _PAL_SUCCESS if self_verified else (_PAL_WARN if impl_complete else _PAL_VDIM)
             footer.append("● " if self_verified else "○ ", style=_tested_style)
             footer.append("tested", style=_PAL_TEXT if self_verified else (_PAL_WARN if impl_complete else _PAL_DIM))
-            review_cycles = _read_jsonl(self.paths["review_cycles"])
+            review_cycles = read_jsonl(self.paths["review_cycles"])
             rev_text = _review_summary(review_cycles)
             if rev_text is not None:
                 footer.append("  ")
                 footer.append(rev_text)
-            test_runs = _read_jsonl(self.paths["test_runs"])
+            test_runs = read_jsonl(self.paths["test_runs"])
             tests_text = _tests_summary(test_runs)
             if tests_text is not None:
                 footer.append("  ")
