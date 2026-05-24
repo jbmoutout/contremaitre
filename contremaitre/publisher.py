@@ -186,21 +186,13 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     Self-contained so reviewers don't need to clone the run dir.
     """
 
-    import json as _json
+    from .jsonlog import read_jsonl
     from .orchestrator import _derive_commit_message
-
-    def _read_jsonl(p: Path) -> list[dict]:
-        if not p.exists():
-            return []
-        try:
-            return [_json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        except (OSError, ValueError):
-            return []
 
     title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
 
-    review_cycles = _read_jsonl(paths.review_cycles)
-    test_runs = _read_jsonl(paths.test_runs)
+    review_cycles = read_jsonl(paths.review_cycles)
+    test_runs = read_jsonl(paths.test_runs)
 
     # review_cycles.jsonl is written during the review pass, before the
     # publisher runs. pr_eval.json is written after — don't read it here.

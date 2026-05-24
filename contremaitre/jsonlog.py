@@ -45,3 +45,47 @@ def append_transcript(path: Path, *, speaker: str, phase: str, text: str) -> Non
     with path.open("a", encoding="utf-8") as f:
         f.write(f"\n\n## {phase} - {speaker}\n\n{text.strip()}\n")
 
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Parse a JSONL file, return every dict row.
+
+    Returns [] when the path doesn't exist, is unreadable, or contains
+    no valid dict entries. Silently skips blank lines, JSONDecodeError
+    lines, and non-dict values — matches the lenient pattern shared by
+    every JSONL consumer in the codebase.
+    """
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
+
+
+def read_json(path: Path) -> Any | None:
+    """Load a JSON file, return None when it doesn't exist or is unreadable.
+
+    Returns None on missing/unreadable file so callers don't need
+    try/except for the common case. Malformed JSON still raises
+    rather than silently returning None, so format bugs surface in
+    tests instead of hiding in a None-propagating chain.
+    """
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
