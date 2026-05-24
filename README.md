@@ -38,7 +38,7 @@ just deepdeep tui-run main git@github.com:<you>/<target>.git
 
 **One-time setup** (auto-handled on first run):
 - Local clone cache is created on demand under `~/.cache/contremaitre/`.
-- Runtime image `contremaitre-agent:latest` builds itself on first opencode-mode run. ~3 min on a warm host.
+- Runtime image `contremaitre-agent:latest` builds itself on first opencode-mode run. ~3 min on a warm host. Auto-rebuilds on subsequent runs when the Dockerfile content changes (image carries a `contremaitre.dockerfile-sha256` label; mismatch triggers a rebuild). Ships with `uv` + `poetry` so Python targets get a working runtime out of the box.
 - TUI requires `textual` — run `uv sync --extra tui` (or `--extra tui --group dev` for the full dev env). Skip if you'd rather watch via JSONL tail.
 - `OPENROUTER_API_KEY` in `.env` (cwd or repo root) — bounded by a provider-side daily limit. Preflight refuses to start a run without one.
 
@@ -121,15 +121,16 @@ See [docs/control-plane.md](docs/control-plane.md) for the implementation map.
 
 `--check-cmd` is target-agnostic: pass whatever fast deterministic command tells you the diff is at least mechanically sound. Examples:
 
-| Stack | Example |
-|---|---|
-| Node / TS | `--check-cmd "npx tsc --noEmit"` |
-| Python (poetry) | `--check-cmd "poetry run pytest -q"` |
-| Python (uv / stdlib) | `--check-cmd "python3 -m unittest discover -s tests"` |
-| Rust | `--check-cmd "cargo check --all-targets"` |
-| Go | `--check-cmd "go build ./..."` |
+| Stack | Lockfile | Example |
+|---|---|---|
+| Node / TS | `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` | `--check-cmd "npx tsc --noEmit"` |
+| Python (uv) | `uv.lock` | `--check-cmd "uv run pytest -q"` |
+| Python (poetry) | `poetry.lock` | `--check-cmd "poetry run pytest -q"` |
+| Python (rye / pip-tools) | `requirements.lock` | `--check-cmd "python -m pytest -q"` |
+| Rust | `Cargo.lock` (needs `--docker-image contremaitre-agent-rust:latest`) | `--check-cmd "cargo check --all-targets"` |
+| Go | `go.sum` (needs `--docker-image contremaitre-agent-go:latest`) | `--check-cmd "go build ./..."` |
 
-The check runs in a sidecar container that mounts the same worktree + lockhash-keyed deps volume the agent used, with a 600s timeout per command. Repeat the flag to gate on more than one command.
+The check runs in a sidecar container that mounts the same worktree + lockhash-keyed deps volume the agent used, with a 600s timeout per command. The deps volume sits at `/app/{node_modules,.venv,.cargo-cache,.go-mod-cache}` (per-ecosystem); runtime env vars (`VIRTUAL_ENV`, `CARGO_HOME`, `GOPATH`) are auto-injected so ecosystem tools find it without per-target setup. Repeat the flag to gate on more than one command.
 
 ## Smoke run (fake actor, no docker, no spend)
 
@@ -167,14 +168,16 @@ Bypass flags exist but are noisy on purpose: `--skip-preflight`, `--skip-openrou
 
 ### Image build
 
-The first opencode-mode run auto-builds `contremaitre-agent:latest`. Pre-build or force a rebuild:
+The first opencode-mode run auto-builds `contremaitre-agent:latest`. Subsequent runs auto-rebuild when the Dockerfile content has changed (image staleness is detected by comparing the `contremaitre.dockerfile-sha256` label against the on-disk Dockerfile). Pre-build or force a rebuild:
 
 ```bash
-python3 -m contremaitre image build              # build with cache
-python3 -m contremaitre image build --no-cache   # force fresh layers
+python3 -m contremaitre image build                    # base (default)
+python3 -m contremaitre image build --variant rust     # adds Rust toolchain
+python3 -m contremaitre image build --variant go       # adds Go toolchain
+python3 -m contremaitre image build --no-cache         # force fresh layers
 ```
 
-The image is generic opencode-in-Docker with `mattpocock/skills` installed globally. No target codebase is baked in; the orchestrator mounts the per-run worktree at `/app` at run time.
+The base image is generic opencode-in-Docker with `uv`, `poetry`, and `mattpocock/skills` installed globally. No target codebase is baked in; the orchestrator mounts the per-run worktree at `/app` at run time. Variants chain `FROM contremaitre-agent:latest` and add their toolchain — use them via `--docker-image contremaitre-agent-{rust,go}:latest` for Cargo / Go targets.
 
 ### Prompts
 
