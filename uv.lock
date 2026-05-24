@@ -24,6 +24,7 @@ tui = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "rich" },
 ]
 
 [package.metadata]
@@ -31,7 +32,10 @@ requires-dist = [{ name = "textual", marker = "extra == 'tui'", specifier = ">=0
 provides-extras = ["tui"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8" }]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "rich", specifier = ">=13" },
+]
 
 [[package]]
 name = "iniconfig"
