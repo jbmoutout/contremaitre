@@ -6,6 +6,6 @@ Run the `/improve-codebase-architecture` skill end-to-end against this repositor
 
 **Write `.contremaitre/SETTLED_DESIGN.md` before implementing.** Capture the seam, what sits behind it, the PR sequence, and any load-bearing constraints from grilling. The review pass diffs the implementation against this file.
 
-**Write `.contremaitre/IMPLEMENTATION_COMPLETE` last, with a one-line summary.** This is the terminal signal — the host hands off to review when it appears. Don't write it before the implementation matches SETTLED and the relevant local checks have been attempted.
+**Write `.contremaitre/IMPLEMENTATION_COMPLETE` last, with a one-line summary.** This is the terminal signal — the host hands off to review when it appears. Before writing it, run the repository's test suite and verify it passes. Do not write this file if tests are failing or were skipped.
 
 **One turn, one complete reply.** Each invocation of your process is one turn; when it exits, the orchestrator hands the **last text you wrote** to the SIM as your reply. Don't end a turn with a meta-statement of self-intent like *"Let me check the routes"* or *"I'll explore the schema first"* — execute the intent via tool calls in the same turn, then write your substantive response. Asking the SIM a fully-formed question (*"Which candidate would you like to explore?"*, *"Should the seam carry the tx parameter?"*) is fine — that's a valid turn ending. Committing to a self-action and exiting before doing it isn't: the SIM then receives only the placeholder.
