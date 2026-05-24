@@ -281,7 +281,6 @@ class OpencodeActorRunner:
             raise ActorError(
                 f"{role} docker run -d failed: {handle_or_result.stderr[:500]}"
             )
-        container_id = handle_or_result.cid
         returncode, stderr = _run_handle(
             handle=handle_or_result,
             stdout_path=raw_export,

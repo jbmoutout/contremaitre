@@ -62,10 +62,22 @@ class ContainerHandle:
         )
 
     def wait(self, *, timeout: int | None = None) -> int:
-        """``docker wait`` — returns exit code."""
+        """``docker wait`` — returns exit code.
+
+        Raises ``subprocess.TimeoutExpired`` if the container does not
+        exit within *timeout* seconds, so the caller (``_run_handle``) can
+        stop the container, kill the log process, and surface ``ActorError``.
+        """
         result = self._docker._run(
             ["docker", "wait", self._cid], timeout=timeout or 600
         )
+        if result.returncode == -1:
+            raise subprocess.TimeoutExpired(
+                cmd=["docker", "wait", self._cid],
+                timeout=timeout or 600,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
         try:
             return int(result.stdout.strip() or "1")
         except (ValueError, TypeError):
@@ -382,10 +394,6 @@ class FakeDockerClient:
         if detach and result.returncode == 0 and result.stdout.strip():
             return ContainerHandle(result.stdout.strip(), self)
         return result
-
-    @property
-    def cid(self) -> str:
-        return "<fake-cid>"
 
     def build(self, tag: str, dockerfile: Path, *, no_cache: bool = False,
               labels: dict[str, str] | None = None) -> DockerResult:
