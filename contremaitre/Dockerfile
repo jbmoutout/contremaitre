@@ -21,6 +21,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Python project tooling. uv lands at /root/.local/bin/uv; poetry via pip
+# (Debian's python3-pip refuses system-site installs without the
+# --break-system-packages escape hatch). Both are needed by
+# runtime_image.ensure_deps_volume's install one-shot and by agents
+# driving `uv run …` / `poetry run …` inside the worktree.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    pip3 install --break-system-packages --no-cache-dir poetry
+ENV PATH="/root/.local/bin:${PATH}"
+
 # opencode CLI.
 RUN curl -fsSL https://opencode.ai/install | bash
 ENV PATH="/root/.opencode/bin:${PATH}"

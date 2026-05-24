@@ -44,6 +44,24 @@ class PublishMode(str, Enum):
 
 
 @dataclass(frozen=True)
+class DepsVolume:
+    """Per-run handle to a populated docker volume holding cached deps.
+
+    `name` is the volume name; `mount_path` is the relative path inside
+    the repo where the ecosystem expects its deps (`node_modules`,
+    `.venv`, `.cargo-cache`, `.go-mod-cache`). Mounted at `/app/{mount_path}`
+    in agent/sim/check containers. `runtime_env` carries environment
+    variables those containers need so the ecosystem tool finds the
+    cache (e.g. `VIRTUAL_ENV=/app/.venv` for uv/poetry, `GOPATH=…` for
+    go, `CARGO_HOME=…` for cargo).
+    """
+
+    name: str
+    mount_path: str
+    runtime_env: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class Caps:
     max_turns: int = 30
     max_wall_minutes: int = 180
@@ -72,11 +90,11 @@ class RunConfig:
     keep_worktree: bool = False
     simulate_drift_after_approval: bool = False
     docker_image: str = "contremaitre-agent:latest"
-    # Name of a docker named volume mounted RO at /app/node_modules in
-    # agent/SIM/check containers. Keyed on lockfile hash; populated once
-    # per lockhash by runtime_image.ensure_deps_volume. None when the
-    # target has no recognized lockfile (deps unavailable to checks).
-    deps_volume: str | None = None
+    # Docker volume + mount metadata for the ecosystem's deps cache.
+    # Keyed on lockfile hash; populated once per lockhash by
+    # runtime_image.ensure_deps_volume, then cloned per-run. None when
+    # the target has no recognized lockfile (deps unavailable to checks).
+    deps_volume: DepsVolume | None = None
     opencode_config: Path | None = None
     openrouter_env_var: str = "OPENROUTER_API_KEY"
     container_user: str | None = None

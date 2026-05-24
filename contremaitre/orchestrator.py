@@ -32,7 +32,7 @@ from pathlib import Path
 from . import events, prompts
 from .actors import ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
-from .runtime_image import clone_deps_volume_for_run
+from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
 from .costs import estimate_recorded_cost_usd
 from .diffscan import DiffScanResult, scan_diff
 from .evaluator import (
@@ -45,6 +45,7 @@ from .viewer import build_viewer
 from .git_utils import GitRepo
 from .jsonlog import append_jsonl, write_json
 from .models import (
+    ActorMode,
     ParsedVerdict,
     ReviewVerdict,
     RunConfig,
@@ -134,6 +135,7 @@ class Orchestrator:
             enforce_preflight(self.config, self.paths)
             self._transition(State.INIT, "creating worktree")
             self._create_worktree(repo, branch)
+            self._ensure_pristine_deps_volume()
             self._provision_run_deps_volume()
             worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
             actor = make_actor_runner(config=self.config, paths=self.paths)
@@ -834,6 +836,39 @@ class Orchestrator:
             },
         )
         write_json(self.paths.trajectory, {"states": self.trajectory})
+
+    def _ensure_pristine_deps_volume(self) -> None:
+        """Populate the lockhash-keyed deps cache against the fresh worktree.
+
+        Runs AFTER `_create_worktree` (which fetched `origin/<base>`
+        fresh), so the lockfile keying reflects the exact state the
+        agent will see. Reading the lockfile from the cache clone — as
+        the pre-fix CLI did — meant the cache could be keyed on a
+        months-stale snapshot, silently no-op'ing when the lockfile was
+        newly added upstream.
+
+        Skipped in fake-mode tests (no docker involved). DepsInstallError
+        propagates: continuing without deps makes L1 checks look like
+        real failures when the underlying issue is an install gap.
+        """
+
+        if self.config.actor_mode != ActorMode.OPENCODE:
+            return
+        try:
+            handle = ensure_deps_volume(
+                repo=self.paths.worktree,
+                base_image=self.config.docker_image,
+                runs_root=self.config.runs_root,
+                # Cache-clone dir name is the canonical project slug
+                # (`github.com-jbmoutout-contremaitre`); used to scope
+                # volume naming + prune so projects don't evict each
+                # other's caches.
+                project_id=self.config.repo.name,
+            )
+        except DepsInstallError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if handle is not None:
+            self.config = dataclasses.replace(self.config, deps_volume=handle)
 
     def _provision_run_deps_volume(self) -> None:
         """Clone the pristine deps cache into a per-run volume.

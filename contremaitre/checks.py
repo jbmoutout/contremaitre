@@ -141,8 +141,16 @@ def _run_sidecar(
     if config.deps_volume:
         # RW so a check that needs to install something (rare but real)
         # doesn't hit EACCES. Matches the agent-side mount mode.
-        docker_cmd.extend(["-v", f"{config.deps_volume}:/app/node_modules:rw"])
-    docker_cmd.extend(["-w", "/app", config.docker_image, "sh", "-lc", cmd])
+        docker_cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
+        for key, value in config.deps_volume.runtime_env:
+            docker_cmd.extend(["-e", f"{key}={value}"])
+    # `sh -c` (not `-lc`). A login shell sources /etc/profile, which
+    # resets PATH and silently drops any `-e PATH=…` we passed (verified:
+    # node:24-bookworm-slim's profile is the offender). We rely on PATH
+    # to point at /app/.venv/bin so user check-cmds like `pytest -q`
+    # resolve through the deps volume. Non-login shells inherit env
+    # untouched, which is what we want.
+    docker_cmd.extend(["-w", "/app", config.docker_image, "sh", "-c", cmd])
     return subprocess.run(
         docker_cmd,
         capture_output=True,

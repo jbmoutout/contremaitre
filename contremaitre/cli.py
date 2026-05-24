@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -19,7 +19,7 @@ from .models import ActorMode, Caps, PublishMode, RunConfig
 from .orchestrator import run
 from .paths import slugify
 from .preflight import run_preflight
-from .runtime_image import DepsInstallError, ensure_deps_volume, list_deps_volumes
+from .runtime_image import list_deps_volumes
 from .viewer import VIEWER_FILENAME, build_viewer
 
 
@@ -27,10 +27,13 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _DEFAULT_DOCKERFILE = _PACKAGE_DIR / "Dockerfile"
 _DEFAULT_IMAGE = "contremaitre-agent:latest"
 _RUST_IMAGE = "contremaitre-agent-rust:latest"
+_GO_IMAGE = "contremaitre-agent-go:latest"
 _VARIANT_DOCKERFILES: dict[str, Path] = {
     "base": _PACKAGE_DIR / "Dockerfile",
     "rust": _PACKAGE_DIR / "Dockerfile.rust",
+    "go": _PACKAGE_DIR / "Dockerfile.go",
 }
+_DOCKERFILE_HASH_LABEL = "contremaitre.dockerfile-sha256"
 
 
 def _synthesize_opencode_config(*, agent_model: str, openrouter_env_var: str) -> Path:
@@ -191,7 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Image variant to build. "
             "`base` (default) builds contremaitre-agent:latest. "
-            "`rust` builds contremaitre-agent-rust:latest (extends base, adds Rust toolchain)."
+            "`rust` builds contremaitre-agent-rust:latest (extends base, adds Rust toolchain). "
+            "`go` builds contremaitre-agent-go:latest (extends base, adds Go toolchain)."
         ),
     )
     image_build.add_argument(
@@ -293,21 +297,10 @@ def _run_cmd(args: argparse.Namespace) -> int:
     rc = _ensure_default_image_built(config)
     if rc != 0:
         return rc
-    if config.actor_mode == ActorMode.OPENCODE:
-        try:
-            volume = ensure_deps_volume(
-                repo=config.repo,
-                base_image=config.docker_image,
-                runs_root=config.runs_root,
-            )
-        except DepsInstallError as exc:
-            # Hard fail: continuing without deps makes L1 checks look like
-            # real failures (the `tsc@2.0.4` placeholder trap) when the
-            # real issue is a postinstall script. See log for the actual error.
-            print(f"contremaitre: {exc}", file=sys.stderr)
-            return 1
-        if volume:
-            config = dataclasses.replace(config, deps_volume=volume)
+    # Deps volume is now provisioned inside the orchestrator, AFTER the
+    # per-run worktree is checked out from `origin/<base>`, so the
+    # lockfile hash reflects the exact state the agent will see (not
+    # whatever the cache clone happened to have at first-clone time).
     result = run(config)
     print(f"{result.verdict.value}: {result.reason}")
     print(f"run_dir={result.run_dir}")
@@ -496,38 +489,76 @@ def _launch_screen(
 
 
 def _ensure_default_image_built(config: RunConfig) -> int:
-    """Auto-build a known contremaitre image before opencode-mode runs if missing.
+    """Auto-build a known contremaitre image before opencode-mode runs.
 
     Fires for `--actor opencode` and any image name that matches a shipped
-    variant (`contremaitre-agent:latest` or `contremaitre-agent-rust:latest`).
+    variant. Rebuilds when:
+    - The image doesn't exist, OR
+    - Its `contremaitre.dockerfile-sha256` label is missing or mismatches the
+      current Dockerfile contents (catches "Dockerfile edited, image not
+      rebuilt" — the failure mode that left python3/uv missing in the live
+      image even after the Dockerfile was updated).
+
     Custom / third-party images are the operator's responsibility — preflight
     will surface a clean failure with the build hint.
     """
 
     if config.actor_mode != ActorMode.OPENCODE:
         return 0
-    # Map known image names to their Dockerfile.
     auto_build_map = {
         _DEFAULT_IMAGE: _VARIANT_DOCKERFILES["base"],
         _RUST_IMAGE: _VARIANT_DOCKERFILES["rust"],
+        _GO_IMAGE: _VARIANT_DOCKERFILES["go"],
     }
     dockerfile = auto_build_map.get(config.docker_image)
     if dockerfile is None:
         return 0
+    expected_hash = _dockerfile_hash(dockerfile)
+    if expected_hash is None:
+        # Dockerfile missing — fall through to build which surfaces the same error.
+        return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
     try:
         inspect = subprocess.run(
-            ["docker", "image", "inspect", config.docker_image, "--format", "{{.Id}}"],
+            [
+                "docker", "image", "inspect", config.docker_image,
+                "--format", "{{ index .Config.Labels \"" + _DOCKERFILE_HASH_LABEL + "\" }}",
+            ],
             capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return 0
-    if inspect.returncode == 0:
+    if inspect.returncode != 0:
+        print(
+            f"contremaitre: image {config.docker_image} not found — building inline",
+            file=sys.stderr,
+        )
+        return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
+    actual_hash = inspect.stdout.strip()
+    if actual_hash == expected_hash:
         return 0
     print(
-        f"contremaitre: image {config.docker_image} not found — building inline",
+        f"contremaitre: image {config.docker_image} stale "
+        f"(label={actual_hash or '<missing>'}, dockerfile={expected_hash}) — rebuilding",
         file=sys.stderr,
     )
     return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
+
+
+def _dockerfile_hash(dockerfile: Path) -> str | None:
+    """SHA-256 of the Dockerfile contents, or None if the file is missing.
+
+    Used as both the image-build label and the staleness check. Hashes
+    the file the operator would actually rebuild from — variant images
+    (rust, go) inherit `FROM contremaitre-agent:latest`, so a stale base
+    is caught when the base is rebuilt and the variant's `FROM` resolves
+    to a different layer ID (next variant run sees its own dockerfile
+    hash unchanged but inspect succeeds via separate label match).
+    """
+
+    try:
+        return hashlib.sha256(dockerfile.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
 
 
 _WORKTREE_NAME_RE = re.compile(r"^contremaitre-(\d{8}-\d{6}-[A-Za-z0-9._-]+)$")
@@ -721,14 +752,16 @@ def _build_image_inline(*, image_name: str, dockerfile: Path, no_cache: bool) ->
     if not dockerfile.exists():
         print(f"contremaitre: Dockerfile not found: {dockerfile}", file=sys.stderr)
         return 1
-    contents = dockerfile.read_text(encoding="utf-8")
-    cmd = ["docker", "build", "-t", image_name]
+    contents = dockerfile.read_bytes()
+    digest = hashlib.sha256(contents).hexdigest()
+    cmd = ["docker", "build", "-t", image_name,
+           "--label", f"{_DOCKERFILE_HASH_LABEL}={digest}"]
     if no_cache:
         cmd.append("--no-cache")
     cmd.append("-")
     print(f"contremaitre: building {image_name} from {dockerfile}", file=sys.stderr)
     try:
-        proc = subprocess.run(cmd, input=contents.encode("utf-8"), check=False)
+        proc = subprocess.run(cmd, input=contents, check=False)
     except FileNotFoundError:
         print("contremaitre: docker binary not found in PATH", file=sys.stderr)
         return 1
@@ -1020,9 +1053,16 @@ def _viewer_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+_VARIANT_DEFAULT_TAGS: dict[str, str] = {
+    "base": _DEFAULT_IMAGE,
+    "rust": _RUST_IMAGE,
+    "go": _GO_IMAGE,
+}
+
+
 def _image_build_cmd(args: argparse.Namespace) -> int:
     variant_dockerfile = _VARIANT_DOCKERFILES.get(args.variant, _DEFAULT_DOCKERFILE)
-    variant_default_tag = _RUST_IMAGE if args.variant == "rust" else _DEFAULT_IMAGE
+    variant_default_tag = _VARIANT_DEFAULT_TAGS.get(args.variant, _DEFAULT_IMAGE)
     return _build_image_inline(
         image_name=args.image_name or variant_default_tag,
         dockerfile=args.dockerfile or variant_dockerfile,
