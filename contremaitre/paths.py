@@ -81,4 +81,5 @@ def build_run_paths(runs_root: Path, run_id: str) -> RunPaths:
         recoveries=run_dir / "recoveries.jsonl",
         subagents_dir=run_dir / "subagents",
         extracted_files_dir=run_dir / "extracted_files",
+        flow_use_report=eval_dir / "flow_use.json",
     )

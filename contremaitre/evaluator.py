@@ -24,6 +24,7 @@ from typing import Any
 
 from .checks import CheckResult
 from .diffscan import DiffScanResult
+from .flow_use import compute_flow_use
 from .jsonlog import write_json
 from .models import RunPaths, TerminalVerdict
 
@@ -56,6 +57,13 @@ def write_eval_reports(
     write_json(paths.architecture_delta_report, _pending_report("L3 architecture-delta focused judge not implemented"))
     write_json(paths.trajectory_report, trajectory)
 
+    try:
+        flow_use = compute_flow_use(paths)
+        write_json(paths.flow_use_report, flow_use)
+    except Exception as exc:
+        flow_use = {"status": "error", "reason": repr(exc), "agent": {}, "sim": {}}
+        write_json(paths.flow_use_report, flow_use)
+
     payload = {
         "verdict": verdict.value,
         "hard_gates": "PASS" if hard_gates.get("passed") else "FAIL",
@@ -68,6 +76,8 @@ def write_eval_reports(
             "executable_confidence": _executable_confidence(checks_payload["status"]),
             "sim_review_confidence": sim_review.get("confidence"),
             "process_reliability": trajectory.get("process_reliability", 0.0),
+            "self_verified": flow_use["agent"].get("self_verified", {}).get("value"),
+            "settled_before_code": flow_use["agent"].get("settled_write_before_first_code_edit", {}).get("value"),
             "design_conformance": None,
             "architecture_value": None,
         },

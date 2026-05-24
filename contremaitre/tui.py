@@ -341,6 +341,38 @@ def _impl_complete_in(events: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _self_verified_in(events: list[dict[str, Any]]) -> bool:
+    """True if agent ran a test command after its last code edit."""
+    _test_cmd_re = re.compile(
+        r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b"
+    )
+    _contremaitre_re = re.compile(r"[/\\]?\.contremaitre[/\\]")
+    last_edit_ts = 0
+    for e in events:
+        if e.get("type") != "tool_use":
+            continue
+        part = e.get("part") or {}
+        if part.get("tool") not in ("write", "edit"):
+            continue
+        inp = (part.get("state") or {}).get("input") or {}
+        fp = inp.get("filePath") or inp.get("path") or ""
+        if fp and not _contremaitre_re.search(fp):
+            last_edit_ts = max(last_edit_ts, e.get("timestamp", 0))
+    if not last_edit_ts:
+        return False
+    for e in events:
+        if e.get("type") != "tool_use":
+            continue
+        if (e.get("part") or {}).get("tool") != "bash":
+            continue
+        if e.get("timestamp", 0) <= last_edit_ts:
+            continue
+        cmd = ((e.get("part") or {}).get("state") or {}).get("input", {}).get("command") or ""
+        if _test_cmd_re.search(cmd):
+            return True
+    return False
+
+
 def _latest_pending_tool(events: list[dict[str, Any]]) -> str | None:
     for e in reversed(events):
         if e.get("type") != "tool_use":
@@ -925,6 +957,7 @@ if _TEXTUAL_AVAILABLE:
             sim_turns = _text_event_count(sim_events)
             settled = _settled_in(agent_events)
             impl_complete = _impl_complete_in(agent_events)
+            self_verified = _self_verified_in(agent_events)
             subagents = _task_count(agent_events)
 
             # Freeze elapsed + activity-age once the orchestrator has
@@ -1076,6 +1109,11 @@ if _TEXTUAL_AVAILABLE:
             footer.append("  ")
             footer.append("● " if impl_complete else "○ ", style=_PAL_SUCCESS if impl_complete else _PAL_VDIM)
             footer.append("impl", style=_PAL_TEXT if impl_complete else _PAL_DIM)
+            footer.append("  ")
+            # warn if agent declared impl_complete but never ran tests
+            _tested_style = _PAL_SUCCESS if self_verified else (_PAL_WARN if impl_complete else _PAL_VDIM)
+            footer.append("● " if self_verified else "○ ", style=_tested_style)
+            footer.append("tested", style=_PAL_TEXT if self_verified else (_PAL_WARN if impl_complete else _PAL_DIM))
             review_cycles = _read_jsonl(self.paths["review_cycles"])
             rev_text = _review_summary(review_cycles)
             if rev_text is not None:

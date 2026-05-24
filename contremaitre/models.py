@@ -128,6 +128,7 @@ class RunPaths:
     recoveries: Path
     subagents_dir: Path
     extracted_files_dir: Path
+    flow_use_report: Path
 
 
 @dataclass(frozen=True)
