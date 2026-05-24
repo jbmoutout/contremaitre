@@ -199,19 +199,15 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
 
     title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
 
-    eval_data: dict = {}
-    if paths.pr_eval.exists():
-        try:
-            eval_data = _json.loads(paths.pr_eval.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass
-    sim = eval_data.get("sim_review") or {}
-
     review_cycles = _read_jsonl(paths.review_cycles)
     test_runs = _read_jsonl(paths.test_runs)
 
+    # review_cycles.jsonl is written during the review pass, before the
+    # publisher runs. pr_eval.json is written after — don't read it here.
+    sim = review_cycles[-1] if review_cycles else {}
+
     # ----- lede -----
-    verdict = sim.get("verdict") or eval_data.get("verdict") or "?"
+    verdict = (sim.get("verdict") or "?").upper()
     confidence = sim.get("confidence")
     n_rounds = len(review_cycles)
     n_tests = len(test_runs)
