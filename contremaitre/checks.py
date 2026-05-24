@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import events
+from .docker_utils import DockerClient, RunSpec
 from .jsonlog import append_jsonl
 from .models import ActorMode, RunConfig, RunPaths
 
@@ -128,32 +129,33 @@ def _run_sidecar(
     config: RunConfig,
     paths: RunPaths,
 ) -> subprocess.CompletedProcess[str]:
-    docker_cmd = [
-        "docker", "run", "--rm",
-        "--label", f"contremaitre.run-id={paths.run_id}",
-        "--label", "contremaitre.role=check",
-    ]
-    if config.container_user:
-        docker_cmd.extend(["--user", config.container_user])
-    if config.docker_network:
-        docker_cmd.extend(["--network", config.docker_network])
-    docker_cmd.extend(["-v", f"{paths.worktree}:/app:rw"])
-    if config.deps_volume:
-        # RW so a check that needs to install something (rare but real)
-        # doesn't hit EACCES. Matches the agent-side mount mode.
-        docker_cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
-        for key, value in config.deps_volume.runtime_env:
-            docker_cmd.extend(["-e", f"{key}={value}"])
-    # `sh -c` (not `-lc`). A login shell sources /etc/profile, which
-    # resets PATH and silently drops any `-e PATH=…` we passed (verified:
-    # node:24-bookworm-slim's profile is the offender). We rely on PATH
-    # to point at /app/.venv/bin so user check-cmds like `pytest -q`
-    # resolve through the deps volume. Non-login shells inherit env
-    # untouched, which is what we want.
-    docker_cmd.extend(["-w", "/app", config.docker_image, "sh", "-c", cmd])
-    return subprocess.run(
-        docker_cmd,
-        capture_output=True,
-        text=True,
-        timeout=600,
+    _dc = DockerClient()
+    spec = RunSpec(
+        image=config.docker_image,
+        cmd=("sh", "-c", cmd),
+        volumes=(
+            (str(paths.worktree), "/app", "rw"),
+            *(
+                [(config.deps_volume.name, f"/app/{config.deps_volume.mount_path}", "rw")]
+                if config.deps_volume
+                else []
+            ),
+        ),
+        env=dict(config.deps_volume.runtime_env) if config.deps_volume else None,
+        labels=(
+            ("contremaitre.run-id", paths.run_id),
+            ("contremaitre.role", "check"),
+        ),
+        network=config.docker_network,
+        user=config.container_user,
+        workdir="/app",
+    )
+    result = _dc.run(spec)
+    # _dc.run returns DockerResult; convert to CompletedProcess for
+    # the existing caller.
+    return subprocess.CompletedProcess(
+        args=["docker", "run", "--rm", config.docker_image, "sh", "-c", cmd],
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
     )

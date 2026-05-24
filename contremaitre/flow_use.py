@@ -40,31 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from .extract import parse_apply_patch
-
-# ---------------------------------------------------------------------------
-# JSONL reader — inline until PR #1 (jsonlog.read_jsonl) lands on main
-# ---------------------------------------------------------------------------
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    out: list[dict] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
+from .jsonlog import read_jsonl
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +77,8 @@ def compute_flow_use(paths: Any) -> dict[str, Any]:
     `paths` is a RunPaths instance; fields used:
       raw_export, sim_raw_export, review_cycles, guardrail_events.
     """
-    agent_events = _read_jsonl(paths.raw_export)
-    sim_events = _read_jsonl(paths.sim_raw_export)
+    agent_events = read_jsonl(paths.raw_export)
+    sim_events = read_jsonl(paths.sim_raw_export)
     agent = _agent_metrics(agent_events)
     return {
         "schema": "flow_use v1",
@@ -125,7 +101,7 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     and rolled into the PR body lede.
     """
     if agent_events is None:
-        agent_events = _read_jsonl(paths.raw_export)
+        agent_events = read_jsonl(paths.raw_export)
     tool_calls = [e for e in agent_events if e.get("type") == "tool_use"]
     settled_event = _find_write_to(tool_calls, _SETTLED_RE)
     impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
@@ -133,7 +109,7 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     impl_ms = _timestamp_ms(impl_event)
 
     guardrails_path = getattr(paths, "guardrail_events", None)
-    guardrails = _read_jsonl(guardrails_path) if guardrails_path else []
+    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
     starts: list[tuple[float, str]] = []
     for g in guardrails:
         if g.get("event") != "opencode_actor_start":
@@ -171,7 +147,7 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
         if r == "agent" and (impl_ms is None or ts <= impl_ms)
     )
 
-    review_rounds = len(_read_jsonl(paths.review_cycles))
+    review_rounds = len(read_jsonl(paths.review_cycles))
 
     return {
         "pre_settled_agent_turns": pre_settled_agent,
@@ -326,7 +302,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     # sim_useful_call_ratio: fraction of SIM grep outputs cited in verdict text.
     # Valid for SIM (verdict prose is the deliverable). Broken for agent side.
     sim_useful_ratio: float | None = None
-    review_cycles = _read_jsonl(paths.review_cycles)
+    review_cycles = read_jsonl(paths.review_cycles)
     if review_cycles:
         last = review_cycles[-1]
         verdict_text = last.get("summary", "") + " ".join(last.get("checks_performed", []))

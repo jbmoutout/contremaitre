@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import events
+from .docker_utils import DockerClient, DockerResult, RunSpec
 from .jsonlog import append_jsonl, append_text_event, append_transcript
 from .models import ActorMode, RunConfig, RunPaths
 
@@ -175,6 +176,10 @@ class OpencodeActorRunner:
         self.review_state.mkdir(parents=True, exist_ok=True)
         self._agent_session: str | None = None
         self._sim_session: str | None = None
+        self._docker = DockerClient(log_path=paths.git_log)
+
+    def _docker_client(self) -> DockerClient:
+        return self._docker
 
     def agent_turn(self, message: str) -> ActorOutput:
         return self._opencode_turn(
@@ -244,9 +249,10 @@ class OpencodeActorRunner:
         session_attr: str | None,
         extra_mounts: list[tuple[Path, str, str]] | None = None,
     ) -> ActorOutput:
+        _dc = self._docker_client()
         pre_text_count = _count_text_events(raw_export)
         session_id = getattr(self, session_attr) if session_attr else None
-        cmd, env = build_docker_command(
+        spec, subprocess_env = build_docker_command(
             config=self.config,
             paths=self.paths,
             worktree=self.worktree,
@@ -266,13 +272,17 @@ class OpencodeActorRunner:
                 "mount_mode": mount_mode,
                 "model": model,
                 "timeout_seconds": timeout_seconds,
-                "cmd_redacted": redact_command(cmd),
+                "cmd_redacted": redact_command(spec),
             },
         )
         raw_export.parent.mkdir(parents=True, exist_ok=True)
-        returncode, stderr = _run_detached_container(
-            cmd=cmd,
-            env=env,
+        handle_or_result = _dc.run(spec, detach=True, subprocess_env=subprocess_env)
+        if isinstance(handle_or_result, DockerResult):
+            raise ActorError(
+                f"{role} docker run -d failed: {handle_or_result.stderr[:500]}"
+            )
+        returncode, stderr = _run_handle(
+            handle=handle_or_result,
             stdout_path=raw_export,
             timeout_seconds=timeout_seconds,
             role=role,
@@ -374,7 +384,9 @@ def build_docker_command(
     session_id: str | None,
     role: str,
     extra_mounts: list[tuple[Path, str, str]] | None = None,
-) -> tuple[list[str], dict[str, str]]:
+) -> tuple[RunSpec, dict[str, str]]:
+    """:meta: Build a RunSpec + subprocess env for an opencode actor container."""
+
     env = os.environ.copy()
     env_var = config.openrouter_env_var
     if env_var not in env:
@@ -390,7 +402,7 @@ def build_docker_command(
         env["NO_PROXY"] = config.no_proxy
         proxy_vars.append("NO_PROXY")
 
-    opencode_cmd = [
+    opencode_cmd: list[str] = [
         "/root/.opencode/bin/opencode",
         "run",
         "--dangerously-skip-permissions",
@@ -403,93 +415,76 @@ def build_docker_command(
         opencode_cmd.extend(["--session", session_id])
     opencode_cmd.append(prompt)
 
-    # Detached so the container's lifecycle is owned by the docker daemon,
-    # not by this python process: terminal close / SIGHUP no longer
-    # orphans the run, signal handlers can `docker stop` by label, and
-    # we get the container id back on stdout without a cidfile.
-    cmd = ["docker", "run", "-d"]
-    cmd.extend(["--label", f"contremaitre.run-id={paths.run_id}"])
-    cmd.extend(["--label", f"contremaitre.role={role}"])
-    if config.container_user:
-        cmd.extend(["--user", config.container_user])
-    if config.docker_network:
-        cmd.extend(["--network", config.docker_network])
-    cmd.extend(
-        [
-            "-v",
-            f"{paths.run_dir}:/results",
-            "-v",
-            f"{state_dir}:/root/.local/share/opencode",
-            "-v",
-            f"{worktree}:/app:{mount_mode}",
-        ]
-    )
+    volumes: list[tuple[str, str, str]] = [
+        (str(paths.run_dir), "/results", "rw"),
+        (str(state_dir), "/root/.local/share/opencode", "rw"),
+        (str(worktree), "/app", mount_mode),
+    ]
     if config.deps_volume:
-        # Lockhash-keyed deps volume, RW so the agent can install
-        # mid-run when the design genuinely needs a new dep (test
-        # framework, lint plugin, etc.). The trade-off: parallel runs
-        # against the same lockfile share the volume and can race on
-        # writes. Acceptable for solo-operator sequential workflow;
-        # revisit if multi-run-in-parallel becomes a real pattern.
-        # Mounted over the worktree bind at /app/{mount_path}; the
-        # worktree's own copy of that directory (if any) is shadowed.
-        cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
-        for key, value in config.deps_volume.runtime_env:
-            cmd.extend(["-e", f"{key}={value}"])
+        volumes.append(
+            (config.deps_volume.name, f"/app/{config.deps_volume.mount_path}", "rw")
+        )
     if config.opencode_config:
-        cmd.extend(["-v", f"{config.opencode_config}:/app/opencode.json:ro"])
+        volumes.append((str(config.opencode_config), "/app/opencode.json", "ro"))
     for host_path, container_path, mode in extra_mounts or []:
-        cmd.extend(["-v", f"{host_path}:{container_path}:{mode}"])
-    cmd.extend(["-e", env_var])
+        volumes.append((str(host_path), container_path, mode))
+
+    container_env: dict[str, str] = {}
+    container_env[env_var] = os.environ.get(env_var, "")
+    if config.deps_volume:
+        for key, value in config.deps_volume.runtime_env:
+            container_env[key] = value
     for proxy_var in proxy_vars:
-        cmd.extend(["-e", proxy_var])
-    cmd.extend(["-w", "/app", config.docker_image, *opencode_cmd])
-    return cmd, env
+        container_env[proxy_var] = ""
+
+    labels: list[tuple[str, str]] = [
+        ("contremaitre.run-id", paths.run_id),
+        ("contremaitre.role", role),
+    ]
+
+    spec = RunSpec(
+        image=config.docker_image,
+        cmd=tuple(opencode_cmd),
+        volumes=tuple(volumes),
+        env=container_env if container_env else None,
+        labels=tuple(labels),
+        network=config.docker_network,
+        user=config.container_user,
+        workdir="/app",
+    )
+    # subprocess env with proxy overrides so docker CLI has the right context
+    subprocess_env: dict[str, str] = {}
+    if config.http_proxy:
+        subprocess_env["HTTP_PROXY"] = config.http_proxy
+    if config.https_proxy:
+        subprocess_env["HTTPS_PROXY"] = config.https_proxy
+    if config.no_proxy:
+        subprocess_env["NO_PROXY"] = config.no_proxy
+    return spec, subprocess_env if subprocess_env else env
 
 
-def _run_detached_container(
+def _run_handle(
     *,
-    cmd: list[str],
-    env: dict[str, str],
+    handle: ContainerHandle,
     stdout_path: Path,
     timeout_seconds: int,
     role: str,
 ) -> tuple[int, str]:
-    """Start the detached container, stream its logs, wait for exit.
+    """Stream logs from a container handle, wait for exit, clean up.
 
     Returns (returncode, stderr). On timeout: docker stop the container,
-    then raise — same surface the previous Popen-based runner had so the
-    orchestrator's caller doesn't need to know about the detached model.
+    then raise.
     """
-
-    create = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
-    if create.returncode != 0:
-        raise ActorError(f"{role} docker run -d failed: {create.stderr[:500]}")
-    container_id = create.stdout.strip()
-    if not container_id:
-        raise ActorError(f"{role} docker run -d produced no container id")
 
     log_proc: subprocess.Popen[bytes] | None = None
     try:
         with stdout_path.open("ab") as stdout_f:
-            log_proc = subprocess.Popen(
-                ["docker", "logs", "-f", container_id],
-                stdout=stdout_f,
-                stderr=subprocess.PIPE,
-            )
+            log_proc = handle.start_logs(stdout_f)
             try:
-                wait = subprocess.run(
-                    ["docker", "wait", container_id],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                )
-            except subprocess.TimeoutExpired as exc:
-                subprocess.run(
-                    ["docker", "stop", "-t", "5", container_id],
-                    capture_output=True,
-                    timeout=15,
-                )
+                returncode = handle.wait(timeout=timeout_seconds)
+            except (subprocess.TimeoutExpired, ActorError) as exc:
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    handle.stop(timeout=5)
                 log_proc.kill()
                 raise ActorError(f"{role} opencode timed out after {timeout_seconds}s") from exc
             try:
@@ -497,20 +492,15 @@ def _run_detached_container(
             except subprocess.TimeoutExpired:
                 log_proc.kill()
             stderr_bytes = log_proc.stderr.read() if log_proc.stderr else b""
-        returncode = int(wait.stdout.strip() or "1")
         return returncode, stderr_bytes.decode("utf-8", errors="replace")
     finally:
-        subprocess.run(
-            ["docker", "rm", "-f", container_id],
-            capture_output=True,
-            timeout=15,
-        )
+        handle.remove(force=True)
 
 
-def redact_command(cmd: list[str]) -> list[str]:
+def redact_command(spec: RunSpec) -> list[str]:
     """Keep logs useful without exposing long prompts."""
 
-    redacted = list(cmd)
+    redacted = list(spec.cmd)
     if redacted:
         redacted[-1] = f"<prompt {len(redacted[-1])} chars>"
     return redacted

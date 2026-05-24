@@ -139,7 +139,7 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
             ), patch(
                 "contremaitre.runtime_image._prune_stale_deps_volumes"
             ), patch(
-                "contremaitre.runtime_image.subprocess.run"
+                "contremaitre.docker_utils.subprocess.run"
             ) as fake_run:
                 fake_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 ensure_deps_volume(
@@ -235,7 +235,7 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
             ), patch(
                 "contremaitre.runtime_image._prune_stale_deps_volumes"
             ), patch(
-                "contremaitre.runtime_image.subprocess.run"
+                "contremaitre.docker_utils.subprocess.run"
             ) as fake_run:
                 fake_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 handle = ensure_deps_volume(
@@ -268,7 +268,7 @@ class PruneScopeTest(unittest.TestCase):
             captured.append(list(cmd))
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        with patch("contremaitre.runtime_image.subprocess.run", side_effect=fake_run):
+        with patch("contremaitre.docker_utils.subprocess.run", side_effect=fake_run):
             ri._prune_stale_deps_volumes(
                 project_slug="github-com-foo-bar",
                 lockfile_name="package-lock.json",
@@ -300,7 +300,7 @@ class CloneDepsVolumeForRunTest(unittest.TestCase):
             mount_path=".venv",
             runtime_env=(("VIRTUAL_ENV", "/app/.venv"),),
         )
-        with patch("contremaitre.runtime_image.subprocess.run") as fake_run:
+        with patch("contremaitre.docker_utils.subprocess.run") as fake_run:
             fake_run.return_value = MagicMock(returncode=0)
             handle = clone_deps_volume_for_run(
                 pristine=pristine, run_id="20260524-abcd", base_image="img"

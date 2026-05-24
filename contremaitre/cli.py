@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .docker_utils import DockerClient, RunSpec
 from .envfile import load_dotenv_defaults
 from .fixture import init_fixture
 from .models import ActorMode, Caps, PublishMode, RunConfig
@@ -517,16 +518,11 @@ def _ensure_default_image_built(config: RunConfig) -> int:
     if expected_hash is None:
         # Dockerfile missing — fall through to build which surfaces the same error.
         return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
-    try:
-        inspect = subprocess.run(
-            [
-                "docker", "image", "inspect", config.docker_image,
-                "--format", "{{ index .Config.Labels \"" + _DOCKERFILE_HASH_LABEL + "\" }}",
-            ],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return 0
+    _dc = DockerClient()
+    inspect = _dc.image_inspect(
+        config.docker_image,
+        fmt="{{ index .Config.Labels \"" + _DOCKERFILE_HASH_LABEL + "\" }}",
+    )
     if inspect.returncode != 0:
         print(
             f"contremaitre: image {config.docker_image} not found — building inline",
@@ -612,15 +608,11 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
 
     import shutil as _shutil
 
+    _dc = DockerClient()
     removed_containers = 0
     for cid, _ in stale_containers:
-        proc = subprocess.run(
-            ["docker", "rm", "-f", cid],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if proc.returncode == 0:
+        result = _dc.container_rm(cid, force=True)
+        if result.returncode == 0:
             removed_containers += 1
 
     removed_wts = 0
@@ -633,13 +625,8 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
 
     removed_vols = 0
     for name in deps_volumes:
-        proc = subprocess.run(
-            ["docker", "volume", "rm", "-f", name],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode == 0:
+        result = _dc.volume_rm(name, force=True)
+        if result.returncode == 0:
             removed_vols += 1
 
     removed_clones = 0
@@ -651,7 +638,7 @@ def _cleanup_cmd(args: argparse.Namespace) -> int:
             pass
 
     if dangling_images:
-        _prune_dangling_images()
+        _dc.image_prune()
 
     parts = [f"{removed_containers} container(s)", f"{removed_wts} worktree(s)"]
     if args.deps:
@@ -680,27 +667,16 @@ def _scan_stale_containers(runs_root: Path) -> list[tuple[str, str]]:
     (rare, but happens on daemon crash) get cleaned too.
     """
 
-    try:
-        proc = subprocess.run(
-            [
-                "docker",
-                "ps",
-                "-aq",
-                "--filter",
-                "label=contremaitre.run-id",
-                "--format",
-                '{{.ID}}\t{{.Label "contremaitre.run-id"}}',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
+    _dc = DockerClient()
+    result = _dc.ps(
+        all_containers=True,
+        filter="label=contremaitre.run-id",
+        format='{{.ID}}\t{{.Label "contremaitre.run-id"}}',
+    )
+    if result.returncode != 0:
         return []
     stale: list[tuple[str, str]] = []
-    for line in proc.stdout.splitlines():
+    for line in result.stdout.splitlines():
         parts = line.split("\t", 1)
         if len(parts) != 2:
             continue
@@ -733,41 +709,23 @@ def _scan_stale_worktrees(runs_root: Path) -> list[Path]:
 
 
 def _scan_dangling_images() -> list[str]:
-    try:
-        proc = subprocess.run(
-            ["docker", "images", "-q", "--filter", "dangling=true"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    _dc = DockerClient()
+    return _dc.images_q(filter="dangling=true")
 
 
 def _build_image_inline(*, image_name: str, dockerfile: Path, no_cache: bool) -> int:
+    _dc = DockerClient()
     dockerfile = dockerfile.resolve()
     if not dockerfile.exists():
         print(f"contremaitre: Dockerfile not found: {dockerfile}", file=sys.stderr)
         return 1
-    contents = dockerfile.read_bytes()
-    digest = hashlib.sha256(contents).hexdigest()
-    cmd = ["docker", "build", "-t", image_name,
-           "--label", f"{_DOCKERFILE_HASH_LABEL}={digest}"]
-    if no_cache:
-        cmd.append("--no-cache")
-    cmd.append("-")
     print(f"contremaitre: building {image_name} from {dockerfile}", file=sys.stderr)
-    try:
-        proc = subprocess.run(cmd, input=contents, check=False)
-    except FileNotFoundError:
-        print("contremaitre: docker binary not found in PATH", file=sys.stderr)
-        return 1
-    if proc.returncode == 0:
+    result = _dc.build(tag=image_name, dockerfile=dockerfile, no_cache=no_cache)
+    if result.returncode == 0:
         _prune_dangling_images()
-    return proc.returncode
+    elif result.returncode == 127:
+        print("contremaitre: docker binary not found in PATH", file=sys.stderr)
+    return result.returncode
 
 
 def _prune_dangling_images() -> None:
@@ -775,15 +733,7 @@ def _prune_dangling_images() -> None:
     image as <none>:<none>; we don't want those accumulating across rebuilds.
     """
 
-    try:
-        subprocess.run(
-            ["docker", "image", "prune", "-f"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    DockerClient().image_prune()
 
 
 def _doctor_cmd(args: argparse.Namespace) -> int:

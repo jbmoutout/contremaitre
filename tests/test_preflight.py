@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from contremaitre.docker_utils import DockerResult
 from contremaitre.fixture import init_fixture
 from contremaitre.models import ActorMode, Caps, RunConfig
 from contremaitre.preflight import run_preflight
@@ -117,14 +118,12 @@ class PreflightTest(unittest.TestCase):
 
     @staticmethod
     def _mock_docker_ok():
-        def fake_run(cmd):
-            if cmd[0] == "git":
-                return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+        def fake_run(cmd, **kwargs):
             if cmd[:3] == ["docker", "run", "--rm"] and "touch /app/.contremaitre_ro_probe" in cmd:
-                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Read-only file system")
-            return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
+                return DockerResult(returncode=1, stdout="", stderr="Read-only file system")
+            return DockerResult(returncode=0, stdout="ok\n", stderr="")
 
-        return patch("contremaitre.preflight._run", side_effect=fake_run)
+        return patch("contremaitre.preflight.DockerClient._run", side_effect=fake_run)
 
 
 if __name__ == "__main__":

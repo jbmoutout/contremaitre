@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from contremaitre import prompts
 from contremaitre.actors import build_docker_command
+from contremaitre.docker_utils import RunSpec
 from contremaitre.git_utils import GitRepo
 from contremaitre.models import ActorMode, PublishMode, RunConfig
 from contremaitre.orchestrator import Orchestrator
@@ -77,7 +78,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 http_proxy=None,
             )
 
-            cmd, _ = build_docker_command(
+            spec, _ = build_docker_command(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -90,20 +91,17 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 role="agent",
             )
 
-            joined = " ".join(cmd)
-            # Detached + label-driven supervision (Phase 3): docker daemon
-            # owns the container lifecycle, signal handlers stop by label.
-            self.assertEqual(cmd[:3], ["docker", "run", "-d"])
-            self.assertIn(f"contremaitre.run-id={paths.run_id}", cmd)
-            self.assertIn("contremaitre.role=agent", cmd)
-            self.assertNotIn("--cidfile", cmd)
-            self.assertNotIn("--rm", cmd)
-            self.assertIn(f"{worktree}:/app:ro", joined)
-            self.assertIn("OPENROUTER_API_KEY", cmd)
-            self.assertNotIn("secret-key", joined)
-            self.assertNotIn("HTTP_PROXY", cmd)
-            self.assertIn("--session", cmd)
-            self.assertIn("sess", cmd)
+            self.assertIsInstance(spec, RunSpec)
+            self.assertEqual(spec.image, "test-image")
+            self.assertIn("contremaitre.run-id", dict(spec.labels))
+            self.assertEqual(dict(spec.labels)["contremaitre.role"], "agent")
+            self.assertIn("--session", spec.cmd)
+            self.assertIn("sess", spec.cmd)
+            volumes_str = " ".join(f"{s}:{t}:{m}" for s, t, m in spec.volumes)
+            self.assertIn(f"{worktree}:/app:ro", volumes_str)
+            self.assertIn("OPENROUTER_API_KEY", spec.env or {})
+            self.assertIsNone(spec.network)
+            self.assertIsNone(spec.user)
 
     def test_opencode_docker_command_passes_explicit_proxy_only_by_name(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"OPENROUTER_API_KEY": "secret-key"}):
@@ -124,7 +122,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 http_proxy="http://proxy.local:8080",
             )
 
-            cmd, env = build_docker_command(
+            spec, env = build_docker_command(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -137,9 +135,9 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 role="agent",
             )
 
-            self.assertIn("HTTP_PROXY", cmd)
-            self.assertEqual(env["HTTP_PROXY"], "http://proxy.local:8080")
-            self.assertNotIn("http://proxy.local:8080", " ".join(cmd))
+            self.assertIn("HTTP_PROXY", spec.env or {})
+            self.assertEqual(env.get("HTTP_PROXY"), "http://proxy.local:8080")
+            self.assertNotIn("http://proxy.local:8080", str(spec.env or {}))
 
     def test_orchestrator_commits_actor_left_changes_from_host(self):
         with tempfile.TemporaryDirectory() as tmp:

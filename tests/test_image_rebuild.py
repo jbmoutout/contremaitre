@@ -44,7 +44,7 @@ class DockerfileHashRebuildTest(unittest.TestCase):
             df.write_text("FROM scratch\n", encoding="utf-8")
             config = _make_config(cli._DEFAULT_IMAGE, Path(tmp))
             with self._patch_dockerfile(df), patch(
-                "contremaitre.cli.subprocess.run"
+                "contremaitre.docker_utils.subprocess.run"
             ) as fake_run, patch(
                 "contremaitre.cli._build_image_inline", return_value=0
             ) as fake_build:
@@ -62,7 +62,7 @@ class DockerfileHashRebuildTest(unittest.TestCase):
             digest = hashlib.sha256(content).hexdigest()
             config = _make_config(cli._DEFAULT_IMAGE, Path(tmp))
             with self._patch_dockerfile(df), patch(
-                "contremaitre.cli.subprocess.run"
+                "contremaitre.docker_utils.subprocess.run"
             ) as fake_run, patch(
                 "contremaitre.cli._build_image_inline", return_value=0
             ) as fake_build:
@@ -81,7 +81,7 @@ class DockerfileHashRebuildTest(unittest.TestCase):
             df.write_bytes(b"FROM scratch\nRUN echo new\n")
             config = _make_config(cli._DEFAULT_IMAGE, Path(tmp))
             with self._patch_dockerfile(df), patch(
-                "contremaitre.cli.subprocess.run"
+                "contremaitre.docker_utils.subprocess.run"
             ) as fake_run, patch(
                 "contremaitre.cli._build_image_inline", return_value=0
             ) as fake_build:
@@ -102,7 +102,7 @@ class DockerfileHashRebuildTest(unittest.TestCase):
             df.write_bytes(b"FROM scratch\n")
             config = _make_config(cli._DEFAULT_IMAGE, Path(tmp))
             with self._patch_dockerfile(df), patch(
-                "contremaitre.cli.subprocess.run"
+                "contremaitre.docker_utils.subprocess.run"
             ) as fake_run, patch(
                 "contremaitre.cli._build_image_inline", return_value=0
             ) as fake_build:
@@ -147,7 +147,7 @@ class BuildImageStampsLabelTest(unittest.TestCase):
             content = b"FROM scratch\nRUN echo hi\n"
             df.write_bytes(content)
             expected = hashlib.sha256(content).hexdigest()
-            with patch("contremaitre.cli.subprocess.run") as fake_run, patch(
+            with patch("contremaitre.docker_utils.subprocess.run") as fake_run, patch(
                 "contremaitre.cli._prune_dangling_images"
             ):
                 fake_run.return_value = MagicMock(returncode=0)

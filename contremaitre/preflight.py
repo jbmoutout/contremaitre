@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .docker_utils import DockerClient, DockerResult, RunSpec
 from .jsonlog import write_json
 from .models import ActorMode, RunConfig, RunPaths
 
@@ -112,10 +113,11 @@ def _check_opencode_config(config: RunConfig) -> PreflightCheck:
 
 
 def _check_docker_image(config: RunConfig) -> PreflightCheck:
-    docker = _run(["docker", "version", "--format", "{{.Server.Version}}"])
-    if docker.returncode != 0:
-        return _fail("docker", "docker daemon is not available", _proc_details(docker))
-    inspect = _run(["docker", "image", "inspect", config.docker_image, "--format", "{{.Id}} {{.Created}}"])
+    _dc = DockerClient()
+    ver = _dc.version()
+    if ver.returncode != 0:
+        return _fail("docker", "docker daemon is not available", _proc_details(ver))
+    inspect = _dc.image_inspect(config.docker_image, fmt="{{.Id}} {{.Created}}")
     if inspect.returncode != 0:
         return _fail(
             "docker_image",
@@ -127,38 +129,36 @@ def _check_docker_image(config: RunConfig) -> PreflightCheck:
 
 
 def _check_opencode_binary(config: RunConfig) -> PreflightCheck:
-    proc = _run(["docker", "run", "--rm", config.docker_image, "/root/.opencode/bin/opencode", "--version"])
-    if proc.returncode != 0:
-        return _fail("opencode_binary", "opencode binary failed inside image", _proc_details(proc))
-    return _pass("opencode_binary", "opencode binary runs inside image", {"version": proc.stdout.strip()})
+    _dc = DockerClient()
+    spec = RunSpec(
+        image=config.docker_image,
+        cmd=("/root/.opencode/bin/opencode", "--version"),
+    )
+    result = _dc.run(spec)
+    if result.returncode != 0:
+        return _fail("opencode_binary", "opencode binary failed inside image", _proc_details(result))
+    return _pass("opencode_binary", "opencode binary runs inside image", {"version": result.stdout.strip()})
 
 
 def _check_readonly_mount(config: RunConfig) -> PreflightCheck:
+    _dc = DockerClient()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         probe = root / ".contremaitre_ro_probe"
-        proc = _run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "-v",
-                f"{root}:/app:ro",
-                "-w",
-                "/app",
-                config.docker_image,
-                "sh",
-                "-lc",
-                "touch /app/.contremaitre_ro_probe",
-            ]
+        spec = RunSpec(
+            image=config.docker_image,
+            cmd=("sh", "-lc", "touch /app/.contremaitre_ro_probe"),
+            volumes=((str(root), "/app", "ro"),),
+            workdir="/app",
         )
-        if proc.returncode == 0 or probe.exists():
+        result = _dc.run(spec)
+        if result.returncode == 0 or probe.exists():
             return _fail(
                 "readonly_mount",
                 "container could write to a read-only /app mount",
-                {"returncode": proc.returncode, "probe_exists": probe.exists()},
+                {"returncode": result.returncode, "probe_exists": probe.exists()},
             )
-        return _pass("readonly_mount", "read-only /app mount rejected writes", _proc_details(proc))
+        return _pass("readonly_mount", "read-only /app mount rejected writes", _proc_details(result))
 
 
 def _check_network_policy(config: RunConfig) -> PreflightCheck:
@@ -262,11 +262,13 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
 
-def _proc_details(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+def _proc_details(
+    proc: subprocess.CompletedProcess[str] | DockerResult,
+) -> dict[str, Any]:
     return {
         "returncode": proc.returncode,
-        "stdout": proc.stdout[-2000:],
-        "stderr": proc.stderr[-2000:],
+        "stdout": proc.stdout[-2000:] if isinstance(proc.stdout, str) else "",
+        "stderr": proc.stderr[-2000:] if isinstance(proc.stderr, str) else "",
     }
 
 
