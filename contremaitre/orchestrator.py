@@ -31,6 +31,7 @@ from pathlib import Path
 
 from . import events, prompts
 from .actors import ActorRunner, make_actor_runner
+from .docker_utils import DockerClient
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
 from .costs import estimate_recorded_cost_usd
@@ -42,7 +43,7 @@ from .evaluator import (
 )
 from .extract import extract_run_artifacts
 from .viewer import build_viewer
-from .git_utils import GitRepo
+from .git_utils import GitRepo, derive_commit_message
 from .jsonlog import append_jsonl, write_json
 from .models import (
     ActorMode,
@@ -694,7 +695,7 @@ class Orchestrator:
         if _only_contremaitre_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
-        title, body = _derive_commit_message(self.paths.worktree, self.run_id)
+        title, body = derive_commit_message(self.paths.worktree, self.run_id)
         # Pathspec excludes keep orchestration-internal and build-output
         # files out of the staged set. These stay in the worktree (SIM can
         # read them; agent can produce them) but must never land in the
@@ -924,20 +925,10 @@ class Orchestrator:
         the real run outcome.
         """
 
-        import subprocess as _sp
-
-        try:
-            ls = _sp.run(
-                ["docker", "volume", "ls", "-q", "--filter", f"label=contremaitre.run-id={self.run_id}"],
-                capture_output=True, text=True, timeout=5,
-            )
-        except (OSError, _sp.TimeoutExpired):
-            return
-        for name in (line for line in ls.stdout.split() if line):
-            try:
-                _sp.run(["docker", "volume", "rm", "-f", name], capture_output=True, timeout=15)
-            except (OSError, _sp.TimeoutExpired):
-                continue
+        _dc = DockerClient()
+        names = _dc.volume_ls_q(filter=f"label=contremaitre.run-id={self.run_id}")
+        for name in names:
+            _dc.volume_rm(name, force=True)
 
     def _stop_run_containers(self) -> None:
         """`docker stop` every container labeled with this run-id. Best effort.
@@ -947,21 +938,13 @@ class Orchestrator:
         tracking individual container ids.
         """
 
-        import subprocess as _sp
-
-        try:
-            ps = _sp.run(
-                ["docker", "ps", "-q", "--filter", f"label=contremaitre.run-id={self.run_id}"],
-                capture_output=True, text=True, timeout=5,
-            )
-        except (OSError, _sp.TimeoutExpired):
+        _dc = DockerClient()
+        result = _dc.ps(filter=f"label=contremaitre.run-id={self.run_id}")
+        if result.returncode != 0:
             return
-        ids = [line for line in ps.stdout.split() if line]
+        ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         for cid in ids:
-            try:
-                _sp.run(["docker", "stop", "-t", "5", cid], capture_output=True, timeout=15)
-            except (OSError, _sp.TimeoutExpired):
-                continue
+            _dc.container_stop(cid, timeout=5)
 
 
 def _only_contremaitre_changes(porcelain: str) -> bool:
@@ -993,36 +976,6 @@ def _only_contremaitre_changes(porcelain: str) -> bool:
         if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
             return False
     return True
-
-
-def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
-    """Read SETTLED_DESIGN.md and turn it into (commit title, commit body).
-
-    Title: first non-empty line, stripped of `# ` and any "Settled design — "
-    prefix the skill tends to emit. Falls back to a run-id-tagged generic
-    when SETTLED is missing or empty (shouldn't happen post-WORK since the
-    orchestrator gates on it, but the host commit must never fail here).
-    Body: the full SETTLED text + a trailer with the run id, so the commit
-    is self-contained for anyone reading `git log` later.
-    """
-
-    settled = worktree / SETTLED_RELPATH
-    fallback_title = f"Contremaitre refactor ({run_id})"
-    if not settled.exists():
-        return fallback_title, f"Run: {run_id}\n"
-    text = settled.read_text(encoding="utf-8").strip()
-    if not text:
-        return fallback_title, f"Run: {run_id}\n"
-    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    title = first_line.lstrip("#").strip()
-    for prefix in ("Settled design — ", "Settled design - ", "Settled design: "):
-        if title.lower().startswith(prefix.lower()):
-            title = title[len(prefix):].strip()
-            break
-    if not title:
-        title = fallback_title
-    body = f"{text}\n\n---\nRun: {run_id}\n"
-    return title, body
 
 
 def run(config: RunConfig) -> RunResult:

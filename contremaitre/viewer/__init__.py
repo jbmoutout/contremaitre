@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..jsonlog import read_jsonl
 from ..models import RunPaths
 
 _HERE = Path(__file__).resolve().parent
@@ -51,8 +52,8 @@ def build_viewer(paths: RunPaths) -> Path:
 
 def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     stats_raw = _read_json(paths.stats, default={})
-    agent_events = _read_jsonl(paths.raw_export)
-    sim_events = _read_jsonl(paths.sim_raw_export)
+    agent_events = read_jsonl(paths.raw_export)
+    sim_events = read_jsonl(paths.sim_raw_export)
 
     agent_summary = _summarize_events(agent_events)
     sim_summary = _summarize_events(sim_events)
@@ -77,8 +78,8 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
         if loaded is not None:
             eval_blob[src.stem] = loaded
 
-    guardrails = _read_jsonl(paths.guardrail_events)
-    recoveries = _read_jsonl(paths.recoveries)
+    guardrails = read_jsonl(paths.guardrail_events)
+    recoveries = read_jsonl(paths.recoveries)
 
     stats = {
         **stats_raw,
@@ -357,23 +358,6 @@ def _read_json(path: Path, *, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
 
 
 # ----- HTML assembly -----

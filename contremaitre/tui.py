@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .costs import sum_costs_in_events
+from .docker_utils import DockerClient
 from .extract import parse_apply_patch
 
 try:
@@ -495,38 +496,23 @@ def _latest_pending_tool(events: list[dict[str, Any]]) -> str | None:
 
 
 def _docker_info(image_name: str, worktree: Path) -> dict[str, Any]:
+    _dc = DockerClient()
     info: dict[str, Any] = {
         "image_created": None,
         "agent_container": None,
         "sim_container": None,
     }
-    try:
-        proc = subprocess.run(
-            ["docker", "image", "inspect", image_name, "--format", "{{.Created}}"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if proc.returncode == 0:
-            info["image_created"] = proc.stdout.strip()[:10]
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        pass
+    inspect = _dc.image_inspect(image_name, fmt="{{.Created}}")
+    if inspect.returncode == 0:
+        info["image_created"] = inspect.stdout.strip()[:10]
 
     worktree_str = str(worktree)
-    try:
-        proc = subprocess.run(
-            [
-                "docker",
-                "ps",
-                "--no-trunc",
-                "--format",
-                "{{.ID}}\t{{.Mounts}}\t{{.RunningFor}}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        for line in proc.stdout.splitlines():
+    ps_result = _dc.ps(
+        no_trunc=True,
+        format="{{.ID}}\t{{.Mounts}}\t{{.RunningFor}}",
+    )
+    if ps_result.returncode == 0:
+        for line in ps_result.stdout.splitlines():
             parts = line.split("\t")
             if len(parts) < 2:
                 continue
@@ -535,16 +521,11 @@ def _docker_info(image_name: str, worktree: Path) -> dict[str, Any]:
             uptime = parts[2] if len(parts) > 2 else ""
             if worktree_str not in mounts:
                 continue
-            # Distinguish agent (:rw) from SIM (:ro) by checking the mount
-            # mode. docker ps doesn't expose the mode directly in --format;
-            # heuristic: scan `docker inspect <cid>` for ReadOnly.
             mode = _container_mount_mode(cid, worktree_str)
             if mode == "ro":
                 info["sim_container"] = {"id": cid[:12], "uptime": uptime}
             else:
                 info["agent_container"] = {"id": cid[:12], "uptime": uptime}
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        pass
     return info
 
 
@@ -557,18 +538,14 @@ def _container_mount_mode(cid: str, worktree_str: str) -> str:
     tick. lru_cache lets stale cids age out automatically.
     """
 
-    try:
-        proc = subprocess.run(
-            ["docker", "inspect", cid, "--format", "{{range .Mounts}}{{.Source}}|{{.Mode}};{{end}}"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+    _dc = DockerClient()
+    result = _dc.container_inspect(
+        cid,
+        fmt="{{range .Mounts}}{{.Source}}|{{.Mode}};{{end}}",
+    )
+    if result.returncode != 0:
         return "rw"
-    if proc.returncode != 0:
-        return "rw"
-    for entry in proc.stdout.strip().split(";"):
+    for entry in result.stdout.strip().split(";"):
         if "|" not in entry:
             continue
         src, mode = entry.split("|", 1)
