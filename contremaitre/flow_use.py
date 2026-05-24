@@ -99,14 +99,86 @@ def compute_flow_use(paths: Any) -> dict[str, Any]:
     """Compute agent + SIM tool-use metrics for a completed run.
 
     `paths` is a RunPaths instance; fields used:
-      raw_export, sim_raw_export, review_cycles.
+      raw_export, sim_raw_export, review_cycles, guardrail_events.
     """
     agent_events = _read_jsonl(paths.raw_export)
     sim_events = _read_jsonl(paths.sim_raw_export)
+    agent = _agent_metrics(agent_events)
     return {
         "schema": "flow_use v1",
-        "agent": _agent_metrics(agent_events),
+        "agent": agent,
         "sim": _sim_metrics(sim_events, paths),
+        "phases": compute_phases(paths, agent_events),
+    }
+
+
+def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[str, Any]:
+    """Split the run into grilling / impl / review phases by counting actor turns.
+
+    grilling = agent + SIM turns BEFORE SETTLED_DESIGN.md is written (design pass)
+    impl     = agent turns from SETTLED write through IMPLEMENTATION_COMPLETE
+    review   = SIM review rounds (from review_cycles.jsonl, deduped over retries)
+
+    Anchored to `opencode_actor_start` in guardrail_events.jsonl (one start =
+    one process invocation = one turn) and the SETTLED / IMPL_COMPLETE write
+    timestamps in raw_export.jsonl. Surfaced live in the TUI footer Zone 3
+    and rolled into the PR body lede.
+    """
+    if agent_events is None:
+        agent_events = _read_jsonl(paths.raw_export)
+    tool_calls = [e for e in agent_events if e.get("type") == "tool_use"]
+    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
+    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
+    settled_ms = _timestamp_ms(settled_event)
+    impl_ms = _timestamp_ms(impl_event)
+
+    guardrails_path = getattr(paths, "guardrail_events", None)
+    guardrails = _read_jsonl(guardrails_path) if guardrails_path else []
+    starts: list[tuple[float, str]] = []
+    for g in guardrails:
+        if g.get("event") != "opencode_actor_start":
+            continue
+        ts = _timestamp_ms(g)
+        role = g.get("role")
+        if ts is None or role not in ("agent", "sim", "review"):
+            continue
+        starts.append((ts, role))
+    starts.sort()
+
+    # Identify the impl-start turn: the agent turn whose lifetime contains
+    # the SETTLED write (start_ts ≤ settled_ms < next_start_ts).
+    impl_start_idx: int | None = None
+    if settled_ms is not None:
+        for i, (ts, role) in enumerate(starts):
+            if role != "agent":
+                continue
+            next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
+            if ts <= settled_ms < next_ts:
+                impl_start_idx = i
+                break
+
+    if impl_start_idx is None:
+        pre = starts
+        post = []
+    else:
+        pre = starts[:impl_start_idx]
+        post = starts[impl_start_idx:]
+
+    pre_settled_agent = sum(1 for _, r in pre if r == "agent")
+    pre_settled_sim = sum(1 for _, r in pre if r == "sim")
+    impl_agent = sum(
+        1 for ts, r in post
+        if r == "agent" and (impl_ms is None or ts <= impl_ms)
+    )
+
+    review_rounds = len(_read_jsonl(paths.review_cycles))
+
+    return {
+        "pre_settled_agent_turns": pre_settled_agent,
+        "pre_settled_sim_turns": pre_settled_sim,
+        "grilling_exchanges": min(pre_settled_agent, pre_settled_sim),
+        "impl_turns": impl_agent,
+        "review_rounds": review_rounds,
     }
 
 

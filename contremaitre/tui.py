@@ -350,6 +350,80 @@ def _impl_complete_in(events: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _compute_phases_for_tui(
+    paths: dict[str, Path],
+    agent_events: list[dict[str, Any]],
+    guardrails: list[dict[str, Any]],
+    review_cycles: list[dict[str, Any]],
+) -> dict[str, int]:
+    """In-TUI mirror of flow_use.compute_phases.
+
+    The TUI ticks ~once a second and already holds the events it needs.
+    Re-reading from disk here would just duplicate I/O. Same logic as
+    flow_use.compute_phases — anchored to opencode_actor_start + the
+    SETTLED / IMPLEMENTATION_COMPLETE write timestamps.
+    """
+    settled_event = None
+    impl_event = None
+    for e in agent_events:
+        if e.get("type") != "tool_use":
+            continue
+        part = e.get("part") or {}
+        if part.get("tool") not in ("write", "edit", "apply_patch"):
+            continue
+        if (part.get("state") or {}).get("status") != "completed":
+            continue
+        inp = (part.get("state") or {}).get("input") or {}
+        target = inp.get("filePath") or inp.get("path") or inp.get("patchText") or ""
+        if settled_event is None and "SETTLED_DESIGN" in target.upper():
+            settled_event = e
+        if impl_event is None and "IMPLEMENTATION_COMPLETE" in target:
+            impl_event = e
+
+    settled_ms = settled_event.get("timestamp") if settled_event else None
+    impl_ms = impl_event.get("timestamp") if impl_event else None
+
+    starts: list[tuple[float, str]] = []
+    for g in guardrails:
+        if g.get("event") != "opencode_actor_start":
+            continue
+        ts_str = g.get("ts", "")
+        try:
+            from datetime import datetime
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() * 1000
+        except (ValueError, AttributeError):
+            continue
+        role = g.get("role")
+        if role in ("agent", "sim", "review"):
+            starts.append((ts, role))
+    starts.sort()
+
+    impl_start_idx: int | None = None
+    if settled_ms is not None:
+        for i, (ts, role) in enumerate(starts):
+            if role != "agent":
+                continue
+            next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
+            if ts <= settled_ms < next_ts:
+                impl_start_idx = i
+                break
+
+    if impl_start_idx is None:
+        pre, post = starts, []
+    else:
+        pre, post = starts[:impl_start_idx], starts[impl_start_idx:]
+
+    pre_agent = sum(1 for _, r in pre if r == "agent")
+    pre_sim = sum(1 for _, r in pre if r == "sim")
+    impl = sum(1 for ts, r in post if r == "agent" and (impl_ms is None or ts <= impl_ms))
+
+    return {
+        "grilling_exchanges": min(pre_agent, pre_sim),
+        "impl_turns": impl,
+        "review_rounds": len(review_cycles),
+    }
+
+
 def _self_verified_in(events: list[dict[str, Any]]) -> bool:
     """True if agent ran a test command after its last code edit."""
     _test_cmd_re = re.compile(
@@ -1143,6 +1217,17 @@ if _TEXTUAL_AVAILABLE:
 
             # ----- Zone 3: work metrics (dim by default, color only when anomalous) -----
             footer.append(f"A{agent_turns} S{sim_turns}", style=_PAL_TEXT)
+            footer.append("  ")
+            # Phase split: grill = pre-SETTLED exchanges (real design pass) vs
+            # impl = post-SETTLED agent turns. grill=0/1 with impl=1 means the
+            # agent skipped DEEPENING and shipped on candidate selection alone.
+            phases = _compute_phases_for_tui(self.paths, agent_events, guardrails, review_cycles)
+            grill_n = phases["grilling_exchanges"]
+            impl_n = phases["impl_turns"]
+            grill_style = _PAL_TEXT if grill_n >= 2 else (_PAL_WARN if settled else _PAL_DIM)
+            footer.append(f"grill {grill_n}", style=grill_style)
+            footer.append(" ")
+            footer.append(f"impl {impl_n}", style=_PAL_DIM)
             footer.append("  ")
             footer.append(f"sub {subagents}", style=_PAL_DIM)
             footer.append("  ")

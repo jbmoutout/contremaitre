@@ -187,6 +187,7 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     """
 
     import json as _json
+    from .flow_use import compute_phases
     from .orchestrator import _derive_commit_message
 
     def _read_jsonl(p: Path) -> list[dict]:
@@ -206,6 +207,14 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     # publisher runs. pr_eval.json is written after — don't read it here.
     sim = review_cycles[-1] if review_cycles else {}
 
+    # Phase split — surfaces "design pass actually happened" vs "agent shipped
+    # on candidate selection alone". grill≤1 with impl=1 is the skipped-grilling
+    # pattern; grill≥3 means real back-and-forth before SETTLED.
+    try:
+        phases = compute_phases(paths)
+    except Exception:
+        phases = {"grilling_exchanges": None, "impl_turns": None, "review_rounds": len(review_cycles)}
+
     # ----- lede -----
     verdict = (sim.get("verdict") or "?").upper()
     confidence = sim.get("confidence")
@@ -216,6 +225,10 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     lede_parts = [f"֍ **{verdict}**"]
     if confidence is not None:
         lede_parts.append(f"confidence {confidence:.1f}")
+    if phases.get("grilling_exchanges") is not None:
+        lede_parts.append(
+            f"grill {phases['grilling_exchanges']} · impl {phases['impl_turns']}"
+        )
     if n_rounds:
         lede_parts.append(f"{n_rounds} review round{'s' if n_rounds > 1 else ''}")
     if n_tests:
