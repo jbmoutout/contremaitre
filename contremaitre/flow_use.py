@@ -35,8 +35,11 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from .extract import parse_apply_patch
 
 # ---------------------------------------------------------------------------
 # JSONL reader — inline until PR #1 (jsonlog.read_jsonl) lands on main
@@ -70,7 +73,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 _SETTLED_RE = re.compile(r"SETTLED_DESIGN", re.IGNORECASE)
 _IMPL_COMPLETE_RE = re.compile(r"IMPLEMENTATION_COMPLETE")
-_DIFF_RE = re.compile(r"review_diff_round")
+_DIFF_RE = re.compile(r"review_diff_round|(?:^|[/\\])diff\.patch$", re.IGNORECASE)
 _CONTREMAITRE_DIR_RE = re.compile(r"[/\\]?\.contremaitre[/\\]")
 
 # Test runner patterns — what "self-verification" looks like in bash tool calls
@@ -124,9 +127,10 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     re_reads = sum(max(0, n - 1) for n in file_access.values())
     convergence, breadth, distinct, total = _convergence(file_access)
 
+    event_times = [ts for e in events if (ts := _timestamp_ms(e)) is not None]
     wall_seconds = (
-        round((events[-1]["timestamp"] - events[0]["timestamp"]) / 1000, 1)
-        if len(events) > 1
+        round((event_times[-1] - event_times[0]) / 1000, 1)
+        if len(event_times) > 1
         else 0
     )
 
@@ -134,21 +138,27 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
     first_code_edit = _find_first_code_edit(tool_calls)
 
-    t0 = events[0]["timestamp"] if events else 0
+    t0 = event_times[0] if event_times else None
+    settled_ts = _timestamp_ms(settled_event)
     time_to_settled = (
-        round((settled_event["timestamp"] - t0) / 1000, 1) if settled_event else None
+        round((settled_ts - t0) / 1000, 1)
+        if settled_ts is not None and t0 is not None
+        else None
     )
     tokens_to_settled = _tokens_before(events, settled_event)
 
     settled_chars: int | None = None
     if settled_event:
-        inp = _inp(settled_event)
-        content = inp.get("content") or inp.get("newString") or ""
-        settled_chars = len(content)
+        settled_chars = _write_chars(settled_event, _SETTLED_RE)
 
     settled_before_edit: bool | None = None
     if settled_event and first_code_edit:
-        settled_before_edit = settled_event["timestamp"] < first_code_edit["timestamp"]
+        first_edit_ts = _timestamp_ms(first_code_edit)
+        settled_before_edit = (
+            settled_ts < first_edit_ts
+            if settled_ts is not None and first_edit_ts is not None
+            else None
+        )
     elif settled_event:
         settled_before_edit = True
 
@@ -236,9 +246,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
         and _DIFF_RE.search(_inp(e).get("filePath", "") or "")
     ]
     sim_read_diff = len(diff_reads) > 0
-    sim_read_diff_partial = any(
-        (_inp(e).get("limit") or 9999) < 200 for e in diff_reads
-    )
+    sim_read_diff_partial = any(_read_limit(e) < 200 for e in diff_reads)
 
     file_access = _count_file_accesses(tool_calls)
     convergence, breadth, _, _ = _convergence(file_access)
@@ -296,9 +304,7 @@ def _inp(e: dict) -> dict:
 def _count_file_accesses(tool_calls: list[dict]) -> dict[str, int]:
     acc: dict[str, int] = {}
     for e in tool_calls:
-        inp = _inp(e)
-        fp = inp.get("filePath") or inp.get("path") or ""
-        if fp:
+        for fp in _tool_paths(e):
             acc[fp] = acc.get(fp, 0) + 1
     return acc
 
@@ -328,22 +334,27 @@ def _find_write_to(tool_calls: list[dict], pattern: re.Pattern) -> dict | None:
         if (part.get("state") or {}).get("status") != "completed":
             continue
         inp = _inp(e)
-        target = inp.get("filePath") or inp.get("path") or inp.get("patchText") or ""
-        if pattern.search(target):
+        target = (
+            inp.get("filePath")
+            or inp.get("path")
+            or inp.get("patchText")
+            or inp.get("patch")
+            or ""
+        )
+        if pattern.search(str(target)):
             return e
     return None
 
 
 def _find_first_code_edit(tool_calls: list[dict]) -> dict | None:
-    """First write/edit to a path outside .contremaitre/."""
+    """First write/edit/apply_patch to a path outside .contremaitre/."""
     for e in tool_calls:
         part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit"):
+        if part.get("tool") not in ("write", "edit", "apply_patch"):
             continue
         if (part.get("state") or {}).get("status") != "completed":
             continue
-        fp = _inp(e).get("filePath") or _inp(e).get("path") or ""
-        if fp and not _CONTREMAITRE_DIR_RE.search(fp):
+        if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
             return e
     return None
 
@@ -370,16 +381,20 @@ def _check_self_verification(
     output_suggests_pass: heuristic — no FAILED/error: in any test output.
     runtime_install_required: agent had to install a runtime (container gap).
     """
-    impl_ts = impl_event["timestamp"] if impl_event else float("inf")
+    impl_ts = _timestamp_ms(impl_event) if impl_event else float("inf")
 
-    last_edit_ts = 0
+    last_edit_ts: float | None = None
     for e in tool_calls:
         part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit"):
+        if part.get("tool") not in ("write", "edit", "apply_patch"):
             continue
-        fp = _inp(e).get("filePath") or _inp(e).get("path") or ""
-        if fp and not _CONTREMAITRE_DIR_RE.search(fp):
-            last_edit_ts = max(last_edit_ts, e["timestamp"])
+        event_ts = _timestamp_ms(e)
+        if event_ts is None:
+            continue
+        if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
+            last_edit_ts = (
+                event_ts if last_edit_ts is None else max(last_edit_ts, event_ts)
+            )
 
     test_outputs: list[str] = []
     runtime_install = False
@@ -390,9 +405,13 @@ def _check_self_verification(
         cmd = _inp(e).get("command") or ""
         if _RUNTIME_INSTALL_RE.search(cmd):
             runtime_install = True
+        event_ts = _timestamp_ms(e)
+        if event_ts is None:
+            continue
         if (
             _TEST_CMD_RE.search(cmd)
-            and last_edit_ts < e["timestamp"] < impl_ts
+            and last_edit_ts is not None
+            and last_edit_ts < event_ts < impl_ts
         ):
             test_outputs.append((e.get("part") or {}).get("state", {}).get("output") or "")
 
@@ -404,6 +423,63 @@ def _check_self_verification(
         for out in test_outputs
     )
     return True, all_pass, runtime_install
+
+
+def _timestamp_ms(e: dict | None) -> float | None:
+    if not e:
+        return None
+    raw = e.get("timestamp")
+    if isinstance(raw, int | float):
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    ts = e.get("ts")
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
+        except ValueError:
+            return None
+    return None
+
+
+def _tool_paths(e: dict) -> list[str]:
+    inp = _inp(e)
+    tool = _tool_name(e)
+    if tool == "apply_patch":
+        patch = inp.get("patchText") or inp.get("patch") or ""
+        return [fp for _, fp, _ in parse_apply_patch(str(patch))]
+    fp = inp.get("filePath") or inp.get("path") or ""
+    return [str(fp)] if fp else []
+
+
+def _write_chars(e: dict, pattern: re.Pattern) -> int:
+    inp = _inp(e)
+    tool = _tool_name(e)
+    if tool == "write":
+        return len(inp.get("content") or "")
+    if tool == "edit":
+        return len(inp.get("newString") or "")
+    if tool == "apply_patch":
+        patch = inp.get("patchText") or inp.get("patch") or ""
+        return sum(
+            len(body)
+            for _, fp, body in parse_apply_patch(str(patch))
+            if pattern.search(fp)
+        )
+    return 0
+
+
+def _read_limit(e: dict) -> int:
+    raw = _inp(e).get("limit")
+    if raw is None:
+        return 9999
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 9999
 
 
 def _grep_cited_in(grep_event: dict, verdict_text: str, min_len: int = 20) -> bool:

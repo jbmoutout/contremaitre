@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .costs import sum_costs_in_events
+from .extract import parse_apply_patch
 
 try:
     from rich.table import Table
@@ -50,6 +51,10 @@ SETTLED_FILE_RE = re.compile(r"/SETTLED_DESIGN\.md$", re.IGNORECASE)
 IMPL_COMPLETE_FILE_RE = re.compile(r"/IMPLEMENTATION_COMPLETE$")
 APPLY_PATCH_SETTLED_RE = re.compile(
     r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*SETTLED_DESIGN\.md\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+APPLY_PATCH_IMPL_COMPLETE_RE = re.compile(
+    r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*IMPLEMENTATION_COMPLETE\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 DOCKER_REFRESH_S = 2.0
@@ -338,6 +343,10 @@ def _impl_complete_in(events: list[dict[str, Any]]) -> bool:
             fp = inp.get("filePath") or inp.get("path") or ""
             if IMPL_COMPLETE_FILE_RE.search(fp):
                 return True
+        elif tool == "apply_patch":
+            patch = inp.get("patchText") or inp.get("patch") or ""
+            if APPLY_PATCH_IMPL_COMPLETE_RE.search(patch):
+                return True
     return False
 
 
@@ -352,11 +361,17 @@ def _self_verified_in(events: list[dict[str, Any]]) -> bool:
         if e.get("type") != "tool_use":
             continue
         part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit"):
+        if part.get("tool") not in ("write", "edit", "apply_patch"):
             continue
         inp = (part.get("state") or {}).get("input") or {}
-        fp = inp.get("filePath") or inp.get("path") or ""
-        if fp and not _contremaitre_re.search(fp):
+        paths: list[str]
+        if part.get("tool") == "apply_patch":
+            patch = inp.get("patchText") or inp.get("patch") or ""
+            paths = [fp for _, fp, _ in parse_apply_patch(patch)]
+        else:
+            fp = inp.get("filePath") or inp.get("path") or ""
+            paths = [fp] if fp else []
+        if any(not _contremaitre_re.search(fp) for fp in paths):
             last_edit_ts = max(last_edit_ts, e.get("timestamp", 0))
     if not last_edit_ts:
         return False

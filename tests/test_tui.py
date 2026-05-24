@@ -29,6 +29,7 @@ from contremaitre.tui import (
     _render_guardrail,
     _review_summary,
     _settled_in,
+    _self_verified_in,
     _state_breadcrumb,
     _task_count,
     _tests_summary,
@@ -280,6 +281,43 @@ def _write_tool_event(tool: str, file_path: str = "", status: str = "completed")
     }
 
 
+def _completed_bash(*, timestamp: int, command: str) -> dict:
+    return {
+        "type": "tool_use",
+        "timestamp": timestamp,
+        "part": {
+            "tool": "bash",
+            "state": {
+                "status": "completed",
+                "input": {"command": command},
+            },
+        },
+    }
+
+
+def _completed_apply_patch(*, timestamp: int, path: str) -> dict:
+    return {
+        "type": "tool_use",
+        "timestamp": timestamp,
+        "part": {
+            "tool": "apply_patch",
+            "state": {
+                "status": "completed",
+                "input": {
+                    "patchText": (
+                        "*** Begin Patch\n"
+                        f"*** Update File: {path}\n"
+                        "@@\n"
+                        "-old\n"
+                        "+new\n"
+                        "*** End Patch\n"
+                    )
+                },
+            },
+        },
+    }
+
+
 def test_settled_in_false_when_empty():
     assert not _settled_in([])
 
@@ -297,6 +335,40 @@ def test_settled_in_false_when_not_completed():
 def test_impl_complete_in_true():
     evts = [_write_tool_event("write", "/worktree/IMPLEMENTATION_COMPLETE")]
     assert _impl_complete_in(evts)
+
+
+def test_impl_complete_in_true_on_apply_patch():
+    evts = [
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "apply_patch",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "patchText": (
+                            "*** Begin Patch\n"
+                            "*** Add File: .contremaitre/IMPLEMENTATION_COMPLETE\n"
+                            "+done\n"
+                            "*** End Patch\n"
+                        )
+                    },
+                },
+            },
+        }
+    ]
+    assert _impl_complete_in(evts)
+
+
+def test_self_verified_counts_apply_patch_as_code_edit():
+    evts = [
+        _completed_bash(timestamp=1_000, command="pytest -q"),
+        _completed_apply_patch(timestamp=2_000, path="app/foo.py"),
+    ]
+    assert not _self_verified_in(evts)
+
+    evts.append(_completed_bash(timestamp=3_000, command="pytest -q"))
+    assert _self_verified_in(evts)
 
 
 # ===== _latest_pending_tool =====

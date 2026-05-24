@@ -7,10 +7,12 @@ Working notes for coding agents (Claude Code, opencode, Codex, etc.) modifying t
 ## Build / test
 
 ```bash
-python3 -m unittest discover -s tests
+uv run pytest
 ```
 
-No build step. Python ≥ 3.11. Core CLI is zero-dep; the TUI requires `textual` (optional extra).
+No build step. Python ≥ 3.11. Core CLI is zero-dep; tests use the `dev`
+dependency group (`uv sync --group dev`). The TUI requires `textual`
+(optional extra).
 
 ## Where to edit
 

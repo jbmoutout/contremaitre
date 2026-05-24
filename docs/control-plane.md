@@ -32,7 +32,7 @@ The multi-turn loop is self-contained; Contremaitre does not import any external
 - `checks.py` — executable check runner. In OPENCODE mode each `--check-cmd` runs in a sidecar container that mounts the worktree + deps volume; FAKE mode runs on the host (tests don't need docker).
 - `runtime_image.py` — lockhash-keyed deps caching. Detects `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` / `poetry.lock` / `uv.lock` / `Cargo.lock` / `go.sum`, populates `contremaitre-deps-<lockfile>-<digest>` named volume once per lockfile via a one-shot install container (host repo mounted RO at `/install`, volume RW at `/install/node_modules`). Raises `DepsInstallError` on failure with a log path; CLI hard-fails the run.
 - `envfile.py` — dependency-free `.env` loader for local operator secrets.
-- `evaluator.py` — gate-first PR-eval report writer. `executable_confidence` is `null` (not `0.0`) when no `--check-cmd` is configured.
+- `evaluator.py` — gate-first PR-eval report writer plus non-blocking flow-use observability. `executable_confidence` is `null` (not `0.0`) when no `--check-cmd` is configured.
 - `publisher.py` — publication boundary (`StubPublisher`, `GhPublisher`). PR title + body are derived from `.contremaitre/SETTLED_DESIGN.md` (same helper as the commit) + SIM verdict summary; `--pr-title` / `--pr-body` flags override.
 - `preflight.py` — operational checks for live opencode runs.
 - `fixture.py` — local fixture repo creation for smoke tests.
@@ -101,6 +101,7 @@ Every run writes:
 - `eval/settled_diff_report.json`
 - `eval/architecture_delta_report.json`
 - `eval/trajectory_report.json`
+- `eval/flow_use.json`
 - `eval/cost_report.json`
 - `eval/preflight_report.json`
 
