@@ -39,7 +39,7 @@ just deepdeep tui-run main git@github.com:<you>/<target>.git
 **One-time setup** (auto-handled on first run):
 - Local clone cache is created on demand under `~/.cache/contremaitre/`.
 - Runtime image `contremaitre-agent:latest` builds itself on first opencode-mode run. ~3 min on a warm host.
-- TUI requires `textual`: `python3 -m pip install --user textual` (skip if you'd rather watch via JSONL tail).
+- TUI requires `textual` — included when you run `uv sync --extra tui --group dev` (see [Tests](#tests) below). Skip if you'd rather watch via JSONL tail.
 - `OPENROUTER_API_KEY` in `.env` (cwd or repo root) — bounded by a provider-side daily limit. Preflight refuses to start a run without one.
 
 ### What each flag does
@@ -239,8 +239,16 @@ The CLI loads `.env` from the current directory and the source checkout before a
 
 ## Tests
 
+One-time setup (creates `.venv` with pytest, textual, and the project in editable mode):
+
 ```bash
-python3 -m unittest discover -s tests
+uv sync --extra tui --group dev
+```
+
+Run the suite:
+
+```bash
+uv run pytest
 ```
 
 Working on the code itself? See [AGENTS.md](AGENTS.md).

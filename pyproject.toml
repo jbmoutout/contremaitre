@@ -20,6 +20,9 @@ tui = ["textual>=0.50"]
 [project.scripts]
 contremaitre = "contremaitre.cli:main"
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [tool.setuptools.packages.find]
 include = ["contremaitre*"]
 
