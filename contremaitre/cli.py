@@ -889,7 +889,7 @@ def _has_flag_in(argv: list[str], flag: str) -> bool:
 
 
 def _fetch_free_models() -> list[dict] | None:
-    """Pull OpenCode Zen's catalog, return the free entries.
+    """Pull OpenCode's model catalog, return selectable Zen free entries.
 
     Why OpenCode Zen and not OpenRouter: the OpenRouter `:free` models
     route through third-party providers (Crucible, Lambda, etc.) whose
@@ -900,9 +900,14 @@ def _fetch_free_models() -> list[dict] | None:
     OPENCODE_API_KEY required — the opencode binary in our runtime
     image has built-in access.
 
-    Filter heuristic: id ends in `-free` (the convention for
-    NVIDIA-trial / DeepSeek / Qwen tiers) plus a small allow-list for
-    stealth-named free models (e.g. `big-pickle`).
+    OpenCode resolves built-in providers from models.dev and filters
+    deprecated models before dispatch. Reading the same source prevents
+    the picker from offering Zen models that the opencode binary rejects
+    later.
+
+    Filter heuristic: id ends in `-free` (the convention for NVIDIA-trial /
+    DeepSeek / Qwen tiers) plus a small allow-list for stealth-named free
+    models (e.g. `big-pickle`).
 
     None on network or parse failure — caller falls through to
     defaults so a picker UI never blocks a run that would otherwise
@@ -912,9 +917,8 @@ def _fetch_free_models() -> list[dict] | None:
     import urllib.error
     import urllib.request
 
-    # OpenCode Zen rejects Python's default User-Agent with 403, set our own.
     req = urllib.request.Request(
-        "https://opencode.ai/zen/v1/models",
+        "https://models.dev/api.json",
         headers={"User-Agent": "contremaitre"},
     )
     try:
@@ -922,11 +926,22 @@ def _fetch_free_models() -> list[dict] | None:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
         return None
+    opencode = payload.get("opencode")
+    if not isinstance(opencode, dict):
+        return None
+    models = opencode.get("models")
+    if not isinstance(models, dict):
+        return None
+
     free: list[dict] = []
     stealth = {"big-pickle"}
-    for m in payload.get("data", []):
-        mid = m.get("id") or ""
-        if not mid:
+    for model_id, m in models.items():
+        if not isinstance(m, dict):
+            continue
+        mid = m.get("id") or model_id
+        if not isinstance(mid, str) or not mid:
+            continue
+        if str(m.get("status", "")).lower() == "deprecated":
             continue
         if mid.endswith("-free") or mid in stealth:
             free.append({"id": mid})
