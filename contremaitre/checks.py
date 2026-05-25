@@ -22,7 +22,7 @@ from typing import Callable
 
 from . import events
 from .jsonlog import append_jsonl
-from .models import ActorMode, RunConfig, RunPaths
+from .models import ActorMode, RunConfig, RunPaths, container_labels
 
 
 @dataclass(frozen=True)
@@ -130,20 +130,15 @@ def _run_sidecar(
 ) -> subprocess.CompletedProcess[str]:
     docker_cmd = [
         "docker", "run", "--rm",
-        "--label", f"contremaitre.run-id={paths.run_id}",
-        "--label", "contremaitre.role=check",
     ]
+    docker_cmd.extend(container_labels(paths.run_id, "check"))
     if config.container_user:
         docker_cmd.extend(["--user", config.container_user])
     if config.docker_network:
         docker_cmd.extend(["--network", config.docker_network])
     docker_cmd.extend(["-v", f"{paths.worktree}:/app:rw"])
     if config.deps_volume:
-        # RW so a check that needs to install something (rare but real)
-        # doesn't hit EACCES. Matches the agent-side mount mode.
-        docker_cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
-        for key, value in config.deps_volume.runtime_env:
-            docker_cmd.extend(["-e", f"{key}={value}"])
+        docker_cmd.extend(config.deps_volume.to_docker_args("rw"))
     # `sh -c` (not `-lc`). A login shell sources /etc/profile, which
     # resets PATH and silently drops any `-e PATH=…` we passed (verified:
     # node:24-bookworm-slim's profile is the offender). We rely on PATH

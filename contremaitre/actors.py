@@ -31,7 +31,7 @@ from typing import Protocol
 
 from . import events
 from .jsonlog import append_jsonl, append_text_event, append_transcript
-from .models import ActorMode, RunConfig, RunPaths
+from .models import ActorMode, RunConfig, RunPaths, container_labels
 
 
 class ActorError(RuntimeError):
@@ -431,8 +431,7 @@ def build_docker_command(
     # orphans the run, signal handlers can `docker stop` by label, and
     # we get the container id back on stdout without a cidfile.
     cmd = ["docker", "run", "-d"]
-    cmd.extend(["--label", f"contremaitre.run-id={paths.run_id}"])
-    cmd.extend(["--label", f"contremaitre.role={role}"])
+    cmd.extend(container_labels(paths.run_id, role))
     if config.container_user:
         cmd.extend(["--user", config.container_user])
     if config.docker_network:
@@ -448,17 +447,7 @@ def build_docker_command(
         ]
     )
     if config.deps_volume:
-        # Lockhash-keyed deps volume, RW so the agent can install
-        # mid-run when the design genuinely needs a new dep (test
-        # framework, lint plugin, etc.). The trade-off: parallel runs
-        # against the same lockfile share the volume and can race on
-        # writes. Acceptable for solo-operator sequential workflow;
-        # revisit if multi-run-in-parallel becomes a real pattern.
-        # Mounted over the worktree bind at /app/{mount_path}; the
-        # worktree's own copy of that directory (if any) is shadowed.
-        cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
-        for key, value in config.deps_volume.runtime_env:
-            cmd.extend(["-e", f"{key}={value}"])
+        cmd.extend(config.deps_volume.to_docker_args("rw"))
     if config.opencode_config:
         cmd.extend(["-v", f"{config.opencode_config}:/app/opencode.json:ro"])
     for host_path, container_path, mode in extra_mounts or []:
