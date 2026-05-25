@@ -39,6 +39,7 @@ from contremaitre.tui import (
     _round_verdicts,
     _self_verified_in,
     _settled_in,
+    _short_repo,
     _task_count,
     _terminal_badge,
     _text_event_count,
@@ -1175,3 +1176,37 @@ def test_build_event_row_unknown_type():
     ev = {"type": "something_new", "timestamp": None}
     marker, ts, typ, tool, body = _build_event_row(ev)
     assert "something_new" in typ.plain
+
+
+# ===== _short_repo =====
+
+
+def test_short_repo_ssh_url():
+    assert _short_repo("git@github.com:jbmoutout/itadakimasu.git") == "jbmoutout/itadakimasu"
+
+
+def test_short_repo_ssh_url_no_dotgit():
+    assert _short_repo("git@github.com:jbmoutout/itadakimasu") == "jbmoutout/itadakimasu"
+
+
+def test_short_repo_https_url():
+    assert _short_repo("https://github.com/jbmoutout/itadakimasu.git") == "jbmoutout/itadakimasu"
+
+
+def test_short_repo_https_url_no_dotgit():
+    assert _short_repo("https://github.com/jbmoutout/itadakimasu") == "jbmoutout/itadakimasu"
+
+
+def test_short_repo_https_url_trailing_slash():
+    assert _short_repo("https://github.com/jbmoutout/itadakimasu/") == "jbmoutout/itadakimasu"
+
+
+def test_short_repo_local_path_falls_back_to_basename():
+    # No owner/ tail to recover — show the last segment so the header
+    # line isn't blank for local-only runs.
+    assert _short_repo("/Users/jb/code/itadakimasu") == "itadakimasu"
+
+
+def test_short_repo_empty_returns_placeholder():
+    assert _short_repo(None) == "?"
+    assert _short_repo("") == "?"

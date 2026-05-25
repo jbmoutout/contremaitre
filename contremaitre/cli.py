@@ -1099,6 +1099,8 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
         docker_image=docker_image,
+        target_url=source_url,
+        base=base,
     )
 
 

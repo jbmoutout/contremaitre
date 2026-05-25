@@ -102,6 +102,39 @@ def _short_model(model: str) -> str:
     return model.split("/")[-1] if model else "?"
 
 
+def _short_repo(url_or_path: str | None) -> str:
+    """Normalize a git URL or local path to `owner/repo` for display.
+
+    Handles:
+      git@github.com:owner/repo.git    → owner/repo
+      https://github.com/owner/repo.git → owner/repo
+      https://github.com/owner/repo    → owner/repo
+      /Users/jb/code/repo              → repo  (basename fallback)
+
+    Empty / unknown → `?` so the header line never collapses.
+
+    Local paths use the basename only — extracting two path segments
+    (e.g. `code/repo`) would falsely imply a GitHub-style owner.
+    """
+
+    if not url_or_path:
+        return "?"
+    s = str(url_or_path).strip().rstrip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    # `owner/repo` match only when the input is clearly a URL — SSH
+    # (`user@host:…`) or any `scheme://…`. Without this guard, local
+    # paths like `/Users/jb/code/repo` would yield `code/repo`, which
+    # reads as a GitHub slug but isn't.
+    looks_like_url = "://" in s or bool(re.match(r"^[^/\s]+@[^/\s]+:", s))
+    if looks_like_url:
+        m = re.search(r"[:/]([^/:]+/[^/:]+)$", s)
+        if m:
+            return m.group(1)
+    # Plain path / single name — basename fallback.
+    return s.rsplit("/", 1)[-1] or "?"
+
+
 def _is_free_model(model: str) -> bool:
     """True for OpenCode Zen free tier or OpenRouter `:free` variants.
 
@@ -1227,6 +1260,7 @@ if _TEXTUAL_AVAILABLE:
         CSS = """
         Screen { layout: vertical; padding: 0 1 1 1; }
         #header { height: 1; padding: 0 1; }
+        #header2 { height: 1; padding: 0 1; }
         #panes { height: 1fr; }
         .pane { width: 1fr; border: round white; }
         .pane.active { border: round yellow; }
@@ -1273,6 +1307,8 @@ if _TEXTUAL_AVAILABLE:
             sim_model: str = "?",
             extra_reviewer_model: str | None = None,
             docker_image: str = "?",
+            target_url: str | None = None,
+            base: str | None = None,
             proc: subprocess.Popen | None = None,
             refresh_hz: float = 5.0,
         ):
@@ -1282,6 +1318,8 @@ if _TEXTUAL_AVAILABLE:
             self.sim_model = sim_model
             self.extra_reviewer_model = extra_reviewer_model
             self.docker_image = docker_image
+            self.target_url = target_url
+            self.base = base
             self.proc = proc
             self.refresh_hz = refresh_hz
             self.t_start = time.time()
@@ -1339,6 +1377,7 @@ if _TEXTUAL_AVAILABLE:
 
         def compose(self) -> ComposeResult:
             yield Static("", id="header")
+            yield Static("", id="header2")
             with Horizontal(id="panes"):
                 with Vertical(classes="pane", id="agent-pane"):
                     yield RichLog(id="agent-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
@@ -1595,6 +1634,17 @@ if _TEXTUAL_AVAILABLE:
             if img:
                 header.append(f"  ·  {self.docker_image} built {img}", style="dim")
             self.query_one("#header", Static).update(header)
+
+            # ----- Header line 2: target repo + base branch -----
+            # Static once the run is launched. `→ <owner/repo> • git:<base>`:
+            # arrow = "targeting", bullet softens the separator, `git:` prefix
+            # disambiguates the colon-suffixed branch name from a tag/SHA.
+            header2 = Text()
+            header2.append("→ ", style=_PAL_ACCENT)
+            header2.append(_short_repo(self.target_url), style=_PAL_TEXT)
+            header2.append("  •  ", style=_PAL_VDIM)
+            header2.append(f"git:{self.base or '?'}", style=_PAL_TEXT)
+            self.query_one("#header2", Static).update(header2)
 
             # ----- Pane subheaders with thinking loader -----
             ag = self._docker_state.get("agent_container")
@@ -1924,13 +1974,15 @@ def attach(run_dir: Path, *, refresh_hz: float = 5.0) -> int:
     run_dir = run_dir.resolve()
     if not run_dir.exists():
         raise SystemExit(f"run dir does not exist: {run_dir}")
-    agent_model, sim_model, extra_reviewer_model, docker_image = _read_run_models(run_dir)
+    agent_model, sim_model, extra_reviewer_model, docker_image, target_url, base = _read_run_models(run_dir)
     app = ContremaitreTUI(
         run_dir,
         agent_model=agent_model,
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
         docker_image=docker_image,
+        target_url=target_url,
+        base=base,
         proc=None,
         refresh_hz=refresh_hz,
     )
@@ -1950,6 +2002,8 @@ def spawn_and_attach(
     sim_model: str = "?",
     extra_reviewer_model: str | None = None,
     docker_image: str = "?",
+    target_url: str | None = None,
+    base: str | None = None,
 ) -> int:
     """Spawn `contremaitre run …` and attach the TUI to its run dir."""
 
@@ -1998,6 +2052,8 @@ def spawn_and_attach(
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
         docker_image=docker_image,
+        target_url=target_url,
+        base=base,
         proc=proc,
         refresh_hz=refresh_hz,
     )
@@ -2006,7 +2062,28 @@ def spawn_and_attach(
     return rc
 
 
-def _read_run_models(run_dir: Path) -> tuple[str, str, str | None, str]:
+def _read_run_models(run_dir: Path) -> tuple[str, str, str | None, str, str | None, str | None]:
+    """Return (agent_model, sim_model, extra_reviewer_model, docker_image, target_url, base).
+
+    Prefers `run_config.json` (written at orchestrator start — available
+    immediately, even for attach against an in-flight run). Falls back to
+    `stats.json` (terminal only) for older runs that pre-date the snapshot.
+    """
+
+    config = run_dir / "run_config.json"
+    if config.exists():
+        try:
+            d = json.loads(config.read_text(encoding="utf-8"))
+            return (
+                d.get("agent_model", "?"),
+                d.get("sim_model", "?"),
+                d.get("extra_reviewer_model"),
+                d.get("docker_image", "?"),
+                d.get("target_url"),
+                d.get("base"),
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
     stats = run_dir / "stats.json"
     if stats.exists():
         try:
@@ -2016,7 +2093,9 @@ def _read_run_models(run_dir: Path) -> tuple[str, str, str | None, str]:
                 d.get("sim_model", "?"),
                 d.get("extra_reviewer_model"),
                 "?",
+                None,
+                None,
             )
         except (OSError, json.JSONDecodeError):
             pass
-    return ("?", "?", None, "?")
+    return ("?", "?", None, "?", None, None)
