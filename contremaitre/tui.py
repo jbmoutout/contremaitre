@@ -503,8 +503,8 @@ def _current_phase_label(
     pr_number: int | None,
     pr_title: str | None = None,
     current_review_round: int = 0,
-    sim_review_status: str = "idle",
-    extra_review_status: str = "idle",
+    sim_review_statuses: list[str] | None = None,
+    extra_review_statuses: list[str] | None = None,
     extra_enabled: bool = False,
 ) -> Text:
     """Phase name + sub-info (right of the trail).
@@ -562,18 +562,28 @@ def _current_phase_label(
             text.append(f" (round {current_review_round})", style=_PAL_TEXT)
         # Always show the primary reviewer slot during this phase — it's
         # `streaming` from the moment the phase opens, then becomes a
-        # verdict glyph when the verdict lands.
-        sim_glyph, sim_style = _reviewer_glyph(sim_review_status)
+        # verdict glyph when the verdict lands. One glyph per round, so
+        # past rounds stack up to the right of "Review".
+        sim_statuses = sim_review_statuses or []
         text.append(" · Review ", style=_PAL_TEXT)
-        text.append(sim_glyph, style=sim_style)
+        for i, s in enumerate(sim_statuses):
+            if i:
+                text.append(" ", style=_PAL_TEXT)
+            g, st = _reviewer_glyph(s)
+            text.append(g, style=st)
         # Extra-reviewer slot — appears only once the extra reviewer has
-        # actually started for the current round (orchestrator runs SIM
+        # actually started for at least one round (orchestrator runs SIM
         # then extra sequentially, so this is a clean "grow as activity
-        # happens" pattern rather than showing a placeholder `·`).
-        if extra_enabled and extra_review_status != "idle":
-            extra_glyph, extra_style = _reviewer_glyph(extra_review_status)
+        # happens" pattern rather than showing a placeholder `·`). One
+        # glyph per round, same stacking pattern as the SIM slot.
+        extra_statuses = [s for s in (extra_review_statuses or []) if s != "idle"]
+        if extra_enabled and extra_statuses:
             text.append("  Extra Review ", style=_PAL_TEXT)
-            text.append(extra_glyph, style=extra_style)
+            for i, s in enumerate(extra_statuses):
+                if i:
+                    text.append(" ", style=_PAL_TEXT)
+                g, st = _reviewer_glyph(s)
+                text.append(g, style=st)
         return text
     # phase == "done"
     if terminal_verdict == "READY_FOR_DRAFT_PR":
@@ -1819,26 +1829,32 @@ if _TEXTUAL_AVAILABLE:
             extra_enabled = bool(self.extra_reviewer_model)
             if phase in ("reviewing",) or (terminal and review_started):
                 current_review_round = _current_review_round(guardrails)
-                sim_review_status = _reviewer_status(
-                    round_n=current_review_round,
-                    review_cycles=review_cycles,
-                    guardrails=guardrails,
-                    is_extra=False,
-                )
-                extra_review_status = (
+                sim_review_statuses = [
                     _reviewer_status(
-                        round_n=current_review_round,
+                        round_n=r,
                         review_cycles=review_cycles,
                         guardrails=guardrails,
-                        is_extra=True,
+                        is_extra=False,
                     )
+                    for r in range(1, current_review_round + 1)
+                ]
+                extra_review_statuses = (
+                    [
+                        _reviewer_status(
+                            round_n=r,
+                            review_cycles=review_cycles,
+                            guardrails=guardrails,
+                            is_extra=True,
+                        )
+                        for r in range(1, current_review_round + 1)
+                    ]
                     if extra_enabled
-                    else "idle"
+                    else []
                 )
             else:
                 current_review_round = 0
-                sim_review_status = "idle"
-                extra_review_status = "idle"
+                sim_review_statuses = []
+                extra_review_statuses = []
 
             # Left segment: trail + phase label + persistent review token + warnings.
             left = Text()
@@ -1857,8 +1873,8 @@ if _TEXTUAL_AVAILABLE:
                     pr_number=pr_number,
                     pr_title=pr_title,
                     current_review_round=current_review_round,
-                    sim_review_status=sim_review_status,
-                    extra_review_status=extra_review_status,
+                    sim_review_statuses=sim_review_statuses,
+                    extra_review_statuses=extra_review_statuses,
                     extra_enabled=extra_enabled,
                 )
             )

@@ -571,8 +571,8 @@ def _default_label_kwargs(**overrides):
         terminal_verdict=None,
         pr_number=None,
         current_review_round=0,
-        sim_review_status="idle",
-        extra_review_status="idle",
+        sim_review_statuses=[],
+        extra_review_statuses=[],
         extra_enabled=False,
     )
     base.update(overrides)
@@ -627,7 +627,7 @@ def test_phase_label_reviewing_shows_round_from_actor_count():
         **_default_label_kwargs(
             phase="reviewing",
             current_review_round=1,
-            sim_review_status="streaming",
+            sim_review_statuses=["streaming"],
         )
     )
     assert "Reviewing" in text.plain
@@ -641,7 +641,7 @@ def test_phase_label_reviewing_shows_sim_verdict():
         **_default_label_kwargs(
             phase="reviewing",
             current_review_round=1,
-            sim_review_status="approved",
+            sim_review_statuses=["approved"],
         )
     )
     assert "Review " in text.plain
@@ -657,8 +657,8 @@ def test_phase_label_reviewing_extra_slot_hidden_when_idle():
         **_default_label_kwargs(
             phase="reviewing",
             current_review_round=1,
-            sim_review_status="streaming",
-            extra_review_status="idle",
+            sim_review_statuses=["streaming"],
+            extra_review_statuses=["idle"],
             extra_enabled=True,
         )
     )
@@ -670,8 +670,8 @@ def test_phase_label_reviewing_extra_slot_shown_when_streaming():
         **_default_label_kwargs(
             phase="reviewing",
             current_review_round=1,
-            sim_review_status="approved",
-            extra_review_status="streaming",
+            sim_review_statuses=["approved"],
+            extra_review_statuses=["streaming"],
             extra_enabled=True,
         )
     )
@@ -684,7 +684,9 @@ def test_phase_label_reviewing_extra_slot_shown_when_streaming():
 
 def test_phase_label_reviewing_multi_round():
     # Round 2 in flight — label shows round 2, not 1, even though
-    # review_cycles still has round-1 verdicts recorded.
+    # review_cycles still has round-1 verdicts recorded. Past rounds
+    # stack their glyphs after "Review" / "Extra Review" so the
+    # operator sees the full reviewing history without scrolling logs.
     cycles = [
         {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"},
         {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
@@ -694,12 +696,16 @@ def test_phase_label_reviewing_multi_round():
             phase="reviewing",
             review_cycles=cycles,
             current_review_round=2,
-            sim_review_status="streaming",
+            sim_review_statuses=["changes_req", "streaming"],
+            extra_review_statuses=["changes_req", "streaming"],
             extra_enabled=True,
         )
     )
     assert "round 2" in text.plain
     assert "round 1" not in text.plain
+    # Two glyphs per reviewer slot: ✗ (round 1) then ⏵ (round 2).
+    assert text.plain.count("✗") == 2
+    assert text.plain.count("⏵") == 2
 
 
 def test_phase_label_done_pr_pushed_without_title_is_just_done():
