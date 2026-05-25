@@ -309,9 +309,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
         print(f"contremaitre: git clone failed: {exc.stderr or exc}", file=sys.stderr)
         return 1
     try:
-        if not _launch_screen(
-            args=args, source_url=source_url, cache_path=cache_path, argv_for_explicit_check=sys.argv
-        ):
+        if not _launch_screen(args=args, source_url=source_url, argv_for_explicit_check=sys.argv):
             print("aborted", file=sys.stderr)
             return 130
     except KeyboardInterrupt:
@@ -411,7 +409,6 @@ def _launch_screen(
     *,
     args: argparse.Namespace,
     source_url: str,
-    cache_path: Path,
     argv_for_explicit_check: list[str],
     forwarded_to_subprocess: list[str] | None = None,
 ) -> bool:
@@ -470,9 +467,14 @@ def _launch_screen(
             print()
 
             def _pick_inline(role: str, current_idx: int) -> tuple[str, int]:
+                default_id = free[current_idx]["id"]
+                prompt = (
+                    f"  {role:<6}[{current_idx} - {default_id}] "
+                    f"(Enter=accept, 0–{len(free) - 1}, q): "
+                )
                 while True:
                     try:
-                        reply = input(f"  {role:<6}[{current_idx}] : ").strip().lower()
+                        reply = input(prompt).strip().lower()
                     except EOFError:
                         return f"opencode/{free[current_idx]['id']}", current_idx
                     if reply == "":
@@ -500,8 +502,12 @@ def _launch_screen(
 
             # ----- optional extra reviewer (different model family) -----
             # Default suggestion: first model whose family differs from the
-            # chosen SIM. Falls back to "skip" when families are unknown or
-            # all listed models share the SIM's family.
+            # chosen SIM — Enter accepts it. `s` skips (extra is optional).
+            # When family detection can't find a cross-family pick (unknown
+            # families, or every listed model shares SIM's family), fall
+            # back to the first model that isn't SIM itself — still useful
+            # diversity, just not family-level. Skip-only fallback only
+            # triggers when there's a single model in the catalog.
             if not extra_explicit:
                 from .model_family import model_family
 
@@ -513,13 +519,32 @@ def _launch_screen(
                         if model_family(f"opencode/{m['id']}") not in (sim_fam, "unknown"):
                             suggested_idx = i
                             break
-                tag = f"[{suggested_idx}]" if suggested_idx is not None else "[skip]"
+                if suggested_idx is None:
+                    for i in range(len(free)):
+                        if i != sim_idx:
+                            suggested_idx = i
+                            break
+                if suggested_idx is not None:
+                    suggested_id = free[suggested_idx]["id"]
+                    extra_prompt = (
+                        f"  extra [{suggested_idx} - {suggested_id}] "
+                        f"(Enter=accept, s=skip, 0–{len(free) - 1}, q): "
+                    )
+                else:
+                    extra_prompt = f"  extra  (Enter=skip, 0–{len(free) - 1}, q): "
                 while True:
                     try:
-                        reply = input(f"  extra {tag} (Enter=skip, 0–{len(free) - 1}, q): ").strip().lower()
+                        reply = input(extra_prompt).strip().lower()
                     except EOFError:
                         break
                     if reply == "":
+                        if suggested_idx is not None:
+                            chosen_extra = f"opencode/{free[suggested_idx]['id']}"
+                            args.extra_reviewer_model = chosen_extra
+                            if forwarded_to_subprocess is not None:
+                                forwarded_to_subprocess.extend(["--extra-reviewer-model", chosen_extra])
+                        break
+                    if reply in ("s", "skip"):
                         break
                     if reply == "q":
                         raise KeyboardInterrupt
@@ -530,7 +555,7 @@ def _launch_screen(
                         if forwarded_to_subprocess is not None:
                             forwarded_to_subprocess.extend(["--extra-reviewer-model", chosen_extra])
                         break
-                    print(f"  enter a number 0–{len(free) - 1}, Enter to skip, or q")
+                    print(f"  enter a number 0–{len(free) - 1}, Enter, s to skip, or q")
 
     # ----- confirm -----
     print()
@@ -1069,7 +1094,6 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         if not _launch_screen(
             args=confirm_args,
             source_url=source_url,
-            cache_path=cache_path,
             argv_for_explicit_check=forwarded,
             forwarded_to_subprocess=forwarded,
         ):
