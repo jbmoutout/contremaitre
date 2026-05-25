@@ -205,6 +205,60 @@ class OpencodeBoundaryTest(unittest.TestCase):
             self.assertIn(f"Run: {orch.run_id}", log_body.stdout)
             orch._cleanup_worktree()
 
+    def test_host_commit_succeeds_when_upstream_gitignore_covers_excluded_path(self):
+        # Regression: agents sometimes produce build output (e.g. `.next/`)
+        # while verifying their changes. If the target repo's .gitignore
+        # covers that path, `:(exclude).next` used to abort the host commit
+        # because git treats the exclude as an explicit mention and refuses
+        # to add an explicitly-named ignored path. Drop the exclude when
+        # gitignore already covers it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+            (repo / "README.md").write_text("base\n", encoding="utf-8")
+            (repo / ".gitignore").write_text(".next/\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+            subprocess.run(
+                [
+                    "git", "-C", str(repo),
+                    "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "commit", "-m", "base",
+                ],
+                check=True, capture_output=True,
+            )
+            config = RunConfig(repo=repo, base="main", runs_root=root / "runs", run_slug="host-commit-ignored")
+            orch = Orchestrator(config)
+            orch._prepare_run_dir()
+            subprocess.run(
+                ["git", "-C", str(repo), "worktree", "add", str(orch.paths.worktree), "-b", "work", "main"],
+                check=True, capture_output=True,
+            )
+            (orch.paths.worktree / "README.md").write_text("changed\n", encoding="utf-8")
+            # Agent produced build output that the target repo gitignores.
+            next_dir = orch.paths.worktree / ".next"
+            next_dir.mkdir()
+            (next_dir / "build.json").write_text("{}\n", encoding="utf-8")
+            settled_dir = orch.paths.worktree / ".contremaitre"
+            settled_dir.mkdir(exist_ok=True)
+            (settled_dir / "SETTLED_DESIGN.md").write_text(
+                "# Settled design — Consolidate Prisma seam\n\n## What\n\nDelete the duplicate singleton.\n",
+                encoding="utf-8",
+            )
+
+            # Must not raise. Before the fix this raised GitError(1) on the
+            # `git add` step.
+            orch._commit_agent_changes(repo=GitRepo(orch.paths.worktree, orch.paths.git_log))
+
+            log_files = subprocess.run(
+                ["git", "-C", str(orch.paths.worktree), "show", "--name-only", "--pretty="],
+                check=True, capture_output=True, text=True,
+            )
+            self.assertIn("README.md", log_files.stdout)
+            self.assertNotIn(".next", log_files.stdout)
+            self.assertNotIn(".contremaitre", log_files.stdout)
+            orch._cleanup_worktree()
+
     def test_gh_publisher_pushes_and_creates_draft_pr_from_host(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"GITHUB_TOKEN": "token"}):
             root = Path(tmp)

@@ -68,6 +68,20 @@ from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_rev
 SETTLED_RELPATH = Path(".contremaitre") / "SETTLED_DESIGN.md"
 IMPLEMENTATION_COMPLETE_RELPATH = Path(".contremaitre") / "IMPLEMENTATION_COMPLETE"
 
+# Paths held out of the host commit. `.contremaitre/` / `opencode.json` are
+# orchestration-internal; the rest are conventionally-gitignored build output
+# that some agents produce as a verification step (the worktree may not carry
+# the upstream .gitignore for all of them, so we belt-and-suspenders).
+_HOST_COMMIT_EXCLUDES = (
+    ".contremaitre",
+    "opencode.json",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    "__pycache__",
+)
+
 
 @dataclass(frozen=True)
 class _WorktreeSnapshot:
@@ -825,29 +839,18 @@ class Orchestrator:
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
         title, body = _derive_commit_message(self.paths.worktree, self.run_id)
-        # Pathspec excludes keep orchestration-internal and build-output
-        # files out of the staged set. These stay in the worktree (SIM can
-        # read them; agent can produce them) but must never land in the
-        # PR diff — the SIM correctly rejects them as "unrelated drift".
-        #
-        # `.contremaitre/*` — SETTLED_DESIGN.md, IMPLEMENTATION_COMPLETE,
-        #   architecture-review.html.
-        # `opencode.json` — opencode config written by the agent runtime.
-        # `dist/`, `build/`, `out/`, `.next/` — compiled / bundled output
-        #   that agents sometimes produce as a verification step. All are
-        #   conventionally gitignored in upstream repos, but the worktree
-        #   may not carry the upstream .gitignore for all of them.
-        # `__pycache__/` — Python bytecode.
-        repo.run(
-            "add", "--", ".",
-            ":(exclude).contremaitre",
-            ":(exclude)opencode.json",
-            ":(exclude)dist",
-            ":(exclude)build",
-            ":(exclude)out",
-            ":(exclude).next",
-            ":(exclude)__pycache__",
-        )
+        # `:(exclude)X` pathspecs hold orchestration-internal / build-output
+        # files out of the staged set. They stay in the worktree (SIM reads
+        # them; agent produces them) but must not land in the PR diff.
+        # Drop excludes already covered by the worktree's .gitignore: git
+        # treats `:(exclude)X` as an explicit mention of X, and the add
+        # aborts when X is also gitignored ("paths are ignored").
+        excludes = [
+            f":(exclude){path}"
+            for path in _HOST_COMMIT_EXCLUDES
+            if not _is_gitignored(repo, path)
+        ]
+        repo.run("add", "--", ".", *excludes)
         repo.run("commit", "-m", title, "-m", body)
         self._emit(
             events.HOST_COMMIT_CREATED,
@@ -1093,6 +1096,17 @@ class Orchestrator:
                 _sp.run(["docker", "stop", "-t", "5", cid], capture_output=True, timeout=15)
             except (OSError, _sp.TimeoutExpired):
                 continue
+
+
+def _is_gitignored(repo: GitRepo, path: str) -> bool:
+    """True iff `path` is matched by a .gitignore rule in the worktree.
+
+    Used to skip `:(exclude){path}` pathspecs that would otherwise cause
+    `git add` to abort — git treats `:(exclude)` as explicit mention, and
+    explicit + gitignored is an error.
+    """
+
+    return repo.run("check-ignore", "-q", "--", path, check=False).returncode == 0
 
 
 def _only_contremaitre_changes(porcelain: str) -> bool:
