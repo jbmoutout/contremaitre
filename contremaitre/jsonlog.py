@@ -45,3 +45,43 @@ def append_transcript(path: Path, *, speaker: str, phase: str, text: str) -> Non
     with path.open("a", encoding="utf-8") as f:
         f.write(f"\n\n## {phase} - {speaker}\n\n{text.strip()}\n")
 
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Lenient JSONL reader — skips missing files, empty lines, and malformed JSON.
+
+    Always lenient by design: every caller today expects silent skipping of
+    corrupt lines rather than raising. The JSONL files the orchestrator writes
+    (guardrail_events, review_cycles, etc.) are append-log artifacts that may
+    be truncated or partially-written when read concurrently with a live run.
+    """
+
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
+
+
+def read_json(path: Path, *, default: Any = None) -> Any:
+    """Read a JSON file, returning *default* on any error or missing file."""
+
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+

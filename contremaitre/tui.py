@@ -71,25 +71,7 @@ DOCKER_REFRESH_S = 2.0
 # ---------- JSONL helpers ----------
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    out: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
+from .jsonlog import read_jsonl
 
 
 def _file_age(path: Path | None) -> float | None:
@@ -1436,7 +1418,7 @@ if _TEXTUAL_AVAILABLE:
             return widget.scroll_y >= widget.max_scroll_y
 
         def _update_agent_log(self) -> None:
-            events = _read_jsonl(self.paths["raw_export"])
+            events = read_jsonl(self.paths["raw_export"])
             widget = self.query_one("#agent-log", RichLog)
             at_bottom = self._at_bottom(widget)
             if not events and not self._showed_initial_prompt:
@@ -1463,7 +1445,7 @@ if _TEXTUAL_AVAILABLE:
                 widget.scroll_end(animate=False)
 
         def _update_sim_log(self) -> None:
-            events = _read_jsonl(self.paths["sim_raw_export"])
+            events = read_jsonl(self.paths["sim_raw_export"])
             widget = self.query_one("#sim-log", RichLog)
             at_bottom = self._at_bottom(widget)
             for e in events[self._sim_idx :]:
@@ -1473,7 +1455,7 @@ if _TEXTUAL_AVAILABLE:
                 widget.scroll_end(animate=False)
 
         def _update_extra_reviewer_log(self) -> None:
-            events = _read_jsonl(self.paths["extra_reviewer_raw_export"])
+            events = read_jsonl(self.paths["extra_reviewer_raw_export"])
             widget = self.query_one("#extra-reviewer-log", RichLog)
             at_bottom = self._at_bottom(widget)
             # First-tick mascot: rendered once into an empty pane so the
@@ -1497,7 +1479,7 @@ if _TEXTUAL_AVAILABLE:
             # raw_export before writing agent_start[N+1], so the previous
             # tick already flushed them; the separator then precedes any
             # turn N+1 events written in this tick.
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            guardrails = read_jsonl(self.paths["guardrail_events"])
             agent_starts = [
                 e for e in guardrails if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
             ]
@@ -1549,11 +1531,11 @@ if _TEXTUAL_AVAILABLE:
         def _update_activity_log(self) -> None:
             widget = self.query_one("#activity-log", RichLog)
             at_bottom = self._at_bottom(widget)
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            guardrails = read_jsonl(self.paths["guardrail_events"])
             for e in guardrails[self._guardrail_idx :]:
                 widget.write(_render_guardrail(e))
             self._guardrail_idx = len(guardrails)
-            recoveries = _read_jsonl(self.paths["recoveries"])
+            recoveries = read_jsonl(self.paths["recoveries"])
             for e in recoveries[self._recoveries_idx :]:
                 widget.write(_render_guardrail(e))
             self._recoveries_idx = len(recoveries)
@@ -1593,10 +1575,10 @@ if _TEXTUAL_AVAILABLE:
             return None
 
         def _update_chrome(self) -> None:
-            agent_events = _read_jsonl(self.paths["raw_export"])
-            sim_events = _read_jsonl(self.paths["sim_raw_export"])
-            recoveries = _read_jsonl(self.paths["recoveries"])
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            agent_events = read_jsonl(self.paths["raw_export"])
+            sim_events = read_jsonl(self.paths["sim_raw_export"])
+            recoveries = read_jsonl(self.paths["recoveries"])
+            guardrails = read_jsonl(self.paths["guardrail_events"])
 
             agent_turns = _text_event_count(agent_events)
             sim_turns = _text_event_count(sim_events)
@@ -1726,7 +1708,7 @@ if _TEXTUAL_AVAILABLE:
 
             # ----- Extra reviewer subpane (only when configured) -----
             if self.extra_reviewer_model:
-                extra_events = _read_jsonl(self.paths["extra_reviewer_raw_export"])
+                extra_events = read_jsonl(self.paths["extra_reviewer_raw_export"])
                 extra_turns_n = _text_event_count(extra_events)
                 self.query_one("#extra-reviewer-sub", Static).update(
                     _render_pane_subheader(
@@ -1793,8 +1775,8 @@ if _TEXTUAL_AVAILABLE:
             )
 
             # Phase counters mirror flow_use.compute_phases so footer matches eval.
-            review_cycles = _read_jsonl(self.paths["review_cycles"])
-            test_runs = _read_jsonl(self.paths["test_runs"])
+            review_cycles = read_jsonl(self.paths["review_cycles"])
+            test_runs = read_jsonl(self.paths["test_runs"])
             phase_counts = _compute_phases_for_tui(self.paths, agent_events, guardrails, review_cycles)
 
             # Verdict zone text. `attached` covers read-only TUI on an

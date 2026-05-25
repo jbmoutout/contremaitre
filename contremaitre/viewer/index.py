@@ -8,12 +8,11 @@ viewer. Reuses `_styles.css` so the index inherits the viewer's look.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
+from ..jsonlog import read_json
 from . import VIEWER_FILENAME
 
 _HERE = Path(__file__).resolve().parent
@@ -56,9 +55,9 @@ def _collect_rows(runs_root: Path) -> list[dict[str, Any]]:
 
 
 def _summarize_run(run_dir: Path) -> dict[str, Any]:
-    stats = _read_json(run_dir / "stats.json", default={}) or {}
-    pr = _read_json(run_dir / "pr.json", default=None)
-    config = _read_json(run_dir / "run_config.json", default=None)
+    stats = read_json(run_dir / "stats.json", default={}) or {}
+    pr = read_json(run_dir / "pr.json", default=None)
+    config = read_json(run_dir / "run_config.json", default=None)
 
     repo = None
     base = None
@@ -184,13 +183,7 @@ def _slug_from_git_url(url: str | None) -> str | None:
     return path or None
 
 
-def _read_json(path: Path, *, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
+
 
 
 # ----- HTML assembly -----

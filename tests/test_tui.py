@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from contremaitre import events
+from contremaitre.jsonlog import read_jsonl
 from contremaitre.tui import (
     _activity_state,
     _architecture_review_in,
@@ -32,7 +33,6 @@ from contremaitre.tui import (
     _persistent_review_token,
     _phase_trail,
     _pr_number_from_url,
-    _read_jsonl,
     _render_guardrail,
     _reviewer_glyph,
     _reviewer_status,
@@ -64,25 +64,25 @@ def _actor_start(role: str) -> dict:
 
 
 def test_read_jsonl_missing_file(tmp_path):
-    assert _read_jsonl(tmp_path / "nonexistent.jsonl") == []
+    assert read_jsonl(tmp_path / "nonexistent.jsonl") == []
 
 
 def test_read_jsonl_empty_file(tmp_path):
     (tmp_path / "f.jsonl").write_text("")
-    assert _read_jsonl(tmp_path / "f.jsonl") == []
+    assert read_jsonl(tmp_path / "f.jsonl") == []
 
 
 def test_read_jsonl_skips_malformed_lines(tmp_path):
     p = tmp_path / "f.jsonl"
     p.write_text('{"a": 1}\nnot json\n{"b": 2}\n')
-    result = _read_jsonl(p)
+    result = read_jsonl(p)
     assert result == [{"a": 1}, {"b": 2}]
 
 
 def test_read_jsonl_skips_non_dict_values(tmp_path):
     p = tmp_path / "f.jsonl"
     p.write_text('{"a": 1}\n[1, 2]\n42\n')
-    result = _read_jsonl(p)
+    result = read_jsonl(p)
     assert result == [{"a": 1}]
 
 
