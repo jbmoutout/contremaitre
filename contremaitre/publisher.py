@@ -203,9 +203,25 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     review_cycles = _read_jsonl(paths.review_cycles)
     test_runs = _read_jsonl(paths.test_runs)
 
-    # review_cycles.jsonl is written during the review pass, before the
-    # publisher runs. pr_eval.json is written after — don't read it here.
-    sim = review_cycles[-1] if review_cycles else {}
+    # Per-reviewer split. Treat missing `reviewer` field as "sim" so old runs
+    # written before the extra-reviewer feature land in the right bucket.
+    sim_cycles = [
+        r for r in review_cycles
+        if r.get("reviewer", "sim") == "sim" and not r.get("unavailable")
+    ]
+    extra_attempted = any(r.get("reviewer") == "extra" for r in review_cycles)
+    sim = sim_cycles[-1] if sim_cycles else {}
+    last_round_value = max((r.get("round") or 0 for r in review_cycles), default=0)
+    last_round_entries = [r for r in review_cycles if (r.get("round") or 0) == last_round_value]
+    last_round_extra = next(
+        (r for r in last_round_entries
+         if r.get("reviewer") == "extra" and not r.get("unavailable")),
+        None,
+    )
+    last_round_extra_unavailable = any(
+        r.get("reviewer") == "extra" and r.get("unavailable")
+        for r in last_round_entries
+    )
 
     # Phase split — surfaces "design pass actually happened" vs "agent shipped
     # on candidate selection alone". grill≤1 with impl=1 is the skipped-grilling
@@ -213,18 +229,35 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     try:
         phases = compute_phases(paths)
     except Exception:
-        phases = {"grilling_exchanges": None, "impl_turns": None, "review_rounds": len(review_cycles)}
+        phases = {
+            "grilling_exchanges": None,
+            "impl_turns": None,
+            "review_rounds": last_round_value,
+        }
 
     # ----- lede -----
     verdict = (sim.get("verdict") or "?").upper()
     confidence = sim.get("confidence")
-    n_rounds = len(review_cycles)
+    n_rounds = last_round_value or len(sim_cycles)
     n_tests = len(test_runs)
     n_pass = sum(1 for t in test_runs if t.get("returncode") == 0)
 
     lede_parts = [f"֍ **{verdict}**"]
+    if extra_attempted:
+        if last_round_extra is not None:
+            agreement = (
+                (sim.get("verdict") or "").upper() == (last_round_extra.get("verdict") or "").upper()
+            )
+            lede_parts.append("SIM+EXTRA agreed" if agreement else "SIM+EXTRA disagreed")
+        elif last_round_extra_unavailable:
+            lede_parts.append("EXTRA unavailable")
     if confidence is not None:
-        lede_parts.append(f"confidence {confidence:.1f}")
+        if last_round_extra is not None and last_round_extra.get("confidence") is not None:
+            lede_parts.append(
+                f"confidence {confidence:.2f}/{last_round_extra['confidence']:.2f}"
+            )
+        else:
+            lede_parts.append(f"confidence {confidence:.1f}")
     if phases.get("grilling_exchanges") is not None:
         lede_parts.append(
             f"grill {phases['grilling_exchanges']} · impl {phases['impl_turns']}"
@@ -235,8 +268,11 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         mark = "✓" if n_pass == n_tests else "✗"
         lede_parts.append(f"tests {n_pass}/{n_tests} {mark}")
 
-    # ----- revision callout (only when SIM bounced at least once) -----
-    bounced = [r for r in review_cycles if (r.get("verdict") or "").upper() == "CHANGES_REQUESTED"]
+    # ----- revision callout (any reviewer bouncing in any round) -----
+    bounced = [
+        r for r in review_cycles
+        if (r.get("verdict") or "").upper() == "CHANGES_REQUESTED"
+    ]
     revision_lines: list[str] = []
     for r in bounced:
         reqs = r.get("required_changes") or []
@@ -245,7 +281,10 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
             note = (first[:117] + "…") if len(first) > 120 else first
             if len(reqs) > 1:
                 note += f" (+ {len(reqs) - 1} more)"
-            revision_lines.append(f"> Round {r.get('round', '?')} flagged: {note}")
+            who = r.get("reviewer", "sim").upper()
+            revision_lines.append(
+                f"> Round {r.get('round', '?')} {who} flagged: {note}"
+            )
 
     # ----- SIM checklist (collapsible) -----
     checks_performed = sim.get("checks_performed") or []

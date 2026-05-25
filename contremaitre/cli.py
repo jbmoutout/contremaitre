@@ -134,6 +134,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="openrouter/deepseek/deepseek-v4-flash",
         help="OpenRouter model string for the SIM (ignored in --actor fake)",
     )
+    run_p.add_argument(
+        "--extra-reviewer-model",
+        default=None,
+        help=(
+            "Optional second SIM model run alongside the primary every review "
+            "round. Pick a different model family from --sim-model to get a "
+            "cheap cross-family verdict. Both must APPROVE for the PR to "
+            "publish; if either bounces, the agent gets a merged list of "
+            "required changes and loops within max-review-rounds. Omit for "
+            "single-SIM (back-compat)."
+        ),
+    )
     run_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value)
     run_p.add_argument("--run-slug", default="run")
     run_p.add_argument("--check-cmd", action="append", default=[], help="Executable check command; repeatable")
@@ -142,6 +154,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["approved", "changes_requested", "needs_human", "malformed", "malformed_then_approved"],
         default="approved",
         help="Fake SIM behavior (ignored in --actor opencode)",
+    )
+    run_p.add_argument(
+        "--extra-reviewer-scenario",
+        choices=["approved", "changes_requested", "needs_human", "malformed", "malformed_then_approved"],
+        default="approved",
+        help=(
+            "Fake extra-reviewer behavior (ignored in --actor opencode and "
+            "when --extra-reviewer-model is unset). Lets fixture tests "
+            "exercise asymmetric SIM/extra outcomes."
+        ),
     )
     run_p.add_argument(
         "--agent-scenario",
@@ -287,7 +309,9 @@ def _run_cmd(args: argparse.Namespace) -> int:
         print(f"contremaitre: git clone failed: {exc.stderr or exc}", file=sys.stderr)
         return 1
     try:
-        if not _launch_screen(args=args, source_url=source_url, cache_path=cache_path, argv_for_explicit_check=sys.argv):
+        if not _launch_screen(
+            args=args, source_url=source_url, cache_path=cache_path, argv_for_explicit_check=sys.argv
+        ):
             print("aborted", file=sys.stderr)
             return 130
     except KeyboardInterrupt:
@@ -404,6 +428,7 @@ def _launch_screen(
 
     agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
     sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
+    extra_explicit = _has_flag_in(argv_for_explicit_check, "--extra-reviewer-model")
 
     publish = getattr(args, "publish_mode", "stub")
     cost = getattr(args, "max_cost_usd", None)
@@ -426,7 +451,7 @@ def _launch_screen(
         print(f"  caps     {_d('  ·  '.join(caps_parts))}")
 
     # ----- model picker (single list, agent then SIM) -----
-    if not (agent_explicit and sim_explicit):
+    if not (agent_explicit and sim_explicit and extra_explicit):
         free = _fetch_free_models()
         if free is None:
             print()
@@ -466,19 +491,57 @@ def _launch_screen(
                 if forwarded_to_subprocess is not None:
                     forwarded_to_subprocess.extend(["--agent-model", chosen_agent])
 
+            sim_idx = agent_idx
             if not sim_explicit:
-                chosen_sim, _ = _pick_inline("sim", agent_idx)
+                chosen_sim, sim_idx = _pick_inline("sim", agent_idx)
                 args.sim_model = chosen_sim
                 if forwarded_to_subprocess is not None:
                     forwarded_to_subprocess.extend(["--sim-model", chosen_sim])
+
+            # ----- optional extra reviewer (different model family) -----
+            # Default suggestion: first model whose family differs from the
+            # chosen SIM. Falls back to "skip" when families are unknown or
+            # all listed models share the SIM's family.
+            if not extra_explicit:
+                from .model_family import model_family
+
+                sim_full = f"opencode/{free[sim_idx]['id']}"
+                sim_fam = model_family(sim_full)
+                suggested_idx: int | None = None
+                if sim_fam != "unknown":
+                    for i, m in enumerate(free):
+                        if model_family(f"opencode/{m['id']}") not in (sim_fam, "unknown"):
+                            suggested_idx = i
+                            break
+                tag = f"[{suggested_idx}]" if suggested_idx is not None else "[skip]"
+                while True:
+                    try:
+                        reply = input(f"  extra {tag} (Enter=skip, 0–{len(free) - 1}, q): ").strip().lower()
+                    except EOFError:
+                        break
+                    if reply == "":
+                        break
+                    if reply == "q":
+                        raise KeyboardInterrupt
+                    if reply.isdigit() and 0 <= int(reply) < len(free):
+                        idx = int(reply)
+                        chosen_extra = f"opencode/{free[idx]['id']}"
+                        args.extra_reviewer_model = chosen_extra
+                        if forwarded_to_subprocess is not None:
+                            forwarded_to_subprocess.extend(["--extra-reviewer-model", chosen_extra])
+                        break
+                    print(f"  enter a number 0–{len(free) - 1}, Enter to skip, or q")
 
     # ----- confirm -----
     print()
     print(_RULE)
     print(f"  agent   {_b(args.agent_model)}")
     print(f"  sim     {_b(args.sim_model)}")
+    extra_model = getattr(args, "extra_reviewer_model", None)
+    if extra_model:
+        print(f"  extra   {_b(extra_model)}")
     print()
-    print(_d("  will run autonomously — Ctrl-C to abort"))
+    print(("  will run autonomously — Ctrl-C to abort"))
     print()
     try:
         reply = input("  proceed? [Y/n] ").strip().lower()
@@ -520,10 +583,16 @@ def _ensure_default_image_built(config: RunConfig) -> int:
     try:
         inspect = subprocess.run(
             [
-                "docker", "image", "inspect", config.docker_image,
-                "--format", "{{ index .Config.Labels \"" + _DOCKERFILE_HASH_LABEL + "\" }}",
+                "docker",
+                "image",
+                "inspect",
+                config.docker_image,
+                "--format",
+                '{{ index .Config.Labels "' + _DOCKERFILE_HASH_LABEL + '" }}',
             ],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return 0
@@ -754,8 +823,7 @@ def _build_image_inline(*, image_name: str, dockerfile: Path, no_cache: bool) ->
         return 1
     contents = dockerfile.read_bytes()
     digest = hashlib.sha256(contents).hexdigest()
-    cmd = ["docker", "build", "-t", image_name,
-           "--label", f"{_DOCKERFILE_HASH_LABEL}={digest}"]
+    cmd = ["docker", "build", "-t", image_name, "--label", f"{_DOCKERFILE_HASH_LABEL}={digest}"]
     if no_cache:
         cmd.append("--no-cache")
     cmd.append("-")
@@ -827,9 +895,11 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         upstream=getattr(args, "upstream", None),
         agent_model=getattr(args, "agent_model", "openrouter/deepseek/deepseek-v4-flash"),
         sim_model=getattr(args, "sim_model", "openrouter/deepseek/deepseek-v4-flash"),
+        extra_reviewer_model=getattr(args, "extra_reviewer_model", None),
         actor_mode=ActorMode(args.actor),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
+        extra_reviewer_scenario=getattr(args, "extra_reviewer_scenario", "approved"),
         agent_scenario=getattr(args, "agent_scenario", "normal"),
         publish_mode=PublishMode(getattr(args, "publish_mode", PublishMode.STUB.value)),
         keep_worktree=getattr(args, "keep_worktree", False),
@@ -949,8 +1019,6 @@ def _fetch_free_models() -> list[dict] | None:
     return free
 
 
-
-
 def _tui_run_cmd(args: argparse.Namespace) -> int:
     from . import tui  # imported lazily so the rest of the CLI works without textual
 
@@ -961,6 +1029,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     runs_root = Path(_extract_flag_value(forwarded, "--runs-root", ".contremaitre/runs"))
     agent_model = _extract_flag_value(forwarded, "--agent-model", "openrouter/deepseek/deepseek-v4-flash")
     sim_model = _extract_flag_value(forwarded, "--sim-model", "openrouter/deepseek/deepseek-v4-flash")
+    extra_reviewer_model = _extract_flag_value(forwarded, "--extra-reviewer-model", "") or None
     docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
     # Confirmation has to happen BEFORE the subprocess spawn, because once
     # Textual attaches, stdin is owned by the TUI and an `input()` in the
@@ -994,6 +1063,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         max_wall_minutes=_extract_flag_value(forwarded, "--max-wall-minutes", "?"),
         agent_model=agent_model,
         sim_model=sim_model,
+        extra_reviewer_model=extra_reviewer_model,
     )
     try:
         if not _launch_screen(
@@ -1008,10 +1078,12 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("aborted", file=sys.stderr)
         return 130
-    # Picker may have appended --agent-model / --sim-model to `forwarded`;
-    # refresh the locals so the TUI header displays the chosen models.
+    # Picker may have appended --agent-model / --sim-model /
+    # --extra-reviewer-model to `forwarded`; refresh the locals so the TUI
+    # header displays the chosen models.
     agent_model = _extract_flag_value(forwarded, "--agent-model", agent_model)
     sim_model = _extract_flag_value(forwarded, "--sim-model", sim_model)
+    extra_reviewer_model = _extract_flag_value(forwarded, "--extra-reviewer-model", "") or None
     if "--yes" not in forwarded and "-y" not in forwarded:
         forwarded.append("--yes")
     if "--repo-cache" not in " ".join(forwarded):
@@ -1025,6 +1097,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         discover_timeout_s=args.discover_timeout,
         agent_model=agent_model,
         sim_model=sim_model,
+        extra_reviewer_model=extra_reviewer_model,
         docker_image=docker_image,
     )
 

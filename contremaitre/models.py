@@ -82,9 +82,11 @@ class RunConfig:
     upstream: str | None = None
     agent_model: str = "openrouter/deepseek/deepseek-v4-flash"
     sim_model: str = "openrouter/deepseek/deepseek-v4-flash"
+    extra_reviewer_model: str | None = None
     check_cmds: tuple[str, ...] = ()
     actor_mode: ActorMode = ActorMode.FAKE
     sim_scenario: str = "approved"
+    extra_reviewer_scenario: str = "approved"
     agent_scenario: str = "normal"
     publish_mode: PublishMode = PublishMode.STUB
     keep_worktree: bool = False
@@ -123,6 +125,7 @@ class RunPaths:
     initial_prompt: Path
     raw_export: Path
     sim_raw_export: Path
+    extra_reviewer_raw_export: Path
     transcript: Path
     timeline: Path
     trajectory: Path

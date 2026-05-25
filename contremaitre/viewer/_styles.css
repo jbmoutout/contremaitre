@@ -16,6 +16,7 @@
   /* Role colors (viewer-only, but harmless to define globally) */
   --agent: #6B8AFF;
   --sim:   #FFB830;
+  --extra: #C792EA;
   --tool:  #C792EA;
   --bash:  #4ADE80;
   --link:  #6B8AFF;
@@ -445,6 +446,7 @@ section.active { display: block; }
 .chat-totals .role .tag { font-weight: 600; letter-spacing: 0.5px; }
 .chat-totals .role.AGENT .tag { color: var(--agent); }
 .chat-totals .role.SIM   .tag { color: var(--sim); }
+.chat-totals .role.EXTRA .tag { color: var(--extra); }
 .chat-totals .role b { color: var(--text-bright); font-weight: 500; }
 .chat-totals .duration { margin-left: auto; align-self: center; color: var(--text-dim); font-size: 11px; }
 
@@ -452,6 +454,7 @@ section.active { display: block; }
 .chat-turn { display: flex; flex-direction: column; }
 .chat-turn.AGENT { align-items: flex-start; }
 .chat-turn.SIM   { align-items: flex-end; }
+.chat-turn.EXTRA { align-items: flex-end; }
 .chat-turn .who-line {
   display: flex; gap: 10px; align-items: baseline;
   margin: 0 4px 4px; font-size: 10.5px;
@@ -459,6 +462,7 @@ section.active { display: block; }
 .chat-turn .who-line .who { font-weight: 600; letter-spacing: 0.6px; }
 .chat-turn.AGENT .who-line .who { color: var(--agent); }
 .chat-turn.SIM   .who-line .who { color: var(--sim); }
+.chat-turn.EXTRA .who-line .who { color: var(--extra); }
 .chat-turn .who-line .when { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .chat-bubble {
   max-width: 82%;
@@ -469,10 +473,12 @@ section.active { display: block; }
 }
 .chat-turn.AGENT .chat-bubble { border-left:  2px solid var(--agent); }
 .chat-turn.SIM   .chat-bubble { border-right: 2px solid var(--sim);   }
+.chat-turn.EXTRA .chat-bubble { border-right: 2px solid var(--extra); }
 .chat-bubble.empty { display: none; }
 
 .chat-trace { max-width: 96%; margin-top: 6px; }
 .chat-turn.SIM .chat-trace { align-self: flex-end; }
+.chat-turn.EXTRA .chat-trace { align-self: flex-end; }
 .trace-summary {
   display: inline-flex; align-items: baseline; gap: 8px;
   padding: 3px 10px; cursor: pointer; user-select: none;
@@ -486,6 +492,7 @@ section.active { display: block; }
 .trace-summary .cost  { color: var(--success); }
 .trace-body { display: none; margin-top: 6px; padding-left: 10px; border-left: 1px solid var(--border-2); }
 .chat-turn.SIM .trace-body { padding-left: 0; padding-right: 10px; border-left: none; border-right: 1px solid var(--border-2); }
+.chat-turn.EXTRA .trace-body { padding-left: 0; padding-right: 10px; border-left: none; border-right: 1px solid var(--border-2); }
 .chat-trace.open .trace-body { display: block; }
 
 .tool-card {

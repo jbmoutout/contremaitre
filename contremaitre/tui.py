@@ -190,14 +190,12 @@ def _render_pane_subheader(
     else:
         sub.append("•", style="dim")
         sub.append(" idle", style="dim")
-    sub.append(f"  ·  turns: {turns}", style="dim")
+    sub.append(f" · turns {turns}", style="dim")
     if pending_tool:
         clipped = pending_tool if len(pending_tool) <= 60 else pending_tool[:57] + "…"
-        sub.append(f"  ·  doing: {clipped}", style="dim")
+        sub.append(f" · {clipped}", style="dim")
     if container_id:
-        sub.append(f"  ·  container {container_id} ({container_uptime})", style="dim")
-    else:
-        sub.append("  ·  no container", style="dim")
+        sub.append(f" · {container_id} ({container_uptime})", style="dim")
     return sub
 
 
@@ -245,11 +243,11 @@ def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path 
         is_current = stage == current and blocked_or_failed is None
         if is_current:
             if failed:
-                stage_style = f"bold {_PAL_ERROR}"   # stuck here in failure
+                stage_style = f"bold {_PAL_ERROR}"  # stuck here in failure
             elif stage == "PUBLISHED":
                 stage_style = f"bold {_PAL_SUCCESS}"  # terminal success
             else:
-                stage_style = f"bold {_PAL_BRIGHT}"   # active / in progress
+                stage_style = f"bold {_PAL_BRIGHT}"  # active / in progress
             text.append(stage, style=stage_style)
         elif stages.index(current) > i and blocked_or_failed is None:
             text.append(stage, style=_PAL_SUCCESS)
@@ -262,26 +260,86 @@ def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path 
 
 
 def _review_summary(review_cycles: list[dict[str, Any]]) -> Text | None:
-    """Compact review-rounds indicator: `R N ✓` or `R N ✗`.
+    """Compact review-rounds indicator.
 
-    Reads review_cycles.jsonl (one row per SIM review). Last row's verdict
-    sets the icon; the number is the round count so a bounce shows as `R 2`.
+    Single-SIM: `R N ✓` / `R N ✗`. Last SIM row's verdict sets the icon.
+    With extra reviewer enabled: `R N ✓✓` / `R N ✓✗` / `R N ✓·` (`·` = extra
+    unavailable that round). Glyphs derived from the last-round entries for
+    SIM and extra reviewer separately.
     """
 
     if not review_cycles:
         return None
-    last = review_cycles[-1]
-    n = last.get("round") or len(review_cycles)
-    verdict = (last.get("verdict") or "").upper()
+
+    last_round = max((r.get("round") or 0) for r in review_cycles)
+    last_round_entries = [r for r in review_cycles if (r.get("round") or 0) == last_round]
+    extra_attempted = any(r.get("reviewer") == "extra" for r in review_cycles)
+    sim_entry = next(
+        (r for r in last_round_entries if r.get("reviewer", "sim") == "sim" and not r.get("unavailable")),
+        None,
+    )
+
+    def _glyph(verdict: str) -> tuple[str, str]:
+        verdict = verdict.upper()
+        if verdict == "APPROVED":
+            return "✓", _PAL_SUCCESS
+        if verdict == "CHANGES_REQUESTED":
+            return "✗", _PAL_WARN
+        return "·", _PAL_DIM
+
     t = Text()
-    t.append(f"R {n} ", style=_PAL_TEXT)
-    if verdict == "APPROVED":
-        t.append("✓", style=_PAL_SUCCESS)
-    elif verdict == "CHANGES_REQUESTED":
-        t.append("✗", style=_PAL_WARN)
-    else:
+    t.append(f"R {last_round} ", style=_PAL_TEXT)
+    if sim_entry is None:
+        # All last-round entries are unavailable / malformed — degenerate;
+        # fall through to a dot rather than crashing the footer.
         t.append("·", style=_PAL_DIM)
+    else:
+        glyph, style = _glyph(sim_entry.get("verdict") or "")
+        t.append(glyph, style=style)
+
+    if extra_attempted:
+        extra_entry = next(
+            (r for r in last_round_entries if r.get("reviewer") == "extra" and not r.get("unavailable")),
+            None,
+        )
+        if extra_entry is None:
+            t.append("·", style=_PAL_DIM)
+        else:
+            glyph, style = _glyph(extra_entry.get("verdict") or "")
+            t.append(glyph, style=style)
+
     return t
+
+
+def _extra_reviewer_token(
+    review_cycles: list[dict[str, Any]],
+    *,
+    extra_file_age: float | None = None,
+) -> tuple[str, str]:
+    """Token + style for the Zone 3 extra-reviewer agreement signal.
+
+    Returns one of `extra:agreed`, `extra:disagreed`, `extra:…` (events
+    flowing now, verdict not yet recorded for this round), or `extra:off`.
+    """
+
+    in_flight = extra_file_age is not None and extra_file_age < 30.0
+    if not review_cycles:
+        return ("extra:…", _PAL_TEXT) if in_flight else ("extra:off", _PAL_DIM)
+    last_round = max((r.get("round") or 0) for r in review_cycles)
+    last_entries = [r for r in review_cycles if (r.get("round") or 0) == last_round]
+    sim_entry = next(
+        (r for r in last_entries if r.get("reviewer", "sim") == "sim" and not r.get("unavailable")),
+        None,
+    )
+    extra_entry = next(
+        (r for r in last_entries if r.get("reviewer") == "extra" and not r.get("unavailable")),
+        None,
+    )
+    if sim_entry is None or extra_entry is None:
+        return ("extra:…", _PAL_TEXT) if in_flight else ("extra:off", _PAL_DIM)
+    if (sim_entry.get("verdict") or "").upper() == (extra_entry.get("verdict") or "").upper():
+        return "extra:agreed", _PAL_SUCCESS
+    return "extra:disagreed", _PAL_WARN
 
 
 def _tests_summary(test_runs: list[dict[str, Any]]) -> Text | None:
@@ -390,6 +448,7 @@ def _compute_phases_for_tui(
         ts_str = g.get("ts", "")
         try:
             from datetime import datetime
+
             ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() * 1000
         except (ValueError, AttributeError):
             continue
@@ -426,9 +485,7 @@ def _compute_phases_for_tui(
 
 def _self_verified_in(events: list[dict[str, Any]]) -> bool:
     """True if agent ran a test command after its last code edit."""
-    _test_cmd_re = re.compile(
-        r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b"
-    )
+    _test_cmd_re = re.compile(r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b")
     _contremaitre_re = re.compile(r"[/\\]?\.contremaitre[/\\]")
     last_edit_ts = 0
     for e in events:
@@ -723,7 +780,7 @@ def _turn_separator(turn_number: int, role: str) -> Text:
     """
 
     label = f"turn {turn_number} · {role} ✓"
-    body = "── " + label + " " + "─" * max(0, 70 - len(label) - 4)
+    body = "── " + label + " " + "─" * max(0, 40 - len(label) - 4)
     sep = Text()
     sep.append(body, style="bold cyan")
     return sep
@@ -813,12 +870,16 @@ if _TEXTUAL_AVAILABLE:
 
     class ContremaitreTUI(App):
         CSS = """
-        Screen { layout: vertical; padding: 1 2; }
+        Screen { layout: vertical; padding: 0 1; }
         #header { height: 1; padding: 0 1; }
         #panes { height: 1fr; }
-        .pane { width: 1fr; border: heavy white; }
-        .pane.active { border: heavy yellow; }
+        .pane { width: 1fr; border: round white; }
+        .pane.active { border: round yellow; }
         .pane-sub { height: 1; padding: 0 1; color: $text-muted; }
+        #sim-column { width: 1fr; layout: vertical; }
+        .sim-subpane { width: 1fr; height: 1fr; border: round white; }
+        .sim-subpane.active { border: round yellow; }
+        #extra-reviewer-pane.hidden { display: none; }
         RichLog {
             background: $background;
             scrollbar-size: 1 1;
@@ -829,7 +890,7 @@ if _TEXTUAL_AVAILABLE:
             scrollbar-background-active: $background;
             scrollbar-background-hover: $background;
         }
-        #activity-panel { height: 10; border: heavy white; }
+        #activity-panel { height: 8; border: round white; }
         #footer-line { height: 1; padding: 0 1; }
         """
 
@@ -843,6 +904,7 @@ if _TEXTUAL_AVAILABLE:
             *,
             agent_model: str = "?",
             sim_model: str = "?",
+            extra_reviewer_model: str | None = None,
             docker_image: str = "?",
             proc: subprocess.Popen | None = None,
             refresh_hz: float = 5.0,
@@ -851,12 +913,15 @@ if _TEXTUAL_AVAILABLE:
             self.run_dir = run_dir
             self.agent_model = agent_model
             self.sim_model = sim_model
+            self.extra_reviewer_model = extra_reviewer_model
             self.docker_image = docker_image
             self.proc = proc
             self.refresh_hz = refresh_hz
             self.t_start = time.time()
             self._agent_idx = 0
             self._sim_idx = 0
+            self._extra_reviewer_idx = 0
+            self._extra_reviewer_mascot_shown = False
             self._guardrail_idx = 0
             self._recoveries_idx = 0
             self._docker_state: dict[str, Any] = {}
@@ -880,12 +945,14 @@ if _TEXTUAL_AVAILABLE:
             # for it, so the label corresponds to the turn that ended.
             self._agent_separators_rendered = 0
             self._sim_separators_rendered = 0
+            self._extra_separators_rendered = 0
 
         @property
         def paths(self) -> dict[str, Path]:
             return {
                 "raw_export": self.run_dir / "raw_export.jsonl",
                 "sim_raw_export": self.run_dir / "sim_raw_export.jsonl",
+                "extra_reviewer_raw_export": self.run_dir / "extra_reviewer_raw_export.jsonl",
                 "guardrail_events": self.run_dir / "guardrail_events.jsonl",
                 "recoveries": self.run_dir / "recoveries.jsonl",
                 "review_cycles": self.run_dir / "review_cycles.jsonl",
@@ -904,9 +971,18 @@ if _TEXTUAL_AVAILABLE:
                 with Vertical(classes="pane", id="agent-pane"):
                     yield RichLog(id="agent-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
                     yield Static("", classes="pane-sub", id="agent-sub")
-                with Vertical(classes="pane", id="sim-pane"):
-                    yield RichLog(id="sim-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
-                    yield Static("", classes="pane-sub", id="sim-sub")
+                with Vertical(id="sim-column"):
+                    # SIM on top; EXTRA REVIEWER stacked below when configured
+                    # (CSS .hidden on #extra-reviewer-pane collapses it so the
+                    # SIM region uses the full right column in single-SIM mode).
+                    with Vertical(classes="sim-subpane", id="sim-pane"):
+                        yield RichLog(id="sim-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
+                        yield Static("", classes="pane-sub", id="sim-sub")
+                    with Vertical(classes="sim-subpane", id="extra-reviewer-pane"):
+                        yield RichLog(
+                            id="extra-reviewer-log", auto_scroll=False, markup=False, wrap=True, highlight=False
+                        )
+                        yield Static("", classes="pane-sub", id="extra-reviewer-sub")
             with Vertical(id="activity-panel"):
                 yield RichLog(id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
             yield Static("", id="footer-line")
@@ -915,6 +991,10 @@ if _TEXTUAL_AVAILABLE:
             self.title = f"contremaitre · {self.run_dir.name}"
             refresh_s = 1.0 / max(0.5, min(20.0, self.refresh_hz))
             self.set_interval(refresh_s, self._tick)
+            # Hide the extra-reviewer subpane when the run is single-SIM —
+            # visually identical to the pre-extra-reviewer layout.
+            if not self.extra_reviewer_model:
+                self.query_one("#extra-reviewer-pane").set_class(True, "hidden")
 
         def _tick(self) -> None:
             now = time.time()
@@ -924,6 +1004,8 @@ if _TEXTUAL_AVAILABLE:
             self._update_turn_separators()
             self._update_agent_log()
             self._update_sim_log()
+            if self.extra_reviewer_model:
+                self._update_extra_reviewer_log()
             self._update_activity_log()
             self._update_chrome()
 
@@ -968,6 +1050,23 @@ if _TEXTUAL_AVAILABLE:
             if at_bottom:
                 widget.scroll_end(animate=False)
 
+        def _update_extra_reviewer_log(self) -> None:
+            events = _read_jsonl(self.paths["extra_reviewer_raw_export"])
+            widget = self.query_one("#extra-reviewer-log", RichLog)
+            at_bottom = self._at_bottom(widget)
+            # First-tick mascot: rendered once into an empty pane so the
+            # operator sees a friendly "I'm here, just not triggered yet"
+            # signal instead of a blank box. Survives once events arrive
+            # since it stays at the top of the log's scrollback.
+            if not events and not self._extra_reviewer_mascot_shown:
+                widget.write(Text("┬┴┬┴┤･ω･)ﾉ", style="dim"))
+                self._extra_reviewer_mascot_shown = True
+            for e in events[self._extra_reviewer_idx :]:
+                widget.write(_render_event(e))
+            self._extra_reviewer_idx = len(events)
+            if at_bottom:
+                widget.scroll_end(animate=False)
+
         def _update_turn_separators(self) -> None:
             # Drive handover separators off `opencode_actor_start` in
             # guardrail_events. Runs BEFORE the per-pane log updates so
@@ -978,13 +1077,21 @@ if _TEXTUAL_AVAILABLE:
             # turn N+1 events written in this tick.
             guardrails = _read_jsonl(self.paths["guardrail_events"])
             agent_starts = [
-                e for e in guardrails
-                if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
+                e for e in guardrails if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
             ]
+            # SIM pane: SIM-work + SIM-review only. Filter out extra
+            # reviewer starts (tagged reviewer_id="extra") so the SIM
+            # pane doesn't get a phantom `turn N · reviewer ✓` divider
+            # every time the extra reviewer kicks off.
             sim_starts = [
-                e for e in guardrails
+                e
+                for e in guardrails
                 if e.get("event") == "opencode_actor_start"
                 and e.get("role") in ("sim", "review")
+                and e.get("reviewer_id") != "extra"
+            ]
+            extra_starts = [
+                e for e in guardrails if e.get("event") == "opencode_actor_start" and e.get("reviewer_id") == "extra"
             ]
             agent_widget = self.query_one("#agent-log", RichLog)
             sim_widget = self.query_one("#sim-log", RichLog)
@@ -1004,6 +1111,18 @@ if _TEXTUAL_AVAILABLE:
                 agent_widget.scroll_end(animate=False)
             if sim_at_bottom:
                 sim_widget.scroll_end(animate=False)
+            # Extra reviewer pane separators — only when the pane exists.
+            # Label is "extra" so the divider reads `turn N · extra ✓`,
+            # distinct from `reviewer ✓` in the SIM pane.
+            if self.extra_reviewer_model:
+                extra_widget = self.query_one("#extra-reviewer-log", RichLog)
+                extra_at_bottom = self._at_bottom(extra_widget)
+                while self._extra_separators_rendered < len(extra_starts) - 1:
+                    n = self._extra_separators_rendered + 2
+                    extra_widget.write(_turn_separator(n, "extra"))
+                    self._extra_separators_rendered += 1
+                if extra_at_bottom:
+                    extra_widget.scroll_end(animate=False)
 
         def _update_activity_log(self) -> None:
             widget = self.query_one("#activity-log", RichLog)
@@ -1020,21 +1139,36 @@ if _TEXTUAL_AVAILABLE:
                 widget.scroll_end(animate=False)
 
         def _determine_active(self) -> str | None:
-            ag = self._docker_state.get("agent_container")
-            sm = self._docker_state.get("sim_container")
-            if ag:
+            """Whichever pane wrote most recently is "active" (yellow border).
+
+            File freshness is the canonical signal because SIM-review and
+            extra-review run sequentially (never concurrently) but share
+            the same RO-mount container slot in docker_state — so
+            container presence alone can't tell which pane owns it.
+            Container presence is a fallback for the agent (which has its
+            own RW slot) when no file has been written yet.
+            """
+
+            ages: dict[str, float] = {}
+            for name, key in (
+                ("agent", "raw_export"),
+                ("sim", "sim_raw_export"),
+                ("extra", "extra_reviewer_raw_export"),
+            ):
+                if name == "extra" and not self.extra_reviewer_model:
+                    continue
+                age = _file_age(self.paths[key])
+                if age is not None:
+                    ages[name] = age
+            if ages:
+                return min(ages, key=ages.get)
+            # No file has been written yet — fall back to container slots
+            # so the active border still shows during startup.
+            if self._docker_state.get("agent_container"):
                 return "agent"
-            if sm:
+            if self._docker_state.get("sim_container"):
                 return "sim"
-            a = _file_age(self.paths["raw_export"])
-            s = _file_age(self.paths["sim_raw_export"])
-            if a is None and s is None:
-                return None
-            if s is None:
-                return "agent"
-            if a is None:
-                return "sim"
-            return "agent" if a <= s else "sim"
+            return None
 
         def _update_chrome(self) -> None:
             agent_events = _read_jsonl(self.paths["raw_export"])
@@ -1071,6 +1205,11 @@ if _TEXTUAL_AVAILABLE:
                 f"  ·  agent={_short_model(self.agent_model)}  sim={_short_model(self.sim_model)}",
                 style="dim",
             )
+            if self.extra_reviewer_model:
+                header.append(
+                    f"  extra={_short_model(self.extra_reviewer_model)}",
+                    style="dim",
+                )
             if img:
                 header.append(f"  ·  {self.docker_image} built {img}", style="dim")
             self.query_one("#header", Static).update(header)
@@ -1078,18 +1217,40 @@ if _TEXTUAL_AVAILABLE:
             # ----- Pane subheaders with thinking loader -----
             ag = self._docker_state.get("agent_container")
             sm = self._docker_state.get("sim_container")
+            sim_file_age = _file_age(self.paths["sim_raw_export"])
+            extra_file_age = _file_age(self.paths["extra_reviewer_raw_export"]) if self.extra_reviewer_model else None
+            # SIM-review and extra-review run sequentially and share the
+            # docker RO-mount slot, so `sm` could belong to either. The
+            # freshest file ages tells us who owns it; the other one is
+            # idle (or not enabled).
+            extra_owns_container = (
+                bool(sm) and extra_file_age is not None and (sim_file_age is None or extra_file_age <= sim_file_age)
+            )
+            sim_owns_container = bool(sm) and not extra_owns_container
+
             agent_state = _activity_state(
                 container_present=bool(ag),
                 file_age=_file_age(self.paths["raw_export"]),
             )
             sim_state = _activity_state(
-                container_present=bool(sm),
-                file_age=_file_age(self.paths["sim_raw_export"]),
+                container_present=sim_owns_container,
+                file_age=sim_file_age,
+            )
+            extra_state = (
+                _activity_state(
+                    container_present=extra_owns_container,
+                    file_age=extra_file_age,
+                )
+                if self.extra_reviewer_model
+                else "idle"
             )
             # Tick the spinner only while at least one pane is non-idle;
             # otherwise a finished run would keep visually animating
             # forever, which contradicts the elapsed-freeze policy below.
-            if agent_state != "idle" or sim_state != "idle":
+            # The extra reviewer feeds the tick too so its pane animates
+            # while the SIM is idle (otherwise the thinking loader on the
+            # extra pane would freeze).
+            if agent_state != "idle" or sim_state != "idle" or extra_state != "idle":
                 self._spin_tick = (self._spin_tick + 1) % len(_SPINNER_FRAMES)
             spinner = _SPINNER_FRAMES[self._spin_tick]
 
@@ -1118,15 +1279,36 @@ if _TEXTUAL_AVAILABLE:
             agent_pane = self.query_one("#agent-pane")
             sim_pane = self.query_one("#sim-pane")
             sim_starts = [
-                e for e in guardrails
-                if e.get("event") == "opencode_actor_start" and e.get("role") in ("sim", "review")
+                e
+                for e in guardrails
+                if e.get("event") == "opencode_actor_start"
+                and e.get("role") in ("sim", "review")
+                and e.get("reviewer_id") != "extra"
             ]
-            sim_label = "Reviewer" if (sim_starts and sim_starts[-1].get("role") == "review") else "SIM"
-            agent_pane.border_title = f"Agent ({_short_model(self.agent_model)})"
+            sim_label = "REVIEWER" if (sim_starts and sim_starts[-1].get("role") == "review") else "SIM"
+            agent_pane.border_title = f"AGENT ({_short_model(self.agent_model)})"
             sim_pane.border_title = f"{sim_label} ({_short_model(self.sim_model)})"
             active = None if terminal else self._determine_active()
             agent_pane.set_class(active == "agent", "active")
             sim_pane.set_class(active == "sim", "active")
+
+            # ----- Extra reviewer subpane (only when configured) -----
+            if self.extra_reviewer_model:
+                extra_events = _read_jsonl(self.paths["extra_reviewer_raw_export"])
+                extra_turns_n = _text_event_count(extra_events)
+                self.query_one("#extra-reviewer-sub", Static).update(
+                    _render_pane_subheader(
+                        state=extra_state,
+                        spinner=spinner,
+                        turns=extra_turns_n,
+                        pending_tool=_latest_pending_tool(extra_events),
+                        container_id=None,
+                        container_uptime=None,
+                    )
+                )
+                extra_pane = self.query_one("#extra-reviewer-pane")
+                extra_pane.border_title = f"EXTRA REVIEWER ({_short_model(self.extra_reviewer_model)})"
+                extra_pane.set_class(active == "extra", "active")
 
             # ----- Activity panel title -----
             if terminal and self._frozen_gr_age is not None:
@@ -1154,9 +1336,9 @@ if _TEXTUAL_AVAILABLE:
                 if stats_data:
                     status = f"{stats_data.get('terminal_state', '?')} · {stats_data.get('verdict', '?')}"
                     verdict_style = (
-                        f"bold {_PAL_SUCCESS}" if stats_data.get("verdict") == "READY_FOR_DRAFT_PR"
-                        else f"bold {_PAL_ERROR}" if run_failed
-                        else f"bold {_PAL_WARN}"
+                        f"bold {_PAL_SUCCESS}"
+                        if stats_data.get("verdict") == "READY_FOR_DRAFT_PR"
+                        else f"bold {_PAL_ERROR}" if run_failed else f"bold {_PAL_WARN}"
                     )
                 else:
                     status = "attached"
@@ -1216,7 +1398,11 @@ if _TEXTUAL_AVAILABLE:
             footer.append(sep)
 
             # ----- Zone 3: work metrics (dim by default, color only when anomalous) -----
-            footer.append(f"A{agent_turns} S{sim_turns}", style=_PAL_TEXT)
+            turn_token = f"A{agent_turns} S{sim_turns}"
+            if self.extra_reviewer_model:
+                extra_events_for_count = _read_jsonl(self.paths["extra_reviewer_raw_export"])
+                turn_token += f" X{_text_event_count(extra_events_for_count)}"
+            footer.append(turn_token, style=_PAL_TEXT)
             footer.append("  ")
             # Phase split: grill = pre-SETTLED exchanges (real design pass) vs
             # impl = post-SETTLED agent turns. grill=0/1 with impl=1 means the
@@ -1231,6 +1417,17 @@ if _TEXTUAL_AVAILABLE:
             footer.append("  ")
             footer.append(f"sub {subagents}", style=_PAL_DIM)
             footer.append("  ")
+            if self.extra_reviewer_model:
+                # Last-round agreement signal. `extra:…` = in-flight (events
+                # landing, verdict not yet recorded); `extra:off` = idle /
+                # not run this round; `extra:agreed`/`disagreed` = both
+                # verdicts present and matched / mismatched.
+                extra_token, extra_style = _extra_reviewer_token(
+                    review_cycles,
+                    extra_file_age=_file_age(self.paths["extra_reviewer_raw_export"]),
+                )
+                footer.append(extra_token, style=extra_style)
+                footer.append("  ")
             rec_count = len(recoveries)
             footer.append(f"↻{rec_count}", style=_PAL_WARN if rec_count else _PAL_DIM)
             footer.append("  ")
@@ -1285,11 +1482,12 @@ def attach(run_dir: Path, *, refresh_hz: float = 5.0) -> int:
     run_dir = run_dir.resolve()
     if not run_dir.exists():
         raise SystemExit(f"run dir does not exist: {run_dir}")
-    agent_model, sim_model, docker_image = _read_run_models(run_dir)
+    agent_model, sim_model, extra_reviewer_model, docker_image = _read_run_models(run_dir)
     app = ContremaitreTUI(
         run_dir,
         agent_model=agent_model,
         sim_model=sim_model,
+        extra_reviewer_model=extra_reviewer_model,
         docker_image=docker_image,
         proc=None,
         refresh_hz=refresh_hz,
@@ -1306,6 +1504,7 @@ def spawn_and_attach(
     discover_timeout_s: float = 30.0,
     agent_model: str = "?",
     sim_model: str = "?",
+    extra_reviewer_model: str | None = None,
     docker_image: str = "?",
 ) -> int:
     """Spawn `contremaitre run …` and attach the TUI to its run dir."""
@@ -1353,6 +1552,7 @@ def spawn_and_attach(
         run_dir,
         agent_model=agent_model,
         sim_model=sim_model,
+        extra_reviewer_model=extra_reviewer_model,
         docker_image=docker_image,
         proc=proc,
         refresh_hz=refresh_hz,
@@ -1360,12 +1560,17 @@ def spawn_and_attach(
     return app.run() or 0
 
 
-def _read_run_models(run_dir: Path) -> tuple[str, str, str]:
+def _read_run_models(run_dir: Path) -> tuple[str, str, str | None, str]:
     stats = run_dir / "stats.json"
     if stats.exists():
         try:
             d = json.loads(stats.read_text(encoding="utf-8"))
-            return (d.get("agent_model", "?"), d.get("sim_model", "?"), "?")
+            return (
+                d.get("agent_model", "?"),
+                d.get("sim_model", "?"),
+                d.get("extra_reviewer_model"),
+                "?",
+            )
         except (OSError, json.JSONDecodeError):
             pass
-    return ("?", "?", "?")
+    return ("?", "?", None, "?")

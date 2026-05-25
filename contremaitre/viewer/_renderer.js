@@ -44,6 +44,10 @@
                    : verdict.startsWith("NO_PR")       ? "tier-yellow"
                                                        : "tier-unknown";
 
+  const extraModelChip = stats.extra_reviewer_model
+    ? `<span class="item">extra <b>${esc(stats.extra_reviewer_model.split("/").pop())}</b></span>`
+    : "";
+
   document.getElementById("stats-header").innerHTML = `
     <span class="item"><span class="sim-dot ${verdictTier}"></span>verdict <b>${esc(verdict)}</b></span>
     <span class="item">cost <b>${esc(cost)}</b></span>
@@ -53,6 +57,7 @@
     <span class="item"><b>${fmt(stats.n_tool_uses)}</b> tool uses</span>
     <span class="item"><b>${fmt(stats.subagent_count)}</b> sub-agents</span>
     <span class="item"><b>${fmt(stats.files_written_count)}</b> files written</span>
+    ${extraModelChip}
   `;
 
   // ----- tab nav -----
@@ -325,7 +330,10 @@
 
   function renderChat() {
     const totals = chat.totals || {};
-    const totalsRow = ["AGENT", "SIM"].map(role => {
+    // EXTRA role only present when the run was configured with an extra
+    // reviewer; back-compat surface for older runs stays AGENT/SIM only.
+    const roleOrder = totals.EXTRA ? ["AGENT", "SIM", "EXTRA"] : ["AGENT", "SIM"];
+    const totalsRow = roleOrder.map(role => {
       const t = totals[role] || {};
       return `<div class="role ${role}">
         <span class="tag">${role}</span>

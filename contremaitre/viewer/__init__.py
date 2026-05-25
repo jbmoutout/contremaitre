@@ -53,14 +53,25 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     stats_raw = _read_json(paths.stats, default={})
     agent_events = _read_jsonl(paths.raw_export)
     sim_events = _read_jsonl(paths.sim_raw_export)
+    extra_reviewer_events = _read_jsonl(paths.extra_reviewer_raw_export)
+    extra_reviewer_enabled = bool(extra_reviewer_events) or bool(stats_raw.get("extra_reviewer_model"))
 
     agent_summary = _summarize_events(agent_events)
     sim_summary = _summarize_events(sim_events)
+    extra_summary = _summarize_events(extra_reviewer_events)
 
-    timeline = _build_timeline(agent_events, "agent") + _build_timeline(sim_events, "sim")
+    timeline = (
+        _build_timeline(agent_events, "agent")
+        + _build_timeline(sim_events, "sim")
+        + _build_timeline(extra_reviewer_events, "extra")
+    )
     timeline.sort(key=lambda e: e.get("timestamp") or 0)
 
-    chat = _build_chat(agent_events, sim_events)
+    chat = _build_chat(
+        agent_events,
+        sim_events,
+        extra_reviewer_events=extra_reviewer_events if extra_reviewer_enabled else None,
+    )
 
     transcript = _parse_transcript(paths.transcript)
 
@@ -83,15 +94,20 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     stats = {
         **stats_raw,
         "cost_usd": stats_raw.get("recorded_cost_usd"),
-        "n_events": agent_summary["n_events"] + sim_summary["n_events"],
-        "n_tool_uses": agent_summary["n_tool_uses"] + sim_summary["n_tool_uses"],
-        "n_text_events": agent_summary["n_text_events"] + sim_summary["n_text_events"],
-        "n_step_finishes": agent_summary["n_step_finishes"] + sim_summary["n_step_finishes"],
-        "tool_counts": _merge_counts(agent_summary["tool_counts"], sim_summary["tool_counts"]),
-        "tokens_in": agent_summary["tokens_in"] + sim_summary["tokens_in"],
-        "tokens_out": agent_summary["tokens_out"] + sim_summary["tokens_out"],
+        "n_events": agent_summary["n_events"] + sim_summary["n_events"] + extra_summary["n_events"],
+        "n_tool_uses": agent_summary["n_tool_uses"] + sim_summary["n_tool_uses"] + extra_summary["n_tool_uses"],
+        "n_text_events": agent_summary["n_text_events"] + sim_summary["n_text_events"] + extra_summary["n_text_events"],
+        "n_step_finishes": agent_summary["n_step_finishes"] + sim_summary["n_step_finishes"] + extra_summary["n_step_finishes"],
+        "tool_counts": _merge_counts(
+            _merge_counts(agent_summary["tool_counts"], sim_summary["tool_counts"]),
+            extra_summary["tool_counts"],
+        ),
+        "tokens_in": agent_summary["tokens_in"] + sim_summary["tokens_in"] + extra_summary["tokens_in"],
+        "tokens_out": agent_summary["tokens_out"] + sim_summary["tokens_out"] + extra_summary["tokens_out"],
         "agent_tool_counts": agent_summary["tool_counts"],
         "sim_tool_counts": sim_summary["tool_counts"],
+        "extra_reviewer_tool_counts": extra_summary["tool_counts"] if extra_reviewer_enabled else None,
+        "extra_reviewer_enabled": extra_reviewer_enabled,
         "files_written_count": len(extracted_files),
         "subagent_count": len(sub_agents),
     }
@@ -159,18 +175,34 @@ def _merge_counts(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
 _CHAT_OUTPUT_CAP = 32_000
 
 
-def _build_chat(agent_events: list[dict[str, Any]], sim_events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Bucket events into agent/sim turns and compute per-role totals.
+def _build_chat(
+    agent_events: list[dict[str, Any]],
+    sim_events: list[dict[str, Any]],
+    *,
+    extra_reviewer_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Bucket events into agent/sim/extra turns and compute per-role totals.
 
     A "turn" is one text utterance plus every tool_use / step_finish that
     preceded it in that stream (since the agent's last text). This is the
     shape the chat-style renderer expects — bubbles with an attached tool
     trace. Mirrors the layout used in `agent_sim_conversation.html`.
+
+    `extra_reviewer_events=None` (no extra reviewer configured) returns the
+    original AGENT/SIM totals shape so the renderer stays back-compat.
     """
 
     agent_turns = _stream_turns(agent_events, "AGENT")
     sim_turns = _stream_turns(sim_events, "SIM")
-    turns = sorted(agent_turns + sim_turns, key=lambda t: t["ts"] or 0)
+    extra_turns = (
+        _stream_turns(extra_reviewer_events, "EXTRA")
+        if extra_reviewer_events is not None
+        else []
+    )
+    turns = sorted(
+        agent_turns + sim_turns + extra_turns,
+        key=lambda t: t["ts"] or 0,
+    )
 
     t0 = min((t["ts"] for t in turns if t["ts"]), default=0)
     for t in turns:
@@ -190,9 +222,13 @@ def _build_chat(agent_events: list[dict[str, Any]], sim_events: list[dict[str, A
         if last_ts and t0:
             duration = round((last_ts - t0) / 1000, 3)
 
+    totals: dict[str, Any] = {"AGENT": _agg(agent_turns), "SIM": _agg(sim_turns)}
+    if extra_reviewer_events is not None:
+        totals["EXTRA"] = _agg(extra_turns)
+
     return {
         "turns": turns,
-        "totals": {"AGENT": _agg(agent_turns), "SIM": _agg(sim_turns)},
+        "totals": totals,
         "duration": duration,
     }
 

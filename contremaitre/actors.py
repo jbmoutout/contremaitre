@@ -64,6 +64,8 @@ class ActorRunner(Protocol):
         settled_file: Path,
         scenario: str,
         attempt: int,
+        reviewer_id: str = "sim",
+        model_override: str | None = None,
     ) -> ActorOutput: ...
 
 
@@ -110,7 +112,14 @@ class FakeActorRunner:
         settled_file: Path,
         scenario: str,
         attempt: int,
+        reviewer_id: str = "sim",
+        model_override: str | None = None,
     ) -> ActorOutput:
+        export = (
+            self.paths.extra_reviewer_raw_export
+            if reviewer_id == "extra"
+            else self.paths.sim_raw_export
+        )
         return self._fake(
             [
                 "sim-review",
@@ -121,7 +130,7 @@ class FakeActorRunner:
             ],
             role="sim",
             phase="REVIEW",
-            raw_export=self.paths.sim_raw_export,
+            raw_export=export,
         )
 
     def _fake(self, args: list[str], *, role: str, phase: str, raw_export: Path) -> ActorOutput:
@@ -207,6 +216,8 @@ class OpencodeActorRunner:
         settled_file: Path,
         scenario: str,
         attempt: int,
+        reviewer_id: str = "sim",
+        model_override: str | None = None,
     ) -> ActorOutput:
         from . import prompts
 
@@ -217,18 +228,26 @@ class OpencodeActorRunner:
         )
         (review_dir / "diff.patch").write_text(diff_file.read_text(encoding="utf-8"), encoding="utf-8")
         # Fresh session every review attempt so the SIM has clean context.
-        attempt_state = self.review_state / f"attempt-{attempt}"
+        # Separate state dirs per reviewer so SIM and extra reviewer can't
+        # collide on opencode.db when called back-to-back in one round.
+        attempt_state = self.review_state / f"{reviewer_id}-attempt-{attempt}"
         attempt_state.mkdir(parents=True, exist_ok=True)
+        raw_export = (
+            self.paths.extra_reviewer_raw_export
+            if reviewer_id == "extra"
+            else self.paths.sim_raw_export
+        )
         return self._opencode_turn(
             role="review",
             prompt=prompts.SIM_REVIEW_PROMPT,
-            raw_export=self.paths.sim_raw_export,
+            raw_export=raw_export,
             state_dir=attempt_state,
             mount_mode="ro",
-            model=self.config.sim_model,
+            model=model_override or self.config.sim_model,
             timeout_seconds=self.config.sim_timeout_seconds,
             session_attr=None,
             extra_mounts=[(review_dir, "/review", "ro")],
+            reviewer_id=reviewer_id,
         )
 
     def _opencode_turn(
@@ -243,6 +262,7 @@ class OpencodeActorRunner:
         timeout_seconds: int,
         session_attr: str | None,
         extra_mounts: list[tuple[Path, str, str]] | None = None,
+        reviewer_id: str | None = None,
     ) -> ActorOutput:
         pre_text_count = _count_text_events(raw_export)
         session_id = getattr(self, session_attr) if session_attr else None
@@ -258,17 +278,20 @@ class OpencodeActorRunner:
             extra_mounts=extra_mounts or [],
             role=role,
         )
-        append_jsonl(
-            self.paths.guardrail_events,
-            {
-                "event": events.OPENCODE_ACTOR_START,
-                "role": role,
-                "mount_mode": mount_mode,
-                "model": model,
-                "timeout_seconds": timeout_seconds,
-                "cmd_redacted": redact_command(cmd),
-            },
-        )
+        start_event: dict[str, object] = {
+            "event": events.OPENCODE_ACTOR_START,
+            "role": role,
+            "mount_mode": mount_mode,
+            "model": model,
+            "timeout_seconds": timeout_seconds,
+            "cmd_redacted": redact_command(cmd),
+        }
+        if reviewer_id is not None:
+            # Tags review-pass starts so the TUI can route per-reviewer
+            # turn separators to the right pane. role stays "review" for
+            # transcript/breadcrumb back-compat; the field is additive.
+            start_event["reviewer_id"] = reviewer_id
+        append_jsonl(self.paths.guardrail_events, start_event)
         raw_export.parent.mkdir(parents=True, exist_ok=True)
         returncode, stderr = _run_detached_container(
             cmd=cmd,

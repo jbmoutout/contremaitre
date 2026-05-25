@@ -171,7 +171,13 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
         if r == "agent" and (impl_ms is None or ts <= impl_ms)
     )
 
-    review_rounds = len(_read_jsonl(paths.review_cycles))
+    # max(round), not len(): with the extra reviewer enabled, review_cycles
+    # carries two entries per round plus optional `unavailable` entries; the
+    # round number is the canonical counter.
+    cycles = _read_jsonl(paths.review_cycles)
+    review_rounds = (
+        max((e.get("round") or 0) for e in cycles) if cycles else 0
+    )
 
     return {
         "pre_settled_agent_turns": pre_settled_agent,
@@ -325,10 +331,17 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
 
     # sim_useful_call_ratio: fraction of SIM grep outputs cited in verdict text.
     # Valid for SIM (verdict prose is the deliverable). Broken for agent side.
+    # Match against the SIM's own last verdict only (not the extra reviewer's
+    # or an `unavailable` marker row) so the ratio reflects SIM tool-use → SIM
+    # verdict alignment.
     sim_useful_ratio: float | None = None
     review_cycles = _read_jsonl(paths.review_cycles)
-    if review_cycles:
-        last = review_cycles[-1]
+    sim_cycles = [
+        c for c in review_cycles
+        if c.get("reviewer", "sim") == "sim" and not c.get("unavailable")
+    ]
+    if sim_cycles:
+        last = sim_cycles[-1]
         verdict_text = last.get("summary", "") + " ".join(last.get("checks_performed", []))
         grep_calls = [e for e in tool_calls if _tool_name(e) == "grep"]
         if grep_calls:

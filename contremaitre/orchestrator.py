@@ -30,12 +30,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import events, prompts
-from .actors import ActorRunner, make_actor_runner
+from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
 from .costs import estimate_recorded_cost_usd
 from .diffscan import DiffScanResult, scan_diff
 from .evaluator import (
+    combined_review_summary,
     hard_gate_payload,
     sim_review_summary,
     write_eval_reports,
@@ -97,6 +98,12 @@ class Orchestrator:
         # origin && git remote add origin <fork>` swap (which deletes
         # `refs/remotes/origin/<base>`).
         self._base_sha: str = ""
+        # Last-round per-reviewer verdicts. Stashed by _run_review so
+        # _write_eval can build the structured `sim_review` payload
+        # (sim / extra / merged_verdict / cross_family_agreement) without
+        # threading a wider return type through the publication-gate path.
+        self._last_sim_parsed: ParsedVerdict | None = None
+        self._last_extra_parsed: ParsedVerdict | None = None
 
     @property
     def _diff_base(self) -> str:
@@ -361,36 +368,108 @@ class Orchestrator:
         diff_file = self.paths.run_dir / f"review_diff_round{review_round}.diff"
         write_review_diff(worktree_git, self._diff_base, diff_file)
 
+        sim_parsed = self._run_one_reviewer(
+            actor=actor,
+            diff_file=diff_file,
+            settled_file=settled_file,
+            review_round=review_round,
+            reviewer_id="sim",
+            model_override=None,
+            scenario=self.config.sim_scenario,
+        )
+        if sim_parsed is None:
+            return None
+        self._record_review_cycle(review_round, current_hash, sim_parsed, reviewer="sim")
+        self._last_sim_parsed = sim_parsed
+        self._last_extra_parsed = None
+
+        extra_parsed: ParsedVerdict | None = None
+        if self.config.extra_reviewer_model:
+            try:
+                extra_parsed = self._run_one_reviewer(
+                    actor=actor,
+                    diff_file=diff_file,
+                    settled_file=settled_file,
+                    review_round=review_round,
+                    reviewer_id="extra",
+                    model_override=self.config.extra_reviewer_model,
+                    scenario=self.config.extra_reviewer_scenario,
+                )
+                unavailable_reason = (
+                    None if extra_parsed is not None else "malformed_verdict_exhausted"
+                )
+            except ActorError as exc:
+                extra_parsed = None
+                unavailable_reason = f"actor_error: {exc}"
+            if extra_parsed is None:
+                self._record_extra_reviewer_unavailable(
+                    review_round=review_round,
+                    reason=unavailable_reason or "unknown",
+                )
+            else:
+                self._record_review_cycle(
+                    review_round, current_hash, extra_parsed, reviewer="extra"
+                )
+                self._last_extra_parsed = extra_parsed
+
+        merged = _merge_verdicts(sim_parsed, extra_parsed)
+        return merged, current_hash
+
+    def _run_one_reviewer(
+        self,
+        *,
+        actor: ActorRunner,
+        diff_file: Path,
+        settled_file: Path,
+        review_round: int,
+        reviewer_id: str,
+        model_override: str | None,
+        scenario: str,
+    ) -> ParsedVerdict | None:
+        """Run one reviewer (SIM or extra) through the malformed-verdict retry loop.
+
+        Caller distinguishes reviewer-specific failure handling: the primary
+        SIM going None terminates the review, but a None extra reviewer
+        downgrades to single-SIM for that round.
+        """
+
         parsed: ParsedVerdict | None = None
-        last_error: str | None = None
         for attempt in range(1, self.config.caps.malformed_verdict_retries + 2):
             self._before_turn()
             output = actor.sim_review(
                 diff_file=diff_file,
                 settled_file=settled_file,
-                scenario=self.config.sim_scenario,
+                scenario=scenario,
                 attempt=attempt,
+                reviewer_id=reviewer_id,
+                model_override=model_override,
             )
-            raw = output.text
             try:
-                parsed = parse_sim_verdict(raw)
+                parsed = parse_sim_verdict(output.text)
                 break
             except VerdictParseError as exc:
-                last_error = str(exc)
                 self._emit(
                     events.MALFORMED_VERDICT,
                     round=review_round,
                     attempt=attempt,
-                    error=last_error,
+                    reviewer=reviewer_id,
+                    error=str(exc),
                 )
+        return parsed
 
-        if parsed is None:
-            return None
-
+    def _record_review_cycle(
+        self,
+        review_round: int,
+        current_hash: str,
+        parsed: ParsedVerdict,
+        *,
+        reviewer: str,
+    ) -> None:
         append_jsonl(
             self.paths.review_cycles,
             {
                 "round": review_round,
+                "reviewer": reviewer,
                 "diff_hash": current_hash,
                 "verdict": parsed.verdict.value,
                 "confidence": parsed.confidence,
@@ -402,12 +481,46 @@ class Orchestrator:
         self._emit(
             events.REVIEW_VERDICT,
             round=review_round,
+            reviewer=reviewer,
             verdict=parsed.verdict.value,
             confidence=parsed.confidence,
             summary=parsed.summary[:200] if parsed.summary else "",
             required_changes=len(parsed.required_changes),
         )
-        return parsed, current_hash
+
+    def _record_extra_reviewer_unavailable(
+        self,
+        *,
+        review_round: int,
+        reason: str,
+    ) -> None:
+        """Note an extra-reviewer dropout for this round.
+
+        Writes both an `unavailable` row to review_cycles.jsonl (so TUI / lede
+        can render a dot rather than ✓✓/✓✗) and a recovery event mirrored to
+        guardrail_events.jsonl. Does NOT terminate the run — single-SIM
+        verdict drives the round.
+        """
+
+        append_jsonl(
+            self.paths.review_cycles,
+            {
+                "round": review_round,
+                "reviewer": "extra",
+                "unavailable": True,
+                "reason": reason,
+            },
+        )
+        record = {
+            "kind": events.EXTRA_REVIEWER_UNAVAILABLE,
+            "round": review_round,
+            "reason": reason,
+        }
+        append_jsonl(self.paths.recoveries, record)
+        append_jsonl(
+            self.paths.guardrail_events,
+            {"event": f"recovery_{events.EXTRA_REVIEWER_UNAVAILABLE}", **record},
+        )
 
     # ----- publication gate -----
 
@@ -613,13 +726,30 @@ class Orchestrator:
         sim_verdict: ParsedVerdict | None,
         reason: str,
     ) -> None:
-        if sim_verdict is not None:
-            sim_review = sim_review_summary(
-                verdict=sim_verdict.verdict.value,
-                confidence=sim_verdict.confidence,
-                summary=sim_verdict.summary,
-                required_changes=sim_verdict.required_changes,
-                checks_performed=sim_verdict.checks_performed,
+        # `sim_verdict` is the *merged* verdict that drove publication (or
+        # was the last seen before a terminal-no-pr). Per-reviewer breakdown
+        # comes from `_last_sim_parsed` / `_last_extra_parsed`, set by
+        # `_run_review` on each round.
+        extra_attempted = self.config.extra_reviewer_model is not None
+        sim_parsed = self._last_sim_parsed
+        extra_parsed = self._last_extra_parsed
+        if sim_verdict is not None and sim_parsed is not None:
+            sim_review = combined_review_summary(
+                sim=sim_parsed,
+                extra=extra_parsed,
+                merged=sim_verdict,
+                extra_attempted=extra_attempted,
+            )
+        elif sim_verdict is not None:
+            # Defensive: sim_verdict present but per-reviewer state was not
+            # captured (e.g. test path that constructs verdicts without
+            # going through _run_review). Use the merged verdict as the SIM
+            # stand-in so the payload is consistent.
+            sim_review = combined_review_summary(
+                sim=sim_verdict,
+                extra=extra_parsed,
+                merged=sim_verdict,
+                extra_attempted=extra_attempted,
             )
         else:
             sim_review = sim_review_summary(
@@ -830,6 +960,7 @@ class Orchestrator:
                 "duration_seconds": round(time.monotonic() - self.started, 3),
                 "agent_model": self.config.agent_model,
                 "sim_model": self.config.sim_model,
+                "extra_reviewer_model": self.config.extra_reviewer_model,
                 "actor_mode": self.config.actor_mode.value,
                 "publish_mode": self.config.publish_mode.value,
                 "recorded_cost_usd": estimate_recorded_cost_usd(self.paths.raw_export, self.paths.sim_raw_export),
@@ -1023,6 +1154,70 @@ def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
         title = fallback_title
     body = f"{text}\n\n---\nRun: {run_id}\n"
     return title, body
+
+
+_VERDICT_SEVERITY = {
+    ReviewVerdict.APPROVED: 0,
+    ReviewVerdict.CHANGES_REQUESTED: 1,
+    ReviewVerdict.NEEDS_HUMAN: 2,
+}
+
+
+def _merge_verdicts(
+    sim: ParsedVerdict,
+    extra: ParsedVerdict | None,
+) -> ParsedVerdict:
+    """Combine SIM and extra-reviewer verdicts with strict severity priority.
+
+    NEEDS_HUMAN > CHANGES_REQUESTED > APPROVED. The worst verdict wins, so
+    one reviewer flagging NEEDS_HUMAN can't be overridden by the other's
+    APPROVED. When both flag CHANGES_REQUESTED, required_changes are merged
+    with [SIM]/[EXTRA] tags (overlapping items tagged [SIM+EXTRA]).
+    """
+
+    if extra is None:
+        return sim
+
+    if _VERDICT_SEVERITY[extra.verdict] > _VERDICT_SEVERITY[sim.verdict]:
+        merged_verdict = extra.verdict
+    else:
+        merged_verdict = sim.verdict
+
+    def _norm(s: str) -> str:
+        return s.strip().casefold()
+
+    sim_norms = {_norm(c) for c in sim.required_changes}
+    extra_norms = {_norm(c) for c in extra.required_changes}
+    overlap_norms = sim_norms & extra_norms
+
+    merged_required: list[str] = []
+    seen: set[str] = set()
+    for change in sim.required_changes:
+        norm = _norm(change)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        tag = "[SIM+EXTRA]" if norm in overlap_norms else "[SIM]"
+        merged_required.append(f"{tag} {change}")
+    for change in extra.required_changes:
+        norm = _norm(change)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        merged_required.append(f"[EXTRA] {change}")
+
+    merged_checks = list(dict.fromkeys(sim.checks_performed + extra.checks_performed))
+    merged_summary = f"{sim.summary}\n— EXTRA: {extra.summary}"
+    merged_confidence = min(sim.confidence, extra.confidence)
+
+    return ParsedVerdict(
+        verdict=merged_verdict,
+        confidence=merged_confidence,
+        required_changes=merged_required,
+        checks_performed=merged_checks,
+        summary=merged_summary,
+        raw=sim.raw,
+    )
 
 
 def run(config: RunConfig) -> RunResult:
