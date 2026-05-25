@@ -8,8 +8,8 @@ Return **strict JSON only** — no markdown fences, no prose before or after —
 
 - `verdict`: one of `APPROVED`, `CHANGES_REQUESTED`, `NEEDS_HUMAN`.
 - `confidence`: number in `[0.0, 1.0]`.
-- `required_changes`: list of strings. Empty when `APPROVED`; otherwise specific, file-citing, addressable items.
-- `checks_performed`: list of strings naming what you actually verified.
+- `required_changes`: list of strings. Empty when `APPROVED`; otherwise each entry cites the file and names the SETTLED clause (or forbidden-path rule) it violates. Don't prescribe a fix — the next agent turn re-derives that from SETTLED.
+- `checks_performed`: list of strings naming what you actually verified. Each entry should trace back to a `grep` or `read` you ran this pass.
 - `summary`: non-empty string.
 
 ## When to use each verdict
@@ -22,12 +22,23 @@ Return **strict JSON only** — no markdown fences, no prose before or after —
 
 ## Approval criteria (skill vocabulary)
 
-- The diff faithfully implements `SETTLED_DESIGN.md` — the seam shape, what sits behind it, the PR sequence.
-- Shallow modules that SETTLED said would be deleted or replaced are gone, not just supplemented. (One adapter = hypothetical seam; if SETTLED promised real depth, look for the actual deletion of the shallow path.)
-- No new abstractions appear that aren't in SETTLED.
-- Constraints raised during grilling and reflected in SETTLED are honored.
-- No drift into unrelated changes.
-- No forbidden paths touched (see below).
+Check in this order — SETTLED faithfulness first, hygiene last. Walk all of them unless you find a blocker.
+
+1. The diff faithfully implements `SETTLED_DESIGN.md` — the seam shape, what sits behind it, the PR sequence.
+2. Shallow modules that SETTLED said would be deleted or replaced are gone, not just supplemented. (One adapter = hypothetical seam; if SETTLED promised real depth, look for the actual deletion of the shallow path.)
+3. No new abstractions appear that aren't in SETTLED.
+4. Constraints raised during grilling and reflected in SETTLED are honored.
+5. No drift into unrelated changes.
+6. No forbidden paths touched (see below).
+
+## Before emitting APPROVED
+
+For each SETTLED-promised deletion or seam shape, run a `grep` to confirm the diff matches and cite that check in `checks_performed`. APPROVED without grep-grounded checks is a guess, not approval.
+
+## Anti-patterns
+
+- Rejecting on issues SETTLED didn't promise to address — your scope is SETTLED faithfulness, not codebase hygiene at large.
+- `checks_performed` entries that weren't actually grep- or read-grounded. Every entry should map to a tool call from this pass.
 
 ## Forbidden paths
 
