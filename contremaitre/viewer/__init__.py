@@ -37,12 +37,26 @@ def build_viewer(paths: RunPaths) -> Path:
     Returns the written path. Raises if `stats.json` is missing — every
     finished run writes one in the orchestrator's `_write_final_stats`,
     so its absence means the run never reached a terminal state.
+
+    Side effect: also refreshes `<runs_root>/index.html` so the index
+    auto-updates whenever a run finalizes. Index failures are swallowed
+    — the per-run viewer is the load-bearing artifact; the index is
+    observability one level up.
     """
 
     data = _assemble_data(paths)
     html = _render_html(data, run_id=paths.run_id)
     out = paths.run_dir / VIEWER_FILENAME
     out.write_text(html, encoding="utf-8")
+
+    # Lazy import — index.py imports VIEWER_FILENAME from this module, so a
+    # top-level import here would be circular.
+    try:
+        from .index import build_index
+        build_index(paths.run_dir.parent)
+    except Exception:
+        pass
+
     return out
 
 

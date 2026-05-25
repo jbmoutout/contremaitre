@@ -21,6 +21,7 @@ from .paths import slugify
 from .preflight import run_preflight
 from .runtime_image import list_deps_volumes
 from .viewer import VIEWER_FILENAME, build_viewer
+from .viewer.index import INDEX_FILENAME, build_index
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -290,6 +291,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Open the rebuilt viewer in the default browser",
     )
     viewer_p.set_defaults(func=_viewer_cmd)
+
+    index_p = sub.add_parser(
+        "index",
+        help=f"Build {INDEX_FILENAME} listing every run under a runs root",
+    )
+    index_p.add_argument(
+        "runs_root",
+        nargs="?",
+        type=Path,
+        default=Path(".contremaitre/runs"),
+        help="Runs root containing per-run directories (default: .contremaitre/runs)",
+    )
+    index_p.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the index in the default browser",
+    )
+    index_p.set_defaults(func=_index_cmd)
 
     return parser
 
@@ -1159,6 +1178,23 @@ def _viewer_cmd(args: argparse.Namespace) -> int:
         return 1
 
     out = build_viewer(paths)
+    print(f"wrote {out}")
+
+    if args.open:
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        subprocess.run([opener, str(out)], check=False)
+    return 0
+
+
+def _index_cmd(args: argparse.Namespace) -> int:
+    """Build an index.html listing every run under a runs root."""
+
+    runs_root: Path = args.runs_root.resolve()
+    if not runs_root.is_dir():
+        print(f"contremaitre index: not a directory: {runs_root}", file=sys.stderr)
+        return 1
+
+    out = build_index(runs_root)
     print(f"wrote {out}")
 
     if args.open:
