@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..jsonlog import read_json, read_jsonl
 from ..models import RunPaths
 
 _HERE = Path(__file__).resolve().parent
@@ -64,10 +65,10 @@ def build_viewer(paths: RunPaths) -> Path:
 
 
 def _assemble_data(paths: RunPaths) -> dict[str, Any]:
-    stats_raw = _read_json(paths.stats, default={})
-    agent_events = _read_jsonl(paths.raw_export)
-    sim_events = _read_jsonl(paths.sim_raw_export)
-    extra_reviewer_events = _read_jsonl(paths.extra_reviewer_raw_export)
+    stats_raw = read_json(paths.stats, default={})
+    agent_events = read_jsonl(paths.raw_export)
+    sim_events = read_jsonl(paths.sim_raw_export)
+    extra_reviewer_events = read_jsonl(paths.extra_reviewer_raw_export)
     extra_reviewer_enabled = bool(extra_reviewer_events) or bool(stats_raw.get("extra_reviewer_model"))
 
     agent_summary = _summarize_events(agent_events)
@@ -92,18 +93,18 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     sub_agents = _read_dir(paths.subagents_dir, suffix=".md")
     extracted_files = _read_dir(paths.extracted_files_dir)
 
-    pr = _read_json(paths.pr_json, default=None)
+    pr = read_json(paths.pr_json, default=None)
 
     eval_blob: dict[str, Any] = {}
     for src in (paths.cost_report, paths.preflight_report, paths.checks_report,
                 paths.pr_eval, paths.settled_diff_report,
                 paths.architecture_delta_report, paths.trajectory_report):
-        loaded = _read_json(src, default=None)
+        loaded = read_json(src, default=None)
         if loaded is not None:
             eval_blob[src.stem] = loaded
 
-    guardrails = _read_jsonl(paths.guardrail_events)
-    recoveries = _read_jsonl(paths.recoveries)
+    guardrails = read_jsonl(paths.guardrail_events)
+    recoveries = read_jsonl(paths.recoveries)
 
     stats = {
         **stats_raw,
@@ -400,30 +401,7 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _read_json(path: Path, *, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
 
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
 
 
 # ----- HTML assembly -----
