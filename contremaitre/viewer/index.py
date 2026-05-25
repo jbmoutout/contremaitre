@@ -8,7 +8,9 @@ viewer. Reuses `_styles.css` so the index inherits the viewer's look.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ..jsonlog import read_json
 from . import VIEWER_FILENAME
