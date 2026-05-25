@@ -60,6 +60,17 @@ class DepsVolume:
     mount_path: str
     runtime_env: tuple[tuple[str, str], ...] = ()
 
+    def to_docker_args(self, mode: str = "rw") -> list[str]:
+        """Return docker CLI args to mount this volume and set its runtime env.
+
+        Produces `["-v", "name:/app/mount_path:{mode}", "-e", "KEY=val", …]`.
+        """
+        args: list[str] = []
+        args.extend(["-v", f"{self.name}:/app/{self.mount_path}:{mode}"])
+        for key, value in self.runtime_env:
+            args.extend(["-e", f"{key}={value}"])
+        return args
+
 
 @dataclass(frozen=True)
 class Caps:
@@ -160,6 +171,15 @@ class ParsedVerdict:
     checks_performed: list[str]
     summary: str
     raw: str
+
+
+def container_labels(run_id: str, role: str) -> list[str]:
+    """Return docker CLI `--label` args for contremaitre run tracking.
+
+    Produces `["--label", "contremaitre.run-id=<run_id>", "--label",
+    "contremaitre.role=<role>"]`.
+    """
+    return ["--label", f"contremaitre.run-id={run_id}", "--label", f"contremaitre.role={role}"]
 
 
 @dataclass(frozen=True)
