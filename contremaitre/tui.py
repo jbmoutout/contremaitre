@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .jsonlog import read_jsonl
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
 
@@ -72,24 +73,7 @@ DOCKER_REFRESH_S = 2.0
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    out: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
+    return read_jsonl(path)
 
 
 def _file_age(path: Path | None) -> float | None:

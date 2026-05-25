@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..jsonlog import read_jsonl
 from ..models import RunPaths
 
 _HERE = Path(__file__).resolve().parent
@@ -396,20 +397,7 @@ def _read_json(path: Path, *, default: Any) -> Any:
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
+    return read_jsonl(path)
 
 
 # ----- HTML assembly -----
