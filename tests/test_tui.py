@@ -20,20 +20,30 @@ import pytest
 from contremaitre import events
 from contremaitre.tui import (
     _activity_state,
+    _architecture_review_in,
     _build_event_row,
+    _current_phase_label,
+    _current_review_round,
+    _derive_phase,
     _fmt_elapsed,
     _impl_complete_in,
     _is_free_model,
     _latest_pending_tool,
+    _persistent_review_token,
+    _phase_trail,
+    _pr_number_from_url,
     _read_jsonl,
     _render_guardrail,
-    _review_summary,
-    _settled_in,
+    _reviewer_glyph,
+    _reviewer_status,
+    _round_verdicts,
     _self_verified_in,
-    _state_breadcrumb,
+    _settled_in,
     _task_count,
-    _tests_summary,
+    _terminal_badge,
     _text_event_count,
+    _verdict_glyph,
+    _warnings_token,
 )
 
 
@@ -136,112 +146,767 @@ def test_is_free_model_paid():
     assert not _is_free_model("openrouter/anthropic/claude-3-5-sonnet")
 
 
-# ===== _state_breadcrumb =====
-# These tests verify the TUI's event-string contract: if events.py renames
-# a constant and dump() changes the serialized string, breadcrumb logic
-# silently regresses. Tests use the constants as ground truth.
+# ===== _derive_phase =====
+# Verifies the 6-phase pipeline derivation: init → exploring → grilling →
+# implementing → reviewing → done. Exploring → Grilling fires on EITHER
+# architecture-review.html being written OR the SIM joining the conversation.
+# color_state reflects live / ok / warn / error.
 
 
-def test_breadcrumb_init_with_no_events():
-    text = _state_breadcrumb([], terminal_stats=None)
-    plain = text.plain
-    assert "INIT" in plain
-    assert "WORK" in plain
+def test_derive_phase_init_when_nothing_started():
+    phase, color = _derive_phase(
+        terminal=False, terminal_verdict=None, settled=False, impl_complete=False, agent_started=False
+    )
+    assert phase == "init"
+    assert color == "live"
 
 
-def test_breadcrumb_advances_to_work_on_agent_start():
-    guardrails = [_actor_start("agent")]
-    text = _state_breadcrumb(guardrails, terminal_stats=None)
-    plain = text.plain
-    assert "INIT" in plain and "WORK" in plain
+def test_derive_phase_exploring_after_agent_start_pre_cards():
+    # Agent started but no architecture-review.html yet and SIM hasn't joined —
+    # this is the pre-cards reading-the-codebase phase.
+    phase, color = _derive_phase(
+        terminal=False,
+        terminal_verdict=None,
+        settled=False,
+        impl_complete=False,
+        agent_started=True,
+        architecture_review_done=False,
+        sim_started=False,
+    )
+    assert phase == "exploring"
+    assert color == "live"
 
 
-def test_breadcrumb_advances_to_review_on_review_start():
-    guardrails = [_actor_start("agent"), _actor_start("review")]
-    text = _state_breadcrumb(guardrails, terminal_stats=None)
-    assert "REVIEW" in text.plain
+def test_derive_phase_grilling_after_architecture_review_written():
+    phase, _ = _derive_phase(
+        terminal=False,
+        terminal_verdict=None,
+        settled=False,
+        impl_complete=False,
+        agent_started=True,
+        architecture_review_done=True,
+        sim_started=False,
+    )
+    assert phase == "grilling"
 
 
-def test_breadcrumb_advances_to_published():
-    guardrails = [
-        _actor_start("agent"),
-        _actor_start("review"),
-        _g(events.PUBLISHED),
-    ]
-    text = _state_breadcrumb(guardrails, terminal_stats=None)
-    assert "PUBLISHED" in text.plain
+def test_derive_phase_grilling_when_sim_joins_without_cards():
+    # Fallback: agent skipped writing the cards file, but SIM has joined.
+    # We still advance to grilling — SIM joining is the more robust signal.
+    phase, _ = _derive_phase(
+        terminal=False,
+        terminal_verdict=None,
+        settled=False,
+        impl_complete=False,
+        agent_started=True,
+        architecture_review_done=False,
+        sim_started=True,
+    )
+    assert phase == "grilling"
 
 
-def test_breadcrumb_shows_blocked_on_publication_blocked():
-    guardrails = [
-        _actor_start("agent"),
-        _g(events.PUBLICATION_BLOCKED),
-    ]
-    text = _state_breadcrumb(guardrails, terminal_stats=None)
-    assert "BLOCKED" in text.plain
+def test_derive_phase_implementing_after_settled():
+    phase, _ = _derive_phase(
+        terminal=False,
+        terminal_verdict=None,
+        settled=True,
+        impl_complete=False,
+        agent_started=True,
+        architecture_review_done=True,
+        sim_started=True,
+    )
+    assert phase == "implementing"
 
 
-def test_breadcrumb_shows_failed_on_infra_failure():
-    guardrails = [_g(events.INFRA_FAILURE)]
-    text = _state_breadcrumb(guardrails, terminal_stats=None)
-    assert "FAILED" in text.plain
+def test_derive_phase_reviewing_only_after_review_actor_start():
+    # Gating Implementing → Reviewing on review_started (NOT impl_complete)
+    # so the brief window where the agent has written IMPLEMENTATION_COMPLETE
+    # but the review container hasn't started yet stays in implementing.
+    phase, _ = _derive_phase(
+        terminal=False,
+        terminal_verdict=None,
+        settled=True,
+        impl_complete=True,
+        agent_started=True,
+        architecture_review_done=True,
+        sim_started=True,
+        review_started=True,
+    )
+    assert phase == "reviewing"
 
 
-# ===== _review_summary =====
+def test_derive_phase_stays_in_implementing_after_impl_complete_pre_review():
+    # IMPL_COMPLETE marker written but `role=review` actor hasn't started.
+    # Trail stays at implementing; the label surfaces "awaiting review".
+    phase, _ = _derive_phase(
+        terminal=False,
+        terminal_verdict=None,
+        settled=True,
+        impl_complete=True,
+        agent_started=True,
+        architecture_review_done=True,
+        sim_started=True,
+        review_started=False,
+    )
+    assert phase == "implementing"
 
 
-def test_review_summary_empty():
-    assert _review_summary([]) is None
+def test_derive_phase_done_ok_for_ready_for_draft_pr():
+    phase, color = _derive_phase(
+        terminal=True,
+        terminal_verdict="READY_FOR_DRAFT_PR",
+        settled=True,
+        impl_complete=True,
+        agent_started=True,
+    )
+    assert phase == "done"
+    assert color == "ok"
 
 
-def test_review_summary_approved():
-    cycles = [{"round": 1, "verdict": "APPROVED"}]
-    text = _review_summary(cycles)
-    assert text is not None
-    assert "R 1" in text.plain
-    assert "✓" in text.plain
+def test_derive_phase_done_warn_for_no_pr_variants():
+    for verdict in ("NO_PR_CHANGES_REQUESTED", "NO_PR_NEEDS_HUMAN"):
+        phase, color = _derive_phase(
+            terminal=True,
+            terminal_verdict=verdict,
+            settled=True,
+            impl_complete=True,
+            agent_started=True,
+        )
+        assert phase == "done", verdict
+        assert color == "warn", verdict
 
 
-def test_review_summary_changes_requested():
-    cycles = [{"round": 2, "verdict": "CHANGES_REQUESTED"}]
-    text = _review_summary(cycles)
-    assert text is not None
-    assert "R 2" in text.plain
-    assert "✗" in text.plain
+def test_derive_phase_failed_freezes_at_implementing():
+    # FAILED_INFRA during implementing — trail should stay at implementing
+    # so the operator sees where the run died, not advance to "done".
+    phase, color = _derive_phase(
+        terminal=True,
+        terminal_verdict="FAILED_INFRA",
+        settled=True,
+        impl_complete=False,
+        agent_started=True,
+        architecture_review_done=True,
+        sim_started=True,
+    )
+    assert phase == "implementing"
+    assert color == "error"
 
 
-def test_review_summary_uses_last_row():
+def test_derive_phase_failed_freezes_at_reviewing_when_review_started():
+    phase, color = _derive_phase(
+        terminal=True,
+        terminal_verdict="FAILED_INFRA",
+        settled=True,
+        impl_complete=True,
+        agent_started=True,
+        architecture_review_done=True,
+        sim_started=True,
+        review_started=True,
+    )
+    assert phase == "reviewing"
+    assert color == "error"
+
+
+def test_derive_phase_failed_freezes_at_exploring():
+    # Run died very early — before cards were written and before SIM joined.
+    phase, color = _derive_phase(
+        terminal=True,
+        terminal_verdict="FAILED_INFRA",
+        settled=False,
+        impl_complete=False,
+        agent_started=True,
+        architecture_review_done=False,
+        sim_started=False,
+    )
+    assert phase == "exploring"
+    assert color == "error"
+
+
+# ===== _phase_trail =====
+
+
+def test_phase_trail_has_six_dots():
+    text = _phase_trail("implementing", "live")
+    dots = [c for c in text.plain if c in "●○"]
+    assert len(dots) == 6
+
+
+def test_phase_trail_marks_past_dots_filled():
+    # implementing (index 3) means init + exploring + grilling are past.
+    text = _phase_trail("implementing", "live")
+    assert text.plain.startswith("●─●─●─")
+
+
+def test_phase_trail_no_half_glyph_in_live_state():
+    # Half-fill `◐` removed — most fonts render it at a different baseline
+    # than `●`, which makes the trail look misaligned. Current dot is
+    # distinguished by colour + bold, not by a different glyph.
+    text = _phase_trail("grilling", "live")
+    assert "◐" not in text.plain
+
+
+def test_phase_trail_all_filled_at_terminal_done():
+    text = _phase_trail("done", "ok")
+    assert text.plain.count("●") == 6
+
+
+# ===== _verdict_glyph =====
+
+
+def test_verdict_glyph_approved():
+    g, _ = _verdict_glyph("APPROVED")
+    assert g == "✓"
+
+
+def test_verdict_glyph_changes_requested():
+    g, _ = _verdict_glyph("CHANGES_REQUESTED")
+    assert g == "✗"
+
+
+def test_verdict_glyph_needs_human():
+    g, _ = _verdict_glyph("NEEDS_HUMAN")
+    assert g == "?"
+
+
+def test_verdict_glyph_unknown_or_none():
+    g, _ = _verdict_glyph(None)
+    assert g == "·"
+
+
+# ===== _round_verdicts =====
+
+
+def test_round_verdicts_returns_none_for_missing_round():
+    sim, extra = _round_verdicts([{"round": 1, "verdict": "APPROVED"}], 2)
+    assert sim is None
+    assert extra is None
+
+
+def test_round_verdicts_picks_sim_only():
+    cycles = [{"round": 1, "verdict": "APPROVED"}]  # default reviewer = sim
+    sim, extra = _round_verdicts(cycles, 1)
+    assert sim == "APPROVED"
+    assert extra is None
+
+
+def test_round_verdicts_picks_both_reviewers():
     cycles = [
-        {"round": 1, "verdict": "CHANGES_REQUESTED"},
-        {"round": 2, "verdict": "APPROVED"},
+        {"round": 1, "verdict": "APPROVED", "reviewer": "sim"},
+        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
     ]
-    text = _review_summary(cycles)
-    assert text is not None
-    assert "R 2" in text.plain
+    sim, extra = _round_verdicts(cycles, 1)
+    assert sim == "APPROVED"
+    assert extra == "CHANGES_REQUESTED"
+
+
+def test_round_verdicts_skips_unavailable_entries():
+    cycles = [
+        {"round": 1, "verdict": "APPROVED", "reviewer": "sim", "unavailable": True},
+    ]
+    sim, extra = _round_verdicts(cycles, 1)
+    assert sim is None
+
+
+# ===== _current_review_round =====
+
+
+def test_current_review_round_zero_when_no_starts():
+    assert _current_review_round([]) == 0
+
+
+def test_current_review_round_counts_only_sim_review_starts():
+    # Extra-reviewer actor_starts should NOT bump the round count —
+    # they're the second reviewer within an already-opened round.
+    guardrails = [
+        _g(events.OPENCODE_ACTOR_START, role="agent"),
+        _g(events.OPENCODE_ACTOR_START, role="sim"),
+        _g(events.OPENCODE_ACTOR_START, role="review"),
+        _g(events.OPENCODE_ACTOR_START, role="review", reviewer_id="extra"),
+    ]
+    assert _current_review_round(guardrails) == 1
+
+
+def test_current_review_round_advances_per_loop_back():
+    guardrails = [
+        _g(events.OPENCODE_ACTOR_START, role="review"),
+        _g(events.OPENCODE_ACTOR_START, role="review", reviewer_id="extra"),
+        _g(events.OPENCODE_ACTOR_START, role="agent"),
+        _g(events.OPENCODE_ACTOR_START, role="review"),
+        _g(events.OPENCODE_ACTOR_START, role="review", reviewer_id="extra"),
+        _g(events.OPENCODE_ACTOR_START, role="agent"),
+        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 3 just opened
+    ]
+    assert _current_review_round(guardrails) == 3
+
+
+# ===== _reviewer_status =====
+
+
+def test_reviewer_status_idle_when_no_start():
+    assert (
+        _reviewer_status(
+            round_n=1, review_cycles=[], guardrails=[], is_extra=False
+        )
+        == "idle"
+    )
+
+
+def test_reviewer_status_streaming_when_started_no_verdict():
+    guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
+    assert (
+        _reviewer_status(
+            round_n=1, review_cycles=[], guardrails=guardrails, is_extra=False
+        )
+        == "streaming"
+    )
+
+
+def test_reviewer_status_approved():
+    cycles = [{"round": 1, "verdict": "APPROVED", "reviewer": "sim"}]
+    guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
+    assert (
+        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails, is_extra=False)
+        == "approved"
+    )
+
+
+def test_reviewer_status_changes_req():
+    cycles = [{"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"}]
+    assert (
+        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[], is_extra=False)
+        == "changes_req"
+    )
+
+
+def test_reviewer_status_needs_human():
+    cycles = [{"round": 1, "verdict": "NEEDS_HUMAN", "reviewer": "sim"}]
+    assert (
+        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[], is_extra=False)
+        == "needs_human"
+    )
+
+
+def test_reviewer_status_unavailable():
+    cycles = [{"round": 1, "reviewer": "sim", "unavailable": True}]
+    assert (
+        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[], is_extra=False)
+        == "unavailable"
+    )
+
+
+def test_reviewer_status_extra_isolated_from_sim():
+    # SIM has a verdict; extra hasn't started yet for this round.
+    cycles = [{"round": 1, "verdict": "APPROVED", "reviewer": "sim"}]
+    guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
+    assert (
+        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails, is_extra=True)
+        == "idle"
+    )
+
+
+def test_reviewer_status_per_round_independence():
+    # Round 1 fully done (both verdicts present), round 2 SIM streaming.
+    cycles = [
+        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"},
+        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
+    ]
+    guardrails = [
+        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 1 sim
+        _g(events.OPENCODE_ACTOR_START, role="review", reviewer_id="extra"),  # round 1 extra
+        _g(events.OPENCODE_ACTOR_START, role="agent"),  # work loop
+        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 2 sim — streaming
+    ]
+    assert (
+        _reviewer_status(round_n=2, review_cycles=cycles, guardrails=guardrails, is_extra=False)
+        == "streaming"
+    )
+    assert (
+        _reviewer_status(round_n=2, review_cycles=cycles, guardrails=guardrails, is_extra=True)
+        == "idle"
+    )
+    # Round 1 verdicts are still recoverable for the persistent token /
+    # warnings logic to inspect prior rounds.
+    assert (
+        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails, is_extra=False)
+        == "changes_req"
+    )
+
+
+# ===== _reviewer_glyph =====
+
+
+def test_reviewer_glyph_streaming():
+    g, _ = _reviewer_glyph("streaming")
+    assert g == "⏵"
+
+
+def test_reviewer_glyph_approved():
+    g, _ = _reviewer_glyph("approved")
+    assert g == "✓"
+
+
+def test_reviewer_glyph_changes_req():
+    g, _ = _reviewer_glyph("changes_req")
+    assert g == "✗"
+
+
+def test_reviewer_glyph_idle_is_dot():
+    g, _ = _reviewer_glyph("idle")
+    assert g == "·"
+
+
+# ===== _current_phase_label =====
+
+
+def _default_label_kwargs(**overrides):
+    base = dict(
+        phase="grilling",
+        color_state="live",
+        grilling_exchanges=0,
+        impl_turns=0,
+        self_verified=False,
+        impl_complete=False,
+        review_cycles=[],
+        terminal_verdict=None,
+        pr_number=None,
+        current_review_round=0,
+        sim_review_status="idle",
+        extra_review_status="idle",
+        extra_enabled=False,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_phase_label_init():
+    text = _current_phase_label(**_default_label_kwargs(phase="init"))
+    assert "Init" in text.plain
+
+
+def test_phase_label_exploring():
+    text = _current_phase_label(**_default_label_kwargs(phase="exploring"))
+    assert "Exploring" in text.plain
+
+
+def test_phase_label_exploring_error_state_shows_infra_failure():
+    text = _current_phase_label(
+        **_default_label_kwargs(phase="exploring", color_state="error")
+    )
+    assert "infra failure" in text.plain
+
+
+def test_phase_label_grilling_shows_exchange_count():
+    text = _current_phase_label(**_default_label_kwargs(phase="grilling", grilling_exchanges=3))
+    assert "Grilling" in text.plain
+    assert "3" in text.plain
+
+
+def test_phase_label_implementing_shows_turn_and_tested():
+    text = _current_phase_label(
+        **_default_label_kwargs(phase="implementing", impl_turns=5, self_verified=True)
+    )
+    assert "Implementing" in text.plain
+    assert "5" in text.plain
+    assert "tested" in text.plain
     assert "✓" in text.plain
 
 
-# ===== _tests_summary =====
+def test_phase_label_implementing_no_tested_when_not_self_verified():
+    text = _current_phase_label(
+        **_default_label_kwargs(phase="implementing", impl_turns=5, self_verified=False)
+    )
+    assert "tested" not in text.plain
 
 
-def test_tests_summary_empty():
-    assert _tests_summary([]) is None
+def test_phase_label_reviewing_shows_round_from_actor_count():
+    # Round number now derives from `current_review_round` (actor-start
+    # count), NOT from review_cycles — so it appears immediately when the
+    # round opens, not only after the first verdict lands.
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="reviewing",
+            current_review_round=1,
+            sim_review_status="streaming",
+        )
+    )
+    assert "Reviewing" in text.plain
+    assert "round 1" in text.plain
+    assert "Review" in text.plain
+    assert "⏵" in text.plain  # SIM-as-reviewer is streaming
 
 
-def test_tests_summary_all_pass():
-    runs = [{"returncode": 0}, {"returncode": 0}]
-    text = _tests_summary(runs)
-    assert text is not None
-    assert "2/2" in text.plain
+def test_phase_label_reviewing_shows_sim_verdict():
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="reviewing",
+            current_review_round=1,
+            sim_review_status="approved",
+        )
+    )
+    assert "Review " in text.plain
     assert "✓" in text.plain
+    assert "Extra Review" not in text.plain  # extra disabled, slot hidden
 
 
-def test_tests_summary_some_fail():
-    runs = [{"returncode": 0}, {"returncode": 1}]
-    text = _tests_summary(runs)
-    assert text is not None
-    assert "1/2" in text.plain
-    assert "✗" in text.plain
+def test_phase_label_reviewing_extra_slot_hidden_when_idle():
+    # extra_enabled=True but extra hasn't started this round — slot stays
+    # hidden until the extra actor's first event, so the label grows
+    # organically rather than showing a placeholder dot.
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="reviewing",
+            current_review_round=1,
+            sim_review_status="streaming",
+            extra_review_status="idle",
+            extra_enabled=True,
+        )
+    )
+    assert "Extra Review" not in text.plain
+
+
+def test_phase_label_reviewing_extra_slot_shown_when_streaming():
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="reviewing",
+            current_review_round=1,
+            sim_review_status="approved",
+            extra_review_status="streaming",
+            extra_enabled=True,
+        )
+    )
+    assert "Review " in text.plain
+    assert "Extra Review" in text.plain
+    # Both glyphs present: ✓ for sim, ⏵ for extra streaming
+    assert "✓" in text.plain
+    assert "⏵" in text.plain
+
+
+def test_phase_label_reviewing_multi_round():
+    # Round 2 in flight — label shows round 2, not 1, even though
+    # review_cycles still has round-1 verdicts recorded.
+    cycles = [
+        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"},
+        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
+    ]
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="reviewing",
+            review_cycles=cycles,
+            current_review_round=2,
+            sim_review_status="streaming",
+            extra_enabled=True,
+        )
+    )
+    assert "round 2" in text.plain
+    assert "round 1" not in text.plain
+
+
+def test_phase_label_done_pr_pushed_without_title_is_just_done():
+    # No title in pr.json → label stays just `Done`. PR # is carried by
+    # the verdict zone; putting it in the label too would be noise.
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="done", terminal_verdict="READY_FOR_DRAFT_PR", pr_number=1234
+        )
+    )
+    assert text.plain.strip() == "Done"
+    assert "1234" not in text.plain
+
+
+def test_phase_label_done_pr_pushed_with_title_appended():
+    # With a title in pr.json: label reads `Done · <title>` for context.
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="done",
+            terminal_verdict="READY_FOR_DRAFT_PR",
+            pr_number=1234,
+            pr_title="fix: refactor user auth",
+        )
+    )
+    assert "Done" in text.plain
+    assert "fix: refactor user auth" in text.plain
+    assert "1234" not in text.plain  # number still belongs to verdict zone
+
+
+def test_phase_label_done_truncates_long_pr_title():
+    long_title = "refactor: extract authentication subsystem into its own bounded context with explicit boundaries"
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="done",
+            terminal_verdict="READY_FOR_DRAFT_PR",
+            pr_title=long_title,
+        )
+    )
+    # Truncated → ends with ellipsis, doesn't carry the whole title.
+    assert "…" in text.plain
+    assert long_title not in text.plain
+
+
+def test_phase_label_implementing_awaiting_review():
+    # IMPL_COMPLETE written but review actor hasn't started — surface the wait.
+    text = _current_phase_label(
+        **_default_label_kwargs(phase="implementing", impl_complete=True, impl_turns=5)
+    )
+    assert "Implementing" in text.plain
+    assert "awaiting review" in text.plain
+
+
+def test_phase_label_done_no_pr_changes_req():
+    text = _current_phase_label(
+        **_default_label_kwargs(phase="done", terminal_verdict="NO_PR_CHANGES_REQUESTED")
+    )
+    assert "exhausted" in text.plain
+
+
+def test_phase_label_done_failed_infra():
+    text = _current_phase_label(
+        **_default_label_kwargs(phase="done", terminal_verdict="FAILED_INFRA")
+    )
+    assert "Failed" in text.plain
+
+
+def test_phase_label_implementing_error_state_shows_infra_failure():
+    # FAILED_INFRA frozen at implementing: label must say so, not just "Implementing".
+    text = _current_phase_label(
+        **_default_label_kwargs(phase="implementing", color_state="error")
+    )
+    assert "infra failure" in text.plain
+
+
+# ===== _persistent_review_token =====
+
+
+def test_persistent_review_token_none_when_no_cycles():
+    assert _persistent_review_token(phase="implementing", review_cycles=[]) is None
+
+
+def test_persistent_review_token_none_when_in_reviewing_phase():
+    cycles = [{"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"}]
+    assert _persistent_review_token(phase="reviewing", review_cycles=cycles) is None
+
+
+def test_persistent_review_token_shown_after_changes_requested_loopback():
+    cycles = [{"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"}]
+    token = _persistent_review_token(phase="implementing", review_cycles=cycles)
+    assert token is not None
+    assert "R1" in token.plain
+    assert "changes_req" in token.plain
+
+
+def test_persistent_review_token_none_when_last_round_approved():
+    # Approved → loop ends; token shouldn't show even if we're transiently
+    # back in implementing-like state (shouldn't normally happen but safe).
+    cycles = [{"round": 1, "verdict": "APPROVED", "reviewer": "sim"}]
+    assert _persistent_review_token(phase="implementing", review_cycles=cycles) is None
+
+
+# ===== _warnings_token =====
+
+
+def test_warnings_token_none_when_quiet():
+    assert (
+        _warnings_token(recoveries=[], test_runs=[], review_cycles=[], extra_enabled=False)
+        is None
+    )
+
+
+def test_warnings_token_emits_recovery_count():
+    token = _warnings_token(
+        recoveries=[{}, {}], test_runs=[], review_cycles=[], extra_enabled=False
+    )
+    assert token is not None
+    assert "↻2" in token.plain
+
+
+def test_warnings_token_emits_tests_failed():
+    token = _warnings_token(
+        recoveries=[], test_runs=[{"returncode": 1}], review_cycles=[], extra_enabled=False
+    )
+    assert token is not None
+    assert "tests ✗" in token.plain
+
+
+def test_warnings_token_tests_passing_stays_quiet():
+    # All-pass tests SHOULD NOT surface — the warnings zone is loud signals only.
+    assert (
+        _warnings_token(
+            recoveries=[],
+            test_runs=[{"returncode": 0}, {"returncode": 0}],
+            review_cycles=[],
+            extra_enabled=False,
+        )
+        is None
+    )
+
+
+def test_warnings_token_extra_disagreed():
+    cycles = [
+        {"round": 1, "verdict": "APPROVED", "reviewer": "sim"},
+        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
+    ]
+    token = _warnings_token(recoveries=[], test_runs=[], review_cycles=cycles, extra_enabled=True)
+    assert token is not None
+    assert "disagreed" in token.plain
+
+
+def test_warnings_token_extra_agreed_stays_quiet():
+    # Agreement is the happy path; nothing should appear.
+    cycles = [
+        {"round": 1, "verdict": "APPROVED", "reviewer": "sim"},
+        {"round": 1, "verdict": "APPROVED", "reviewer": "extra"},
+    ]
+    assert (
+        _warnings_token(recoveries=[], test_runs=[], review_cycles=cycles, extra_enabled=True)
+        is None
+    )
+
+
+# ===== _terminal_badge =====
+
+
+def test_terminal_badge_pr_pushed_with_number():
+    text, _ = _terminal_badge("READY_FOR_DRAFT_PR", 1234)
+    assert "PR PUSHED" in text
+    assert "1234" in text
+
+
+def test_terminal_badge_pr_pushed_no_number():
+    text, _ = _terminal_badge("READY_FOR_DRAFT_PR", None)
+    assert text == "PR PUSHED"
+
+
+def test_terminal_badge_no_pr_changes_req():
+    text, _ = _terminal_badge("NO_PR_CHANGES_REQUESTED", None)
+    assert "NO_PR" in text
+    assert "changes_req" in text
+
+
+def test_terminal_badge_no_pr_needs_human():
+    text, _ = _terminal_badge("NO_PR_NEEDS_HUMAN", None)
+    assert "needs human" in text
+
+
+def test_terminal_badge_failed_infra():
+    text, _ = _terminal_badge("FAILED_INFRA", None)
+    assert "FAILED" in text
+
+
+# ===== _pr_number_from_url =====
+
+
+def test_pr_number_from_url_github():
+    assert _pr_number_from_url("https://github.com/owner/repo/pull/42") == 42
+
+
+def test_pr_number_from_url_with_trailing_segments():
+    assert _pr_number_from_url("https://github.com/owner/repo/pull/42/files") == 42
+    assert _pr_number_from_url("https://github.com/owner/repo/pull/42?tab=foo") == 42
+
+
+def test_pr_number_from_url_none_for_garbage():
+    assert _pr_number_from_url(None) is None
+    assert _pr_number_from_url("") is None
+    assert _pr_number_from_url("https://example.com/no-pull-here") is None
 
 
 # ===== _text_event_count / _task_count =====
@@ -358,6 +1023,46 @@ def test_impl_complete_in_true_on_apply_patch():
         }
     ]
     assert _impl_complete_in(evts)
+
+
+# ===== _architecture_review_in =====
+
+
+def test_architecture_review_in_false_when_empty():
+    assert not _architecture_review_in([])
+
+
+def test_architecture_review_in_true_on_write():
+    evts = [_write_tool_event("write", "/worktree/.contremaitre/architecture-review.html")]
+    assert _architecture_review_in(evts)
+
+
+def test_architecture_review_in_true_on_apply_patch():
+    evts = [
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "apply_patch",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "patchText": (
+                            "*** Begin Patch\n"
+                            "*** Add File: .contremaitre/architecture-review.html\n"
+                            "+<html/>\n"
+                            "*** End Patch\n"
+                        )
+                    },
+                },
+            },
+        }
+    ]
+    assert _architecture_review_in(evts)
+
+
+def test_architecture_review_in_false_for_unrelated_write():
+    evts = [_write_tool_event("write", "/worktree/src/foo.py")]
+    assert not _architecture_review_in(evts)
 
 
 def test_self_verified_counts_apply_patch_as_code_edit():

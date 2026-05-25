@@ -53,6 +53,11 @@ class PublishOutcome:
     approved_diff_hash: str | None = None
     current_diff_hash: str | None = None
     dry_run: bool = True  # True for stub or for non-PUBLISHED kinds; False only when gh actually opened a PR.
+    # PR title as passed to `gh pr create --title` (or what would have been
+    # passed in stub mode). None for non-PUBLISHED outcomes. Exposed in
+    # pr.json so downstream readers (TUI footer, viewer) can render it
+    # without re-parsing SETTLED_DESIGN.md.
+    title: str | None = None
 
 
 def record_publication(paths: RunPaths, outcome: PublishOutcome) -> None:
@@ -70,6 +75,7 @@ def record_publication(paths: RunPaths, outcome: PublishOutcome) -> None:
             "reason": outcome.reason,
             "publish_mode": outcome.publish_mode.value,
             "dry_run": outcome.dry_run,
+            "title": outcome.title,
         },
     )
 
@@ -82,6 +88,9 @@ class Publisher:
 class StubPublisher(Publisher):
     def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishOutcome:
         # PUBLISHED implies the drift check passed, so approved == current.
+        # Derive title even in stub mode so pr.json carries the same shape
+        # as real publishes (and the schema lock test holds).
+        derived_title, _ = _derive_pr_metadata(paths, diff_hash)
         outcome = PublishOutcome(
             kind=PublishOutcomeKind.PUBLISHED,
             base=config.base,
@@ -92,6 +101,7 @@ class StubPublisher(Publisher):
             approved_diff_hash=diff_hash,
             current_diff_hash=diff_hash,
             dry_run=True,
+            title=config.pr_title or derived_title,
         )
         record_publication(paths, outcome)
         return outcome
@@ -109,13 +119,14 @@ class GhPublisher(Publisher):
         env = os.environ.copy()
         derived_title, derived_body = _derive_pr_metadata(paths, diff_hash)
         pr_body = _write_pr_body(paths, config, derived_body)
+        final_title = config.pr_title or derived_title
         self._run(["git", "push", "origin", f"HEAD:{branch}"], cwd=paths.worktree, paths=paths, env=env)
         cmd = [
             "gh", "pr", "create",
             "--draft",
             "--base", config.base,
             "--head", branch,
-            "--title", config.pr_title or derived_title,
+            "--title", final_title,
             "--body-file", str(pr_body),
         ]
         if config.gh_repo:
@@ -131,6 +142,7 @@ class GhPublisher(Publisher):
             approved_diff_hash=diff_hash,
             current_diff_hash=diff_hash,
             dry_run=False,
+            title=final_title,
         )
         record_publication(paths, outcome)
         return outcome

@@ -153,6 +153,7 @@ class PrJsonSchemaPerKindTest(unittest.TestCase):
         "reason",
         "publish_mode",
         "dry_run",
+        "title",
     }
 
     def test_published_has_equal_hashes(self):

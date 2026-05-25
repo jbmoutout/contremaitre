@@ -19,6 +19,52 @@ INIT  →  WORK  →  REVIEW  →  APPROVED   (PR opened)
 
 The multi-turn loop is self-contained; Contremaitre does not import any external orchestration substrate at runtime.
 
+## Detailed flow
+
+The state diagram above is the orchestrator's POV. Inside `WORK` and `REVIEW`, the agent / SIM / orchestrator interact at a finer grain. Two terms recur below:
+
+- **harness gate** — orchestrator checks for a specific marker file and fails the round if missing.
+- **convention** — expected agent behaviour, surfaced in telemetry (TUI, `eval/flow_use.json`) but not enforced.
+
+```
+INIT
+ │
+ └─ WORK session — one multi-turn opencode session (agent ↔ SIM) ────────────┐
+     │                                                                       │
+     ├─ Explore                  agent reads codebase                        │
+     ├─ architecture-review.html agent writes HTML candidate cards           │
+     │                           ├─ convention, NOT a harness gate           │
+     │                           │  (orchestrator never checks for it)       │
+     │                           └─ SIM reads it via `:ro` worktree mount    │
+     ├─ SIM pick                 SIM chooses a candidate                     │
+     │                           (implicit — no distinct orchestrator event; │
+     │                            happens inside SIM's first turn)           │
+     ├─ Grill / Deepening        agent ↔ SIM exchanges  → `grilling_exchanges`
+     ├─ SETTLED_DESIGN.md        grilling OUTPUT — **harness gate**          │
+     ├─ Implement                code edits             → `impl_turns`       │
+     ├─ tests run                convention (TUI `tested` dot;               │
+     │                           orchestrator runs `--check-cmd`s AFTER      │
+     │                           IMPLEMENTATION_COMPLETE, not here)          │
+     └─ IMPLEMENTATION_COMPLETE  marker file — **harness gate**              │
+ │
+ └─ REVIEW round N  (N = 1..max_review_rounds) ──────────────────────────────┐
+     ├─ SIM review               read-only, strict JSON verdict              │
+     ├─ Extra review             OPTIONAL — only if --extra-reviewer-model;  │
+     │                           runs alongside SIM in same round;           │
+     │                           agreement tracked, doesn't gate the verdict │
+     ├─ APPROVED                 → publish (after hard gates: diff-scan,     │
+     │                             diff-hash, clean worktree, checks)        │
+     └─ CHANGES_REQUESTED        → loop back to WORK (clears marker; same    │
+                                   opencode session, resumed via `--session`)│
+ │
+ └─ Terminal (`TerminalVerdict` in models.py)
+     ├─ READY_FOR_DRAFT_PR        APPROVED, gates pass, PR opened
+     ├─ NO_PR_CHANGES_REQUESTED   max_review_rounds exhausted on CHANGES_REQUESTED
+     ├─ NO_PR_NEEDS_HUMAN         SIM NEEDS_HUMAN, malformed verdict, cap trip,
+     │                            or no IMPLEMENTATION_COMPLETE marker
+     └─ FAILED_INFRA              infrastructure error
+```
+
 ## Module Map
 
 - `cli.py` — argument parsing and command dispatch (`run`, `doctor`, `fixture`, `image`, `cleanup`, `tui`, `viewer`). Derives an auto-managed local clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/` from the `--upstream` (preferred) or `--fork` URL; clones lazily on first run, reused thereafter. The operator never points contremaitre at a parallel local checkout. Pre-launch Y/n prompt summarises base / source / publish target / caps (skippable via `-y` or non-TTY stdin). `_ensure_default_image_built` compares the running image's `contremaitre.dockerfile-sha256` label against the on-disk Dockerfile hash and rebuilds on mismatch — catches "edited Dockerfile, never rebuilt, image now stale".
@@ -38,7 +84,7 @@ The multi-turn loop is self-contained; Contremaitre does not import any external
 - `fixture.py` — local fixture repo creation for smoke tests.
 - `events.py` — single source of truth for guardrail-event name strings (writer + structural-reader side). TUI classifies by substring pattern, not import.
 - `viewer/` — builds `viewer.html` (single-file HTML over the run dir's JSONL artifacts) from the orchestrator's `finally` so it lands on success and failure paths.
-- `tui.py` — read-only Textual TUI tailing JSONL artifacts. Bottom-bar state breadcrumb (`INIT › WORK › REVIEW › APPROVED › PUBLISHED`); animated Braille spinner with `active` / `thinking` / `idle` states per pane; per-turn separator in each pane log; elapsed clock + last-write age freeze at terminal state.
+- `tui.py` — read-only Textual TUI tailing JSONL artifacts. Footer: 6-dot phase trail (Init → Exploring → Grilling → Implementing → Reviewing → Done) + current phase label with sub-info (exchange/turn counts, per-reviewer verdicts) + conditional warning tokens (`↻N`, `tests ✗`, `extra:disagreed`, `↶ R<N> changes_req` after a CHANGES_REQUESTED loop-back) + elapsed/cost + TerminalVerdict badge (`PR PUSHED #N` / `NO_PR · …` / `FAILED · infra`). Exploring → Grilling fires on EITHER `architecture-review.html` being written OR the SIM joining the conversation (whichever first) — the OR fallback handles agents that skip the cards file. Second row shows plain (cmd+clickable) URLs to the PR and viewer at terminal state — not OSC 8, since Apple Terminal doesn't support that. Animated Braille spinner with `active` / `thinking` / `idle` states per pane; per-turn separator in each pane log; elapsed clock + last-write age freeze at terminal state.
 
 ## Host-owned boundaries
 

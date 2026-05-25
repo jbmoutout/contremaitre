@@ -4,11 +4,14 @@ Layout:
     header    run id, agent + SIM models, docker image
     panes     Agent (left) | SIM (right) — RichLog widgets with scrollback
     log       guardrail_events.jsonl + recoveries.jsonl tail (RichLog)
-    footer    4 zones separated by ` │ ` —
-              (1) pipeline breadcrumb,
-              (2) gates: settled / impl + review rounds + test pass-rate,
-              (3) metrics: A/S turns, sub-agents, recoveries, elapsed, cost,
-              (4) process verdict (running / exited N / terminal state).
+    footer    one line, info-hierarchy ordered left→right:
+              [trail]  [phase label + sub-info]  [↶ R<N> changes_req]?
+                [warnings]?  [elapsed · cost]  [verdict]
+              Trail = 6 dots (Init → Exploring → Grilling → Implementing → Reviewing → Done).
+              Warning tokens hidden when quiet.
+    links     2nd-row plain-URL line (PR + viewer) shown only at terminal state.
+              Plain URLs, not OSC 8 — Apple Terminal doesn't support OSC 8 but
+              detects plain URL text for cmd+click in every modern terminal.
 
 Scrollback: mouse wheel / PageUp / PageDown / Home / End inside any pane.
 Auto-sticks to bottom when at bottom; stays put if you've scrolled up.
@@ -40,7 +43,7 @@ try:
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
-    from textual.widgets import RichLog, Static
+    from textual.widgets import Link, RichLog, Static
 
     _TEXTUAL_AVAILABLE = True
 except ImportError:  # pragma: no cover — gated at CLI entry point
@@ -49,12 +52,17 @@ except ImportError:  # pragma: no cover — gated at CLI entry point
 
 SETTLED_FILE_RE = re.compile(r"/SETTLED_DESIGN\.md$", re.IGNORECASE)
 IMPL_COMPLETE_FILE_RE = re.compile(r"/IMPLEMENTATION_COMPLETE$")
+ARCH_REVIEW_FILE_RE = re.compile(r"/architecture-review\.html?$", re.IGNORECASE)
 APPLY_PATCH_SETTLED_RE = re.compile(
     r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*SETTLED_DESIGN\.md\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 APPLY_PATCH_IMPL_COMPLETE_RE = re.compile(
     r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*IMPLEMENTATION_COMPLETE\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+APPLY_PATCH_ARCH_REVIEW_RE = re.compile(
+    r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*architecture-review\.html?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 DOCKER_REFRESH_S = 2.0
@@ -199,160 +207,479 @@ def _render_pane_subheader(
     return sub
 
 
-def _state_breadcrumb(guardrails: list[dict[str, Any]], *, terminal_stats: Path | None, failed: bool = False) -> Text:
-    """Render INIT > WORK > REVIEW > APPROVED > PUBLISHED progression.
+# ---------- Phase trail + footer renderers ----------
+#
+# The footer is one line organised as five zones:
+#   [trail]  [phase label + sub-info]   [persistent review token + warnings]   [resources]   [verdict]
+#
+# Trail = 5 dots tracking the five canonical phases from docs/control-plane.md:
+#   Init → Grilling → Implementing → Reviewing → Done.
+# Past dots = green ●; current = bright ◐; future = dim ○. At terminal state
+# the current dot's colour reflects the TerminalVerdict (green / yellow / red).
+#
+# A second-line widget (`#links-line`) renders plain URLs (PR + viewer) at
+# terminal state — plain text so any terminal's URL-detection (Apple Terminal
+# included) makes them cmd+clickable. OSC 8 hyperlinks are deliberately not
+# used because Apple Terminal doesn't support them.
 
-    Derived from guardrail_events (cheap inference, no orchestrator state
-    leaked): WORK starts at the first opencode_actor_start with role=agent,
-    REVIEW at role=review, APPROVED at work_session_end with outcome
-    starting "approved", PUBLISHED at the `published` event,
-    BLOCKED/FAILED at publication_blocked / infra_failure. Bold-cyan the
-    current state, dim the rest.
+_PHASES = ("init", "exploring", "grilling", "implementing", "reviewing", "done")
+
+
+def _derive_phase(
+    *,
+    terminal: bool,
+    terminal_verdict: str | None,
+    settled: bool,
+    impl_complete: bool,
+    agent_started: bool,
+    architecture_review_done: bool = False,
+    sim_started: bool = False,
+    review_started: bool = False,
+) -> tuple[str, str]:
+    """Return `(phase, color_state)`.
+
+    Phases: `init → exploring → grilling → implementing → reviewing → done`.
+
+    Exploring → Grilling fires on EITHER `architecture-review.html` being
+    written OR a WORK-SIM turn starting (whichever first). The OR fallback
+    handles agents that skip writing the cards file.
+
+    Implementing → Reviewing fires on the `role=review` actor start, NOT
+    on `IMPLEMENTATION_COMPLETE` being written. Between the agent writing
+    the marker and the orchestrator starting the review container, hard
+    gates run — that brief window stays in `implementing` (the label
+    surfaces "awaiting review" so it's clear the agent is done).
+
+    `color_state` ∈ {"live", "ok", "warn", "error"} controls the current dot
+    colour and reflects how the run is doing at the current phase:
+      - live  — running; current dot bold-bright white
+      - ok    — terminal success (READY_FOR_DRAFT_PR); current dot green
+      - warn  — terminal NO_PR_*; current dot yellow
+      - error — terminal FAILED_INFRA; current dot red, trail frozen at
+                the last active phase (not advanced to "done") so the
+                operator can see where the run died.
     """
 
-    stages = ["INIT", "WORK", "REVIEW", "APPROVED", "PUBLISHED"]
-    current = "INIT"
-    blocked_or_failed: str | None = None
-    for ev in guardrails:
-        kind = ev.get("event")
-        if kind == "opencode_actor_start":
-            role = ev.get("role")
-            if role == "agent" and current == "INIT":
-                current = "WORK"
-            elif role == "review":
-                current = "REVIEW"
-        elif kind == "published":
-            current = "PUBLISHED"
-        elif kind == "publication_blocked":
-            blocked_or_failed = "BLOCKED"
-        elif kind == "infra_failure":
-            blocked_or_failed = "FAILED"
-    if terminal_stats is not None and current == "REVIEW" and blocked_or_failed is None:
-        # Terminal reached but no PUBLISHED event — common when SIM
-        # disapproved or hard gates failed before publication.
-        current = (
-            "APPROVED"
-            if (terminal_stats and "READY_FOR_DRAFT_PR" in terminal_stats.read_text(encoding="utf-8", errors="replace"))
-            else current
-        )
+    grilling_reached = architecture_review_done or sim_started
 
+    if terminal:
+        if terminal_verdict == "READY_FOR_DRAFT_PR":
+            return ("done", "ok")
+        if terminal_verdict in ("NO_PR_CHANGES_REQUESTED", "NO_PR_NEEDS_HUMAN"):
+            return ("done", "warn")
+        # FAILED_INFRA (or unknown) — freeze trail at last active phase.
+        if review_started:
+            return ("reviewing", "error")
+        if settled:
+            return ("implementing", "error")
+        if grilling_reached:
+            return ("grilling", "error")
+        if agent_started:
+            return ("exploring", "error")
+        return ("init", "error")
+    # Running.
+    if review_started:
+        return ("reviewing", "live")
+    if settled:
+        return ("implementing", "live")
+    if grilling_reached:
+        return ("grilling", "live")
+    if agent_started:
+        return ("exploring", "live")
+    return ("init", "live")
+
+
+def _phase_trail(phase: str, color_state: str) -> Text:
+    """Render the trail with the current phase highlighted.
+
+    All dots use the `●` / `○` pair (filled / hollow) — no half-fill `◐`,
+    because most monospace fonts render `◐` at a different baseline than
+    `●`, which made the trail look visually misaligned. Distinction
+    between past / current / future is carried by colour and bold weight.
+    """
+
+    cur_idx = _PHASES.index(phase) if phase in _PHASES else 0
     text = Text()
-    for i, stage in enumerate(stages):
+    for i in range(len(_PHASES)):
         if i > 0:
-            text.append(" › ", style=_PAL_VDIM)
-        is_current = stage == current and blocked_or_failed is None
-        if is_current:
-            if failed:
-                stage_style = f"bold {_PAL_ERROR}"  # stuck here in failure
-            elif stage == "PUBLISHED":
-                stage_style = f"bold {_PAL_SUCCESS}"  # terminal success
-            else:
-                stage_style = f"bold {_PAL_BRIGHT}"  # active / in progress
-            text.append(stage, style=stage_style)
-        elif stages.index(current) > i and blocked_or_failed is None:
-            text.append(stage, style=_PAL_SUCCESS)
+            text.append("─", style=_PAL_VDIM)
+        if i < cur_idx:
+            text.append("●", style=_PAL_SUCCESS)
+        elif i == cur_idx:
+            if color_state == "ok":
+                text.append("●", style=f"bold {_PAL_SUCCESS}")
+            elif color_state == "warn":
+                text.append("●", style=f"bold {_PAL_WARN}")
+            elif color_state == "error":
+                text.append("●", style=f"bold {_PAL_ERROR}")
+            else:  # live
+                text.append("●", style=f"bold {_PAL_BRIGHT}")
         else:
-            text.append(stage, style=_PAL_DIM)
-    if blocked_or_failed:
-        text.append("  →  ", style=_PAL_DIM)
-        text.append(blocked_or_failed, style=f"bold {_PAL_ERROR}")
+            text.append("○", style=_PAL_DIM)
     return text
 
 
-def _review_summary(review_cycles: list[dict[str, Any]]) -> Text | None:
-    """Compact review-rounds indicator.
+def _verdict_glyph(verdict: str | None) -> tuple[str, str]:
+    """(glyph, style) for a review verdict — used in phase label & tokens."""
 
-    Single-SIM: `R N ✓` / `R N ✗`. Last SIM row's verdict sets the icon.
-    With extra reviewer enabled: `R N ✓✓` / `R N ✓✗` / `R N ✓·` (`·` = extra
-    unavailable that round). Glyphs derived from the last-round entries for
-    SIM and extra reviewer separately.
-    """
+    v = (verdict or "").upper()
+    if v == "APPROVED":
+        return "✓", _PAL_SUCCESS
+    if v == "CHANGES_REQUESTED":
+        return "✗", _PAL_WARN
+    if v == "NEEDS_HUMAN":
+        return "?", _PAL_WARN
+    return "·", _PAL_DIM
 
-    if not review_cycles:
-        return None
 
-    last_round = max((r.get("round") or 0) for r in review_cycles)
-    last_round_entries = [r for r in review_cycles if (r.get("round") or 0) == last_round]
-    extra_attempted = any(r.get("reviewer") == "extra" for r in review_cycles)
-    sim_entry = next(
-        (r for r in last_round_entries if r.get("reviewer", "sim") == "sim" and not r.get("unavailable")),
+def _round_verdicts(
+    review_cycles: list[dict[str, Any]], round_n: int
+) -> tuple[str | None, str | None]:
+    """`(sim_verdict, extra_verdict)` for the given round; either may be None."""
+
+    sim = next(
+        (
+            r.get("verdict")
+            for r in review_cycles
+            if (r.get("round") or 0) == round_n
+            and r.get("reviewer", "sim") == "sim"
+            and not r.get("unavailable")
+        ),
         None,
     )
-
-    def _glyph(verdict: str) -> tuple[str, str]:
-        verdict = verdict.upper()
-        if verdict == "APPROVED":
-            return "✓", _PAL_SUCCESS
-        if verdict == "CHANGES_REQUESTED":
-            return "✗", _PAL_WARN
-        return "·", _PAL_DIM
-
-    t = Text()
-    t.append(f"R {last_round} ", style=_PAL_TEXT)
-    if sim_entry is None:
-        # All last-round entries are unavailable / malformed — degenerate;
-        # fall through to a dot rather than crashing the footer.
-        t.append("·", style=_PAL_DIM)
-    else:
-        glyph, style = _glyph(sim_entry.get("verdict") or "")
-        t.append(glyph, style=style)
-
-    if extra_attempted:
-        extra_entry = next(
-            (r for r in last_round_entries if r.get("reviewer") == "extra" and not r.get("unavailable")),
-            None,
-        )
-        if extra_entry is None:
-            t.append("·", style=_PAL_DIM)
-        else:
-            glyph, style = _glyph(extra_entry.get("verdict") or "")
-            t.append(glyph, style=style)
-
-    return t
+    extra = next(
+        (
+            r.get("verdict")
+            for r in review_cycles
+            if (r.get("round") or 0) == round_n
+            and r.get("reviewer") == "extra"
+            and not r.get("unavailable")
+        ),
+        None,
+    )
+    return sim, extra
 
 
-def _extra_reviewer_token(
-    review_cycles: list[dict[str, Any]],
+def _current_review_round(guardrails: list[dict[str, Any]]) -> int:
+    """Round number derived from the count of REVIEW-SIM actor starts.
+
+    Each review round opens with one `opencode_actor_start role=review`
+    where `reviewer_id != "extra"` (that one is the primary SIM reviewer).
+    Counting those gives the current round number — robust across
+    multi-round runs even when verdicts haven't landed in
+    `review_cycles.jsonl` yet (which lags by the duration of the
+    reviewer's actual work).
+    """
+
+    return sum(
+        1
+        for g in guardrails
+        if g.get("event") == "opencode_actor_start"
+        and g.get("role") == "review"
+        and g.get("reviewer_id") != "extra"
+    )
+
+
+def _reviewer_status(
     *,
-    extra_file_age: float | None = None,
-) -> tuple[str, str]:
-    """Token + style for the Zone 3 extra-reviewer agreement signal.
+    round_n: int,
+    review_cycles: list[dict[str, Any]],
+    guardrails: list[dict[str, Any]],
+    is_extra: bool,
+) -> str:
+    """Per-reviewer status for the given round.
 
-    Returns one of `extra:agreed`, `extra:disagreed`, `extra:…` (events
-    flowing now, verdict not yet recorded for this round), or `extra:off`.
+    Returns one of:
+      - `idle`         — reviewer hasn't started for this round yet
+      - `streaming`    — actor started but no verdict recorded yet
+      - `approved`     — verdict APPROVED
+      - `changes_req`  — verdict CHANGES_REQUESTED
+      - `needs_human`  — verdict NEEDS_HUMAN
+      - `unavailable`  — marked unavailable in review_cycles
+                         (degenerate; surfaced as a dot)
+
+    Round identification:
+      - SIM-review starts (reviewer_id != "extra") are counted in order;
+        the Nth start corresponds to round N's SIM reviewer.
+      - Extra-review starts (reviewer_id == "extra") are counted in
+        order; the Nth such start corresponds to round N's extra
+        reviewer (rounds where extra is skipped/disabled have no entry).
     """
 
-    in_flight = extra_file_age is not None and extra_file_age < 30.0
-    if not review_cycles:
-        return ("extra:…", _PAL_TEXT) if in_flight else ("extra:off", _PAL_DIM)
-    last_round = max((r.get("round") or 0) for r in review_cycles)
-    last_entries = [r for r in review_cycles if (r.get("round") or 0) == last_round]
-    sim_entry = next(
-        (r for r in last_entries if r.get("reviewer", "sim") == "sim" and not r.get("unavailable")),
-        None,
-    )
-    extra_entry = next(
-        (r for r in last_entries if r.get("reviewer") == "extra" and not r.get("unavailable")),
-        None,
-    )
-    if sim_entry is None or extra_entry is None:
-        return ("extra:…", _PAL_TEXT) if in_flight else ("extra:off", _PAL_DIM)
-    if (sim_entry.get("verdict") or "").upper() == (extra_entry.get("verdict") or "").upper():
-        return "extra:agreed", _PAL_SUCCESS
-    return "extra:disagreed", _PAL_WARN
+    reviewer_name = "extra" if is_extra else "sim"
+
+    # Verdict present? Use it.
+    for cycle in review_cycles:
+        if (cycle.get("round") or 0) != round_n:
+            continue
+        cycle_reviewer = cycle.get("reviewer", "sim")
+        if cycle_reviewer != reviewer_name:
+            continue
+        if cycle.get("unavailable"):
+            return "unavailable"
+        v = (cycle.get("verdict") or "").upper()
+        if v == "APPROVED":
+            return "approved"
+        if v == "CHANGES_REQUESTED":
+            return "changes_req"
+        if v == "NEEDS_HUMAN":
+            return "needs_human"
+        # Malformed-but-recorded — treat as streaming-still rather than
+        # introduce a separate state the operator has to learn.
+        return "streaming"
+
+    # No verdict yet — has the Nth matching actor start fired?
+    matching_starts = [
+        g
+        for g in guardrails
+        if g.get("event") == "opencode_actor_start"
+        and g.get("role") == "review"
+        and (g.get("reviewer_id") == "extra") == is_extra
+    ]
+    if len(matching_starts) >= round_n:
+        return "streaming"
+    return "idle"
 
 
-def _tests_summary(test_runs: list[dict[str, Any]]) -> Text | None:
-    """Compact test-runs indicator: `tests P/T ✓` (or ✗ if any failed)."""
+def _reviewer_glyph(status: str) -> tuple[str, str]:
+    """`(glyph, style)` for a reviewer status (Reviewing phase label)."""
 
-    if not test_runs:
+    if status == "approved":
+        return "✓", _PAL_SUCCESS
+    if status == "changes_req":
+        return "✗", _PAL_WARN
+    if status == "needs_human":
+        return "?", _PAL_WARN
+    if status == "streaming":
+        return "⏵", f"bold {_PAL_BRIGHT}"
+    if status == "unavailable":
+        return "—", _PAL_DIM
+    return "·", _PAL_DIM
+
+
+def _current_phase_label(
+    *,
+    phase: str,
+    color_state: str,
+    grilling_exchanges: int,
+    impl_turns: int,
+    self_verified: bool,
+    impl_complete: bool,
+    review_cycles: list[dict[str, Any]],
+    terminal_verdict: str | None,
+    pr_number: int | None,
+    pr_title: str | None = None,
+    current_review_round: int = 0,
+    sim_review_status: str = "idle",
+    extra_review_status: str = "idle",
+    extra_enabled: bool = False,
+) -> Text:
+    """Phase name + sub-info (right of the trail).
+
+    Terminal labels for non-success states (NO_PR_*, FAILED) explain
+    *why* the run ended so the operator doesn't have to also read the
+    verdict zone. For READY_FOR_DRAFT_PR the label is just `Done` —
+    the verdict zone's bold `PR PUSHED #N` already carries that info,
+    so duplicating it here would be noise.
+    """
+
+    text = Text()
+    if phase == "init":
+        text.append("Init", style=f"bold {_PAL_BRIGHT}")
+        return text
+    if phase == "exploring":
+        if color_state == "error":
+            text.append("Exploring — infra failure", style=f"bold {_PAL_ERROR}")
+            return text
+        text.append("Exploring", style=f"bold {_PAL_BRIGHT}")
+        return text
+    if phase == "grilling":
+        if color_state == "error":
+            text.append("Grilling — infra failure", style=f"bold {_PAL_ERROR}")
+            return text
+        text.append("Grilling", style=f"bold {_PAL_BRIGHT}")
+        text.append(f" (exchange {grilling_exchanges})", style=_PAL_TEXT)
+        return text
+    if phase == "implementing":
+        if color_state == "error":
+            text.append("Implementing — infra failure", style=f"bold {_PAL_ERROR}")
+            return text
+        text.append("Implementing", style=f"bold {_PAL_BRIGHT}")
+        if impl_complete:
+            # Agent wrote IMPLEMENTATION_COMPLETE but the review container
+            # hasn't started yet (hard gates running). Signal the wait.
+            text.append(" — awaiting review", style=_PAL_TEXT)
+            return text
+        text.append(f" (turn {impl_turns}", style=_PAL_TEXT)
+        if self_verified:
+            text.append(", tested ", style=_PAL_TEXT)
+            text.append("✓", style=_PAL_SUCCESS)
+        text.append(")", style=_PAL_TEXT)
+        return text
+    if phase == "reviewing":
+        if color_state == "error":
+            text.append("Reviewing — infra failure", style=f"bold {_PAL_ERROR}")
+            return text
+        text.append("Reviewing", style=f"bold {_PAL_BRIGHT}")
+        # Show the round number from the count of actor-starts, not from
+        # `review_cycles` (which only lands once the FIRST verdict is
+        # recorded — leaving a several-second gap where the round number
+        # would be absent).
+        if current_review_round > 0:
+            text.append(f" (round {current_review_round})", style=_PAL_TEXT)
+        # Always show the primary reviewer slot during this phase — it's
+        # `streaming` from the moment the phase opens, then becomes a
+        # verdict glyph when the verdict lands.
+        sim_glyph, sim_style = _reviewer_glyph(sim_review_status)
+        text.append(" · Review ", style=_PAL_TEXT)
+        text.append(sim_glyph, style=sim_style)
+        # Extra-reviewer slot — appears only once the extra reviewer has
+        # actually started for the current round (orchestrator runs SIM
+        # then extra sequentially, so this is a clean "grow as activity
+        # happens" pattern rather than showing a placeholder `·`).
+        if extra_enabled and extra_review_status != "idle":
+            extra_glyph, extra_style = _reviewer_glyph(extra_review_status)
+            text.append("  Extra Review ", style=_PAL_TEXT)
+            text.append(extra_glyph, style=extra_style)
+        return text
+    # phase == "done"
+    if terminal_verdict == "READY_FOR_DRAFT_PR":
+        # Verdict zone carries `PR PUSHED #N` — don't duplicate the
+        # number here. Show the PR title for context if available
+        # (truncated to keep the footer on one line).
+        text.append("Done", style=f"bold {_PAL_SUCCESS}")
+        trimmed = _truncate_pr_title(pr_title)
+        if trimmed:
+            text.append(" · ", style=_PAL_VDIM)
+            text.append(trimmed, style=_PAL_TEXT)
+    elif terminal_verdict == "NO_PR_CHANGES_REQUESTED":
+        text.append("Reviewing — changes_req (exhausted)", style=f"bold {_PAL_WARN}")
+    elif terminal_verdict == "NO_PR_NEEDS_HUMAN":
+        text.append("Reviewing — needs human", style=f"bold {_PAL_WARN}")
+    elif terminal_verdict == "FAILED_INFRA":
+        text.append("Failed — infrastructure error", style=f"bold {_PAL_ERROR}")
+    else:
+        text.append("Done", style=_PAL_TEXT)
+    return text
+
+
+def _persistent_review_token(
+    *,
+    phase: str,
+    review_cycles: list[dict[str, Any]],
+) -> Text | None:
+    """`↶ R<N> changes_req` token shown after a CHANGES_REQUESTED loop-back.
+
+    Renders only when we're back in a WORK phase (grilling/implementing)
+    AND the latest completed review round's SIM verdict was
+    CHANGES_REQUESTED. The token says "we're here *because* of the last
+    review" and clears as soon as the next review round opens its own
+    review_cycles entry.
+    """
+
+    if phase not in ("exploring", "grilling", "implementing"):
         return None
-    total = len(test_runs)
-    passed = sum(1 for r in test_runs if r.get("returncode") == 0)
-    t = Text()
-    t.append(f"tests {passed}/{total} ", style=_PAL_TEXT)
-    t.append("✓" if passed == total else "✗", style=_PAL_SUCCESS if passed == total else _PAL_ERROR)
-    return t
+    if not review_cycles:
+        return None
+    last_round = max((r.get("round") or 0) for r in review_cycles)
+    sim_verdict, _extra = _round_verdicts(review_cycles, last_round)
+    if not sim_verdict or sim_verdict.upper() != "CHANGES_REQUESTED":
+        return None
+    text = Text()
+    text.append(f"↶ R{last_round} changes_req", style=f"bold {_PAL_WARN}")
+    return text
+
+
+def _warnings_token(
+    *,
+    recoveries: list[dict[str, Any]],
+    test_runs: list[dict[str, Any]],
+    review_cycles: list[dict[str, Any]],
+    extra_enabled: bool,
+) -> Text | None:
+    """Compact warning tokens. Returns None when there's nothing to surface.
+
+    Only LOUD signals appear here: `↻N` recoveries, `tests ✗` on failure,
+    `extra:disagreed` on cross-reviewer mismatch. Quiet signals (zero
+    recoveries, all tests passing, reviewers agreed) are hidden so the
+    operator's eye goes straight to noise when there is noise.
+    """
+
+    parts: list[Text] = []
+    rec_n = len(recoveries)
+    if rec_n:
+        t = Text()
+        t.append(f"↻{rec_n}", style=f"bold {_PAL_WARN}")
+        parts.append(t)
+    if any(r.get("returncode") not in (0, None) for r in test_runs):
+        t = Text()
+        t.append("tests ✗", style=f"bold {_PAL_ERROR}")
+        parts.append(t)
+    if extra_enabled and review_cycles:
+        last_round = max((r.get("round") or 0) for r in review_cycles)
+        sim, extra = _round_verdicts(review_cycles, last_round)
+        if sim and extra and sim.upper() != extra.upper():
+            t = Text()
+            t.append("extra:disagreed", style=f"bold {_PAL_WARN}")
+            parts.append(t)
+    if not parts:
+        return None
+    out = Text()
+    for i, p in enumerate(parts):
+        if i > 0:
+            out.append("  ")
+        out.append(p)
+    return out
+
+
+def _terminal_badge(verdict: str | None, pr_number: int | None) -> tuple[str, str]:
+    """`(text, style)` for the rightmost verdict badge at terminal state."""
+
+    if verdict == "READY_FOR_DRAFT_PR":
+        label = f"PR PUSHED #{pr_number}" if pr_number is not None else "PR PUSHED"
+        return label, f"bold {_PAL_SUCCESS}"
+    if verdict == "NO_PR_CHANGES_REQUESTED":
+        return "NO_PR · changes_req", f"bold {_PAL_WARN}"
+    if verdict == "NO_PR_NEEDS_HUMAN":
+        return "NO_PR · needs human", f"bold {_PAL_WARN}"
+    if verdict == "FAILED_INFRA":
+        return "FAILED · infra", f"bold {_PAL_ERROR}"
+    return verdict or "?", f"bold {_PAL_TEXT}"
+
+
+def _read_pr_json(run_dir: Path) -> dict | None:
+    p = run_dir / "pr.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _pr_number_from_url(url: str | None) -> int | None:
+    """Extract the trailing `/pull/<N>` integer from a GitHub PR URL."""
+
+    if not url:
+        return None
+    m = re.search(r"/pull/(\d+)(?:[/?#]|$)", url)
+    return int(m.group(1)) if m else None
+
+
+def _truncate_pr_title(title: str | None, limit: int = 60) -> str | None:
+    """Trim long PR titles for the `Done · <title>` phase label.
+
+    The footer is one line wide; long titles would push the right segment
+    off-screen on narrow terminals. Limit chosen to leave headroom for
+    trail + label prefix + right-segment content at ~120 cols.
+    """
+
+    if not title:
+        return None
+    title = title.strip()
+    if len(title) <= limit:
+        return title
+    return title[: limit - 1].rstrip() + "…"
 
 
 # ---------- Event introspection ----------
@@ -404,6 +731,34 @@ def _impl_complete_in(events: list[dict[str, Any]]) -> bool:
         elif tool == "apply_patch":
             patch = inp.get("patchText") or inp.get("patch") or ""
             if APPLY_PATCH_IMPL_COMPLETE_RE.search(patch):
+                return True
+    return False
+
+
+def _architecture_review_in(events: list[dict[str, Any]]) -> bool:
+    """True if `.contremaitre/architecture-review.html` has been written.
+
+    The skill's convention is for the agent to publish candidate cards there
+    before grilling with SIM. Not a harness gate, but useful as the
+    Exploring → Grilling boundary in the footer trail.
+    """
+
+    for e in events:
+        if e.get("type") != "tool_use":
+            continue
+        part = e.get("part") or {}
+        state = part.get("state") or {}
+        if state.get("status") != "completed":
+            continue
+        tool = part.get("tool")
+        inp = state.get("input") or {}
+        if tool in ("write", "edit"):
+            fp = inp.get("filePath") or inp.get("path") or ""
+            if ARCH_REVIEW_FILE_RE.search(fp):
+                return True
+        elif tool == "apply_patch":
+            patch = inp.get("patchText") or inp.get("patch") or ""
+            if APPLY_PATCH_ARCH_REVIEW_RE.search(patch):
                 return True
     return False
 
@@ -870,7 +1225,7 @@ if _TEXTUAL_AVAILABLE:
 
     class ContremaitreTUI(App):
         CSS = """
-        Screen { layout: vertical; padding: 0 1; }
+        Screen { layout: vertical; padding: 0 1 1 1; }
         #header { height: 1; padding: 0 1; }
         #panes { height: 1fr; }
         .pane { width: 1fr; border: round white; }
@@ -891,7 +1246,19 @@ if _TEXTUAL_AVAILABLE:
             scrollbar-background-hover: $background;
         }
         #activity-panel { height: 8; border: round white; }
-        #footer-line { height: 1; padding: 0 1; }
+        #footer-bar { layout: horizontal; height: 1; padding: 0 1; }
+        #footer-left { width: 1fr; height: 1; }
+        #footer-right { width: auto; height: 1; }
+        #links-line { layout: horizontal; height: 1; padding: 0 1; }
+        #links-line.hidden { display: none; }
+        .link-token {
+            width: auto;
+            height: 1;
+            margin-right: 4;
+            color: #6B8AFF;
+        }
+        .link-token:hover { color: #FFFFFF; text-style: underline; }
+        .link-token.hidden { display: none; }
         """
 
         BINDINGS = [
@@ -946,6 +1313,11 @@ if _TEXTUAL_AVAILABLE:
             self._agent_separators_rendered = 0
             self._sim_separators_rendered = 0
             self._extra_separators_rendered = 0
+            # Captured at terminal state for the post-exit URL summary
+            # printed to stdout — gives Apple Terminal users (no OSC 8
+            # support) cmd+clickable links in their scrollback.
+            self._final_pr_url: str | None = None
+            self._final_viewer_path: str | None = None
 
         @property
         def paths(self) -> dict[str, Path]:
@@ -985,7 +1357,18 @@ if _TEXTUAL_AVAILABLE:
                         yield Static("", classes="pane-sub", id="extra-reviewer-sub")
             with Vertical(id="activity-panel"):
                 yield RichLog(id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
-            yield Static("", id="footer-line")
+            with Horizontal(id="footer-bar"):
+                yield Static("", id="footer-left")
+                yield Static("", id="footer-right")
+            # Pre-mount Link widgets so we can show/hide them at terminal
+            # state without re-mounting. URL + visible text are set at
+            # runtime in _update_chrome. Textual's `Link` widget catches
+            # the click itself and opens the URL via `webbrowser.open()` —
+            # works in every terminal (Apple Terminal, Ghostty, iTerm2…)
+            # because the terminal is not involved in the click handling.
+            with Horizontal(id="links-line", classes="hidden"):
+                yield Link("", url="", id="pr-link", classes="link-token hidden")
+                yield Link("", url="", id="viewer-link", classes="link-token hidden")
 
         def on_mount(self) -> None:
             self.title = f"contremaitre · {self.run_dir.name}"
@@ -1181,7 +1564,6 @@ if _TEXTUAL_AVAILABLE:
             settled = _settled_in(agent_events)
             impl_complete = _impl_complete_in(agent_events)
             self_verified = _self_verified_in(agent_events)
-            subagents = _task_count(agent_events)
 
             # Freeze elapsed + activity-age once the orchestrator has
             # written stats.json (terminal state) so a finished run stops
@@ -1319,9 +1701,11 @@ if _TEXTUAL_AVAILABLE:
             self.query_one("#activity-panel").border_title = f"orchestrator activity{age_str}"
 
             # ----- Footer -----
-            # Read stats once; reused for verdict text, color, and breadcrumb
-            # failure flag. Stats is written before the process exits so it is
-            # available for both the proc=None (attach) and rc!=0 (run) paths.
+            # One-line layout:
+            #   [trail]   [phase label + sub-info]   [↶ R<N> changes_req?]   [warnings?]   [time · cost]   [verdict]
+            # Plus a 2nd-row #links-line that only appears at terminal state
+            # and shows plain (cmd+clickable) URLs to the PR and viewer.
+
             stats_data: dict = {}
             if terminal:
                 try:
@@ -1329,129 +1713,166 @@ if _TEXTUAL_AVAILABLE:
                 except (OSError, json.JSONDecodeError):
                     pass
 
-            run_failed = stats_data.get("terminal_state") in ("NO_PR", "FAILED")
+            tv: str | None = stats_data.get("verdict") if terminal else None
+            pr_data = _read_pr_json(self.run_dir) or {}
+            pr_url = pr_data.get("url") if pr_data.get("kind") == "PUBLISHED" else None
+            pr_number = _pr_number_from_url(pr_url)
+            pr_title = pr_data.get("title") if pr_data.get("kind") == "PUBLISHED" else None
 
-            rc = self.proc.poll() if self.proc else None
-            if self.proc is None:
-                if stats_data:
-                    status = f"{stats_data.get('terminal_state', '?')} · {stats_data.get('verdict', '?')}"
-                    verdict_style = (
-                        f"bold {_PAL_SUCCESS}"
-                        if stats_data.get("verdict") == "READY_FOR_DRAFT_PR"
-                        else f"bold {_PAL_ERROR}" if run_failed else f"bold {_PAL_WARN}"
-                    )
-                else:
-                    status = "attached"
-                    verdict_style = _PAL_TEXT
-            elif rc is None:
-                status = "running"
-                verdict_style = f"bold {_PAL_BRIGHT}"
-            elif rc == 0:
-                if stats_data.get("verdict") == "READY_FOR_DRAFT_PR":
-                    status = "PUBLISHED"
-                elif stats_data:
-                    status = f"{stats_data.get('terminal_state', '?')} · {stats_data.get('verdict', '?')}"
-                else:
-                    status = "exited 0"
-                verdict_style = f"bold {_PAL_SUCCESS}"
-            else:
-                if stats_data:
-                    status = f"{stats_data.get('terminal_state', '?')} · {stats_data.get('verdict', '?')}"
-                else:
-                    status = f"exited {rc}"
-                verdict_style = f"bold {_PAL_ERROR}"
-
-            crumb = _state_breadcrumb(
-                guardrails,
-                terminal_stats=stats_path if terminal else None,
-                failed=run_failed,
+            agent_started = any(
+                g.get("event") == "opencode_actor_start" and g.get("role") == "agent" for g in guardrails
             )
-            sep = Text(" │ ", style=_PAL_VDIM)
+            # WORK-loop SIM only — `role=sim`. Review-pass SIM is a separate
+            # role and gates the Implementing → Reviewing transition below.
+            sim_started = any(
+                g.get("event") == "opencode_actor_start" and g.get("role") == "sim" for g in guardrails
+            )
+            review_started = any(
+                g.get("event") == "opencode_actor_start" and g.get("role") == "review" for g in guardrails
+            )
+            architecture_review_done = _architecture_review_in(agent_events)
+            phase, color_state = _derive_phase(
+                terminal=terminal,
+                terminal_verdict=tv,
+                settled=settled,
+                impl_complete=impl_complete,
+                agent_started=agent_started,
+                architecture_review_done=architecture_review_done,
+                sim_started=sim_started,
+                review_started=review_started,
+            )
 
-            footer = Text()
-
-            # ----- Zone 1: pipeline breadcrumb -----
-            footer.append(crumb)
-            footer.append(sep)
-
-            # ----- Zone 2: gates & quality (achievements vs not-yet) -----
-            footer.append("● " if settled else "○ ", style=_PAL_SUCCESS if settled else _PAL_VDIM)
-            footer.append("settled", style=_PAL_TEXT if settled else _PAL_DIM)
-            footer.append("  ")
-            footer.append("● " if impl_complete else "○ ", style=_PAL_SUCCESS if impl_complete else _PAL_VDIM)
-            footer.append("impl", style=_PAL_TEXT if impl_complete else _PAL_DIM)
-            footer.append("  ")
-            # warn if agent declared impl_complete but never ran tests
-            _tested_style = _PAL_SUCCESS if self_verified else (_PAL_WARN if impl_complete else _PAL_VDIM)
-            footer.append("● " if self_verified else "○ ", style=_tested_style)
-            footer.append("tested", style=_PAL_TEXT if self_verified else (_PAL_WARN if impl_complete else _PAL_DIM))
+            # Phase counters mirror flow_use.compute_phases so footer matches eval.
             review_cycles = _read_jsonl(self.paths["review_cycles"])
-            rev_text = _review_summary(review_cycles)
-            if rev_text is not None:
-                footer.append("  ")
-                footer.append(rev_text)
             test_runs = _read_jsonl(self.paths["test_runs"])
-            tests_text = _tests_summary(test_runs)
-            if tests_text is not None:
-                footer.append("  ")
-                footer.append(tests_text)
-            footer.append(sep)
+            phase_counts = _compute_phases_for_tui(self.paths, agent_events, guardrails, review_cycles)
 
-            # ----- Zone 3: work metrics (dim by default, color only when anomalous) -----
-            turn_token = f"A{agent_turns} S{sim_turns}"
-            if self.extra_reviewer_model:
-                extra_events_for_count = _read_jsonl(self.paths["extra_reviewer_raw_export"])
-                turn_token += f" X{_text_event_count(extra_events_for_count)}"
-            footer.append(turn_token, style=_PAL_TEXT)
-            footer.append("  ")
-            # Phase split: grill = pre-SETTLED exchanges (real design pass) vs
-            # impl = post-SETTLED agent turns. grill=0/1 with impl=1 means the
-            # agent skipped DEEPENING and shipped on candidate selection alone.
-            phases = _compute_phases_for_tui(self.paths, agent_events, guardrails, review_cycles)
-            grill_n = phases["grilling_exchanges"]
-            impl_n = phases["impl_turns"]
-            grill_style = _PAL_TEXT if grill_n >= 2 else (_PAL_WARN if settled else _PAL_DIM)
-            footer.append(f"grill {grill_n}", style=grill_style)
-            footer.append(" ")
-            footer.append(f"impl {impl_n}", style=_PAL_DIM)
-            footer.append("  ")
-            footer.append(f"sub {subagents}", style=_PAL_DIM)
-            footer.append("  ")
-            if self.extra_reviewer_model:
-                # Last-round agreement signal. `extra:…` = in-flight (events
-                # landing, verdict not yet recorded); `extra:off` = idle /
-                # not run this round; `extra:agreed`/`disagreed` = both
-                # verdicts present and matched / mismatched.
-                extra_token, extra_style = _extra_reviewer_token(
-                    review_cycles,
-                    extra_file_age=_file_age(self.paths["extra_reviewer_raw_export"]),
+            # Verdict zone text. `attached` covers read-only TUI on an
+            # in-progress run; terminal badges come from TerminalVerdict
+            # (models.py). exited-0 without stats means stats wasn't written
+            # yet (race) — fall back to a neutral label.
+            rc = self.proc.poll() if self.proc else None
+            if terminal and tv:
+                status_text, status_style = _terminal_badge(tv, pr_number)
+            elif self.proc is None:
+                status_text, status_style = "attached", _PAL_TEXT
+            elif rc is None:
+                status_text, status_style = "running", f"bold {_PAL_BRIGHT}"
+            elif rc == 0:
+                status_text, status_style = "exited 0", f"bold {_PAL_SUCCESS}"
+            else:
+                status_text, status_style = f"exited {rc}", f"bold {_PAL_ERROR}"
+
+            # Per-reviewer status for the Reviewing phase label. Computed
+            # only when in (or freshly-terminal-from) reviewing so we don't
+            # pay for it during WORK turns.
+            extra_enabled = bool(self.extra_reviewer_model)
+            if phase in ("reviewing",) or (terminal and review_started):
+                current_review_round = _current_review_round(guardrails)
+                sim_review_status = _reviewer_status(
+                    round_n=current_review_round,
+                    review_cycles=review_cycles,
+                    guardrails=guardrails,
+                    is_extra=False,
                 )
-                footer.append(extra_token, style=extra_style)
-                footer.append("  ")
-            rec_count = len(recoveries)
-            footer.append(f"↻{rec_count}", style=_PAL_WARN if rec_count else _PAL_DIM)
-            footer.append("  ")
-            footer.append(_fmt_elapsed(elapsed), style=_PAL_DIM)
-            footer.append("  ")
+                extra_review_status = (
+                    _reviewer_status(
+                        round_n=current_review_round,
+                        review_cycles=review_cycles,
+                        guardrails=guardrails,
+                        is_extra=True,
+                    )
+                    if extra_enabled
+                    else "idle"
+                )
+            else:
+                current_review_round = 0
+                sim_review_status = "idle"
+                extra_review_status = "idle"
+
+            # Left segment: trail + phase label + persistent review token + warnings.
+            left = Text()
+            left.append(_phase_trail(phase, color_state))
+            left.append("   ")
+            left.append(
+                _current_phase_label(
+                    phase=phase,
+                    color_state=color_state,
+                    grilling_exchanges=phase_counts["grilling_exchanges"],
+                    impl_turns=phase_counts["impl_turns"],
+                    self_verified=self_verified,
+                    impl_complete=impl_complete,
+                    review_cycles=review_cycles,
+                    terminal_verdict=tv,
+                    pr_number=pr_number,
+                    pr_title=pr_title,
+                    current_review_round=current_review_round,
+                    sim_review_status=sim_review_status,
+                    extra_review_status=extra_review_status,
+                    extra_enabled=extra_enabled,
+                )
+            )
+            rev_token = _persistent_review_token(phase=phase, review_cycles=review_cycles)
+            if rev_token is not None:
+                left.append("     ")
+                left.append(rev_token)
+            warn_token = _warnings_token(
+                recoveries=recoveries,
+                test_runs=test_runs,
+                review_cycles=review_cycles,
+                extra_enabled=bool(self.extra_reviewer_model),
+            )
+            if warn_token is not None:
+                left.append("     ")
+                left.append(warn_token)
+
+            # Right segment: elapsed · cost · verdict. Hosted in a separate
+            # Static with `width: auto` so the horizontal layout pushes it
+            # to the right edge regardless of left-segment length.
+            right = Text()
+            right.append(_fmt_elapsed(elapsed), style=_PAL_DIM)
+            right.append(" · ", style=_PAL_VDIM)
             if _is_free_model(self.agent_model) and _is_free_model(self.sim_model):
-                footer.append("free (◕‿◕)", style=_PAL_SUCCESS)
+                right.append("free (◕‿◕)", style=_PAL_SUCCESS)
             else:
                 cost_usd = sum_costs_in_events(agent_events, sim_events)
-                footer.append(f"${cost_usd:.4f}", style=_PAL_TEXT if cost_usd > 0 else _PAL_DIM)
-            footer.append(sep)
+                right.append(f"${cost_usd:.4f}", style=_PAL_TEXT if cost_usd > 0 else _PAL_DIM)
+            right.append("     ")
+            right.append(status_text, style=status_style)
 
-            # ----- Zone 4: process verdict (rightmost, biggest contrast) -----
-            footer.append(status, style=verdict_style)
+            self.query_one("#footer-left", Static).update(left)
+            self.query_one("#footer-right", Static).update(right)
 
+            # ----- Links line (terminal state only) -----
+            # Uses Textual's `Link` widget — it intercepts the click
+            # itself and opens the URL via `webbrowser.open()`. Doesn't
+            # depend on terminal OSC 8 support, so it works uniformly in
+            # Apple Terminal, Ghostty, iTerm2, kitty, wezterm, etc.
+            # (Previous OSC 8 approach was unreliable: Textual's mouse
+            # capture in alt-screen mode can swallow clicks before the
+            # terminal's OSC 8 handler sees them.)
             viewer = self.run_dir / "viewer.html"
-            if terminal and viewer.exists():
-                footer.append("  ")
-                footer.append(
-                    "viewer ↗",
-                    style=f"{_PAL_ACCENT} link file://{viewer.resolve()}",
-                )
-
-            self.query_one("#footer-line", Static).update(footer)
+            has_viewer = viewer.exists()
+            self._final_pr_url = pr_url if terminal else None
+            self._final_viewer_path = str(viewer.resolve()) if (terminal and has_viewer) else None
+            pr_link = self.query_one("#pr-link", Link)
+            viewer_link = self.query_one("#viewer-link", Link)
+            if terminal and pr_url:
+                pr_link.text = f"↗ PR  {pr_url}"
+                pr_link.url = pr_url
+                pr_link.set_class(False, "hidden")
+            else:
+                pr_link.set_class(True, "hidden")
+            if terminal and has_viewer:
+                viewer_url = f"file://{viewer.resolve()}"
+                viewer_link.text = f"↗ viewer  {viewer_url}"
+                viewer_link.url = viewer_url
+                viewer_link.set_class(False, "hidden")
+            else:
+                viewer_link.set_class(True, "hidden")
+            self.query_one("#links-line").set_class(
+                not (terminal and (pr_url or has_viewer)), "hidden"
+            )
 
         def action_quit(self) -> None:
             if self.proc and self.proc.poll() is None:
@@ -1475,6 +1896,27 @@ def _require_textual() -> None:
         raise SystemExit("contremaitre tui requires textual.\n" "Install with: python3 -m pip install --user textual")
 
 
+def _print_final_urls(app: "ContremaitreTUI") -> None:
+    """Print PR + viewer URLs to stdout after TUI exit.
+
+    Inside the TUI, Apple Terminal can't render OSC 8 hyperlinks (no
+    support) and Textual's mouse capture eats clicks on plain URLs too.
+    Printing the URLs after the TUI tears down puts them in the
+    terminal's scrollback as plain text, where every modern terminal's
+    URL-detection picks them up for cmd+click.
+    """
+
+    pr_url = app._final_pr_url
+    viewer_path = app._final_viewer_path
+    if not pr_url and not viewer_path:
+        return
+    print()
+    if pr_url:
+        print(f"  PR:     {pr_url}")
+    if viewer_path:
+        print(f"  Viewer: file://{viewer_path}")
+
+
 def attach(run_dir: Path, *, refresh_hz: float = 5.0) -> int:
     """Mount the TUI on an existing run directory (read-only)."""
 
@@ -1492,7 +1934,9 @@ def attach(run_dir: Path, *, refresh_hz: float = 5.0) -> int:
         proc=None,
         refresh_hz=refresh_hz,
     )
-    return app.run() or 0
+    rc = app.run() or 0
+    _print_final_urls(app)
+    return rc
 
 
 def spawn_and_attach(
@@ -1557,7 +2001,9 @@ def spawn_and_attach(
         proc=proc,
         refresh_hz=refresh_hz,
     )
-    return app.run() or 0
+    rc = app.run() or 0
+    _print_final_urls(app)
+    return rc
 
 
 def _read_run_models(run_dir: Path) -> tuple[str, str, str | None, str]:
