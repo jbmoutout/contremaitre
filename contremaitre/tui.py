@@ -184,7 +184,7 @@ _PAL_ERROR = "#FF3B3B"
 _PAL_ACCENT = "#6B8AFF"
 
 
-_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_SPINNER_FRAMES = (" ⠋", " ⠙", " ⠹", " ⠸", " ⠼", " ⠴", " ⠦", " ⠧", " ⠇", " ⠏")
 
 
 def _activity_state(*, container_present: bool, file_age: float | None) -> str:
@@ -365,18 +365,14 @@ def _verdict_glyph(verdict: str | None) -> tuple[str, str]:
     return "·", _PAL_DIM
 
 
-def _round_verdicts(
-    review_cycles: list[dict[str, Any]], round_n: int
-) -> tuple[str | None, str | None]:
+def _round_verdicts(review_cycles: list[dict[str, Any]], round_n: int) -> tuple[str | None, str | None]:
     """`(sim_verdict, extra_verdict)` for the given round; either may be None."""
 
     sim = next(
         (
             r.get("verdict")
             for r in review_cycles
-            if (r.get("round") or 0) == round_n
-            and r.get("reviewer", "sim") == "sim"
-            and not r.get("unavailable")
+            if (r.get("round") or 0) == round_n and r.get("reviewer", "sim") == "sim" and not r.get("unavailable")
         ),
         None,
     )
@@ -384,9 +380,7 @@ def _round_verdicts(
         (
             r.get("verdict")
             for r in review_cycles
-            if (r.get("round") or 0) == round_n
-            and r.get("reviewer") == "extra"
-            and not r.get("unavailable")
+            if (r.get("round") or 0) == round_n and r.get("reviewer") == "extra" and not r.get("unavailable")
         ),
         None,
     )
@@ -407,9 +401,7 @@ def _current_review_round(guardrails: list[dict[str, Any]]) -> int:
     return sum(
         1
         for g in guardrails
-        if g.get("event") == "opencode_actor_start"
-        and g.get("role") == "review"
-        and g.get("reviewer_id") != "extra"
+        if g.get("event") == "opencode_actor_start" and g.get("role") == "review" and g.get("reviewer_id") != "extra"
     )
 
 
@@ -1630,7 +1622,7 @@ if _TEXTUAL_AVAILABLE:
             # ----- Header -----
             img = self._docker_state.get("image_created")
             header = Text()
-            header.append("contremaitre · ", style="bold cyan")
+            header.append("contremaitre · ", style="#6B8AFF")
             header.append(self.run_dir.name)
             header.append(
                 f"  ·  agent={_short_model(self.agent_model)}  sim={_short_model(self.sim_model)}",
@@ -1651,9 +1643,9 @@ if _TEXTUAL_AVAILABLE:
             # disambiguates the colon-suffixed branch name from a tag/SHA.
             header2 = Text()
             header2.append("→ ", style=_PAL_ACCENT)
-            header2.append(_short_repo(self.target_url), style=_PAL_TEXT)
+            header2.append(_short_repo(self.target_url), style=_PAL_ACCENT)
             header2.append("  •  ", style=_PAL_VDIM)
-            header2.append(f"git:{self.base or '?'}", style=_PAL_TEXT)
+            header2.append(f"git:{self.base or '?'}", style=_PAL_ACCENT)
             self.query_one("#header2", Static).update(header2)
 
             # ----- Pane subheaders with thinking loader -----
@@ -1784,9 +1776,7 @@ if _TEXTUAL_AVAILABLE:
             )
             # WORK-loop SIM only — `role=sim`. Review-pass SIM is a separate
             # role and gates the Implementing → Reviewing transition below.
-            sim_started = any(
-                g.get("event") == "opencode_actor_start" and g.get("role") == "sim" for g in guardrails
-            )
+            sim_started = any(g.get("event") == "opencode_actor_start" and g.get("role") == "sim" for g in guardrails)
             review_started = any(
                 g.get("event") == "opencode_actor_start" and g.get("role") == "review" for g in guardrails
             )
@@ -1936,9 +1926,7 @@ if _TEXTUAL_AVAILABLE:
                 viewer_link.set_class(False, "hidden")
             else:
                 viewer_link.set_class(True, "hidden")
-            self.query_one("#links-line").set_class(
-                not (terminal and (pr_url or has_viewer)), "hidden"
-            )
+            self.query_one("#links-line").set_class(not (terminal and (pr_url or has_viewer)), "hidden")
 
         def action_quit(self) -> None:
             if self.proc and self.proc.poll() is None:

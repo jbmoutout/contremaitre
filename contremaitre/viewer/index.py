@@ -230,7 +230,7 @@ def _fmt_duration(seconds: float | int | None) -> str:
 
 
 # Kaomoji for free runs — cheerful, ASCII, fits the monospace vibe.
-_FREE_KAOMOJI = "ヽ(´▽`)/"
+_FREE_KAOMOJI = "(◕‿◕)"
 
 
 def _fmt_cost(cost: float | int | None) -> tuple[str, bool]:

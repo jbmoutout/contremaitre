@@ -487,10 +487,7 @@ def _launch_screen(
 
             def _pick_inline(role: str, current_idx: int) -> tuple[str, int]:
                 default_id = free[current_idx]["id"]
-                prompt = (
-                    f"  {role:<6}[{current_idx} - {default_id}] "
-                    f"(Enter=accept, 0–{len(free) - 1}, q): "
-                )
+                prompt = f"  {role:<6}[{current_idx} - {default_id}] " f"(Enter=accept, 0–{len(free) - 1}, q): "
                 while True:
                     try:
                         reply = input(prompt).strip().lower()
@@ -546,8 +543,7 @@ def _launch_screen(
                 if suggested_idx is not None:
                     suggested_id = free[suggested_idx]["id"]
                     extra_prompt = (
-                        f"  extra [{suggested_idx} - {suggested_id}] "
-                        f"(Enter=accept, s=skip, 0–{len(free) - 1}, q): "
+                        f"  extra [{suggested_idx} - {suggested_id}] " f"(Enter=accept, s=skip, 0–{len(free) - 1}, q): "
                     )
                 else:
                     extra_prompt = f"  extra  (Enter=skip, 0–{len(free) - 1}, q): "
@@ -585,7 +581,7 @@ def _launch_screen(
     if extra_model:
         print(f"  extra   {_b(extra_model)}")
     print()
-    print(("  will run autonomously — Ctrl-C to abort"))
+    print(f"  WILL RUN AUTONOMOUSLY AND CREATE A DRAFT PR ON {source_url} — Ctrl-C to abort")
     print()
     try:
         reply = input("  proceed? [Y/n] ").strip().lower()

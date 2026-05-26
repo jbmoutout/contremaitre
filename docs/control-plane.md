@@ -14,7 +14,7 @@ INIT  →  WORK  →  REVIEW  →  APPROVED   (PR opened)
 
 - **WORK** is one multi-turn opencode session. The agent runs `/improve-codebase-architecture` end-to-end (Explore → Present → Grill → settle → implement) while the read-only tooled SIM responds turn by turn as the SWE the skill talks to. The loop terminates when the agent writes `.contremaitre/IMPLEMENTATION_COMPLETE` in the worktree, or when a cap fires.
 - **REVIEW** is a single-shot SIM call against `/review/SETTLED_DESIGN.md` and `/review/diff.patch` (read-only mounts). The SIM emits a strict JSON verdict.
-- **Revision** is not a separate state. A `CHANGES_REQUESTED` verdict clears the marker file, sends the required changes to the agent's WORK session (same opencode session, resumed via `--session`), and re-enters WORK.
+- **Revision** is not a separate state. A `CHANGES_REQUESTED` verdict clears the marker file, sends each reviewer's `summary` and the merged `required_changes` bullets to the agent's WORK session (same opencode session, resumed via `--session`), and re-enters WORK. Other verdict fields (`verdict`, `confidence`, `checks_performed`) are dropped — they're audit-only and live in `review_cycles.jsonl`.
 - **APPROVED** runs hard gates (diff-scan, diff-hash match, clean worktree), executable checks, then the publisher.
 
 The multi-turn loop is self-contained; Contremaitre does not import any external orchestration substrate at runtime.

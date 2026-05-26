@@ -17,6 +17,10 @@ and not re-sent.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..verdicts import ParsedVerdict
 
 _HERE = Path(__file__).resolve().parent
 
@@ -47,16 +51,33 @@ def sim_subsequent_turn(agent_text: str) -> str:
     return "AGENT:\n" + agent_text
 
 
-def revision_followup(required_changes: list[str]) -> str:
-    """Build the message that resumes the agent's WORK session after CHANGES_REQUESTED."""
+def revision_followup(
+    required_changes: list[str],
+    *,
+    sim: ParsedVerdict | None = None,
+    extra: ParsedVerdict | None = None,
+) -> str:
+    """Build the message that resumes the agent's WORK session after CHANGES_REQUESTED.
+
+    Forwards each reviewer's natural-language `summary` alongside the merged
+    `required_changes` bullets so the agent gets framing (what's right, what's
+    wrong) rather than just terse instructions.
+    """
 
     bullets = "\n".join(f"- {item}" for item in required_changes) or "- (none specified)"
+    summary_blocks: list[str] = []
+    if sim is not None:
+        summary_blocks.append(f"[SIM]\n{sim.summary.strip()}")
+    if extra is not None:
+        summary_blocks.append(f"[EXTRA]\n{extra.summary.strip()}")
+    summaries = ("\n\n".join(summary_blocks) + "\n\n") if summary_blocks else ""
     return (
-        "The review pass returned CHANGES_REQUESTED. Address these items, "
-        "then re-write `.contremaitre/IMPLEMENTATION_COMPLETE` when ready for "
-        "another review.\n\n"
+        "The review pass returned CHANGES_REQUESTED.\n\n"
+        f"{summaries}"
         "Required changes:\n"
-        f"{bullets}"
+        f"{bullets}\n\n"
+        "Address these items, then re-write "
+        "`.contremaitre/IMPLEMENTATION_COMPLETE` when ready for another review."
     )
 
 

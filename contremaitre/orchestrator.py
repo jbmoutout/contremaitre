@@ -211,6 +211,8 @@ class Orchestrator:
     def _review_rounds(self, *, actor: ActorRunner, worktree_git: GitRepo, branch: str) -> RunResult:
         last_required_changes: list[str] = []
         last_parsed: ParsedVerdict | None = None
+        last_sim: ParsedVerdict | None = None
+        last_extra: ParsedVerdict | None = None
 
         for review_round in range(1, self.config.caps.max_review_rounds + 1):
             self._transition(State.WORK, f"WORK session round {review_round}")
@@ -218,6 +220,8 @@ class Orchestrator:
                 actor=actor,
                 review_round=review_round,
                 required_changes=last_required_changes,
+                sim_parsed=last_sim,
+                extra_parsed=last_extra,
             )
             self._emit(events.WORK_SESSION_END, round=review_round, outcome=outcome)
 
@@ -277,6 +281,8 @@ class Orchestrator:
             if parsed.verdict == ReviewVerdict.CHANGES_REQUESTED:
                 last_required_changes = list(parsed.required_changes)
                 last_parsed = parsed
+                last_sim = self._last_sim_parsed
+                last_extra = self._last_extra_parsed
                 self._clear_implementation_complete()
                 self._emit(
                     events.REVISION_REQUESTED,
@@ -311,6 +317,8 @@ class Orchestrator:
         actor: ActorRunner,
         review_round: int,
         required_changes: list[str],
+        sim_parsed: ParsedVerdict | None,
+        extra_parsed: ParsedVerdict | None,
     ) -> str:
         """Run the multi-turn WORK session until terminal or cap.
 
@@ -320,7 +328,11 @@ class Orchestrator:
         if review_round == 1:
             first_message = prompts.INITIAL_PROMPT
         else:
-            first_message = prompts.revision_followup(required_changes)
+            first_message = prompts.revision_followup(
+                required_changes,
+                sim=sim_parsed,
+                extra=extra_parsed,
+            )
 
         agent_text = self._agent_turn(actor, first_message)
         if self._implementation_complete():
