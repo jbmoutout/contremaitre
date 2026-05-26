@@ -12,6 +12,34 @@ from pathlib import Path
 from typing import Any
 
 
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL file and return parsed dicts, skipping invalid lines.
+
+    Defensive by design: returns [] on missing/unreadable files rather than
+    raising, so live callers (TUI polls, cost caps) don't crash on transient
+    I/O failures. Use `errors="replace"` so bad bytes in a log file produce
+    U+FFFD replacement characters instead of crashing.
+    """
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
+
+
 def utc_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
