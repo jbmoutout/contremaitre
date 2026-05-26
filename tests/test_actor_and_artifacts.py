@@ -541,7 +541,7 @@ class RecordRecoveryTest(unittest.TestCase):
     AND guardrail_events.jsonl (mirrored for single-tail discovery).
     """
 
-    def testrecord_recovery_writes_both_files(self):
+    def test_record_recovery_writes_both_files(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
