@@ -7,21 +7,16 @@ stop when recorded spend crosses the configured cap.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+from .jsonlog import read_jsonl
 
 
 def estimate_recorded_cost_usd(*paths: Path) -> float:
     total = 0.0
     for path in paths:
-        if not path.exists():
-            continue
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        for event in read_jsonl(path):
             total += _sum_costs(event)
     return round(total, 6)
 

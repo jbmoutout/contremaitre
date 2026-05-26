@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import events
-from .jsonlog import append_jsonl, append_text_event, append_transcript
+from .jsonlog import append_jsonl, append_text_event, append_transcript, read_jsonl
 from .models import ActorMode, RunConfig, RunPaths
 
 
@@ -622,13 +622,12 @@ def _detect_provider_quota_exhausted(path: Path, baseline_text_count: int) -> st
 
     if not path.exists():
         return None
-    events = _read_events(path)
+    events = read_jsonl(path)
     seen_text = 0
     for event in events:
         if event.get("type") == "text":
             seen_text += 1
             if seen_text > baseline_text_count:
-                # A real text reply landed — anything before it is stale.
                 return None
         if event.get("type") != "error":
             continue
@@ -650,26 +649,12 @@ def redact_command(cmd: list[str]) -> list[str]:
     return redacted
 
 
-def _read_events(path: Path) -> list[dict[str, object]]:
-    if not path.exists():
-        return []
-    events = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-    return events
-
-
 def _count_text_events(path: Path) -> int:
-    return sum(1 for event in _read_events(path) if event.get("type") == "text")
+    return sum(1 for event in read_jsonl(path) if event.get("type") == "text")
 
 
 def _latest_text(path: Path) -> str:
-    for event in reversed(_read_events(path)):
+    for event in reversed(read_jsonl(path)):
         if event.get("type") == "text":
             part = event.get("part")
             if isinstance(part, dict):
@@ -680,7 +665,7 @@ def _latest_text(path: Path) -> str:
 
 
 def _latest_session_id(path: Path) -> str | None:
-    for event in reversed(_read_events(path)):
+    for event in reversed(read_jsonl(path)):
         session = event.get("sessionID") or event.get("session_id")
         if isinstance(session, str):
             return session
@@ -694,7 +679,7 @@ def _latest_error_after_text_count(path: Path, baseline_text_count: int) -> str 
     whether the *current* turn failed, ignore errors from prior turns.
     """
 
-    events = _read_events(path)
+    events = read_jsonl(path)
     seen_text = 0
     cutoff_idx = 0
     for i, event in enumerate(events):
@@ -827,7 +812,7 @@ def _existing_step_finish_part_ids(path: Path) -> set[str]:
     """
 
     ids: set[str] = set()
-    for event in _read_events(path):
+    for event in read_jsonl(path):
         if event.get("type") != "step_finish":
             continue
         part = event.get("part")
