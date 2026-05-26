@@ -28,10 +28,10 @@ def read_settled_design(worktree: Path, run_id: str) -> tuple[str, str]:
     settled = worktree / SETTLED_RELPATH
     fallback_title = f"Contremaitre refactor ({run_id})"
     if not settled.exists():
-        return fallback_title, f"Run: {run_id}\n"
+        return fallback_title, ""
     text = settled.read_text(encoding="utf-8").strip()
     if not text:
-        return fallback_title, f"Run: {run_id}\n"
+        return fallback_title, ""
     first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
     title = first_line.lstrip("#").strip()
     for prefix in ("Settled design — ", "Settled design - ", "Settled design: "):
