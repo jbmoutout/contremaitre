@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from contremaitre.flow_use import compute_phases
 from contremaitre.model_family import model_family
 from contremaitre.models import ParsedVerdict, ReviewVerdict
-from contremaitre.orchestrator import _merge_verdicts
+from contremaitre.review_manager import _merge_verdicts
 
 
 def _verdict(

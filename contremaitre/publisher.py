@@ -202,7 +202,7 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     import json as _json
     import re as _re
     from .flow_use import compute_phases
-    from .orchestrator import (
+    from .worktree_manager import (
         IMPLEMENTATION_COMPLETE_RELPATH,
         _derive_commit_message,
     )
