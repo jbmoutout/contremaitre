@@ -201,11 +201,8 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
 
     import json as _json
     import re as _re
+    from .settled_utils import IMPLEMENTATION_COMPLETE_RELPATH, read_settled_design
     from .flow_use import compute_phases
-    from .orchestrator import (
-        IMPLEMENTATION_COMPLETE_RELPATH,
-        _derive_commit_message,
-    )
 
     def _read_jsonl(p: Path) -> list[dict]:
         if not p.exists():
@@ -223,11 +220,7 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         except (OSError, ValueError):
             return None
 
-    title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
-    # `_derive_commit_message` appends `\n\n---\nRun: <id>\n` for `git log`
-    # readability. The PR body has its own footer with run_id + diff hash,
-    # so strip the commit-only trailer to avoid a double separator.
-    settled_body = _re.sub(r"\n+---\nRun: [^\n]+\n*$", "", settled_body)
+    title, settled_body = read_settled_design(paths.worktree, paths.run_id)
     # Demote SETTLED headings 2 levels so the body's own H2 sections
     # (## Design, ## SIM review) stay the top of the visible hierarchy
     # and the SETTLED H1/H2 don't blow up GitHub's rendering.
