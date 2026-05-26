@@ -16,6 +16,7 @@ INIT  →  WORK  →  REVIEW  →  APPROVED   (PR opened)
 - **REVIEW** is a single-shot SIM call against `/review/SETTLED_DESIGN.md` and `/review/diff.patch` (read-only mounts). The SIM emits a strict JSON verdict.
 - **Revision** is not a separate state. A `CHANGES_REQUESTED` verdict clears the marker file, sends each reviewer's `summary` and the merged `required_changes` bullets to the agent's WORK session (same opencode session, resumed via `--session`), and re-enters WORK. Other verdict fields (`verdict`, `confidence`, `checks_performed`) are dropped — they're audit-only and live in `review_cycles.jsonl`.
 - **APPROVED** runs hard gates (diff-scan, diff-hash match, clean worktree), executable checks, then the publisher.
+- **cli_review** (optional, post-publish) — when `--cli-reviewer codex|claude` is set, the orchestrator invokes a locally-installed CLI (claude/codex) on the operator's interactive subscription AFTER the Draft PR is opened. The CLI pulls the PR via `gh`, produces a verdict-led markdown review (`🟢 LGTM` / `🟠 Needs attention` / `🔴 Must fix` + Conventional Comments labels), and the orchestrator posts it as a single PR comment. Runs on the host (not in a container), uses the operator's OAuth credentials, so it dodges the API quota that SIM + extra-gatekeeper burn. Failures don't block the terminal — the PR is already published.
 
 The multi-turn loop is self-contained; Contremaitre does not import any external orchestration substrate at runtime.
 
@@ -68,8 +69,9 @@ INIT
 ## Module Map
 
 - `cli.py` — argument parsing and command dispatch (`run`, `doctor`, `fixture`, `image`, `cleanup`, `tui`, `viewer`). Derives an auto-managed local clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/` from the `--upstream` (preferred) or `--fork` URL; clones lazily on first run, reused thereafter. The operator never points contremaitre at a parallel local checkout. Pre-launch Y/n prompt summarises base / source / publish target / caps (skippable via `-y` or non-TTY stdin). `_ensure_default_image_built` compares the running image's `contremaitre.dockerfile-sha256` label against the on-disk Dockerfile hash and rebuilds on mismatch — catches "edited Dockerfile, never rebuilt, image now stale".
-- `orchestrator.py` — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven container cleanup, SIGTERM emergency-flush. `_ensure_pristine_deps_volume` runs after `_create_worktree` (which fetched `origin/<base>` fresh), so the deps cache is keyed on the lockfile the agent will actually see — not on whatever stale snapshot the cache clone happened to have.
-- `prompts/` — INITIAL_PROMPT, SIM tooled persona, SIM review prompt; markdown files loaded into module constants for easy tweaking.
+- `orchestrator.py` — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven container cleanup, SIGTERM emergency-flush, optional post-publish cli_review hook (`_run_cli_review` between publish and `_write_final_stats`). `_ensure_pristine_deps_volume` runs after `_create_worktree` (which fetched `origin/<base>` fresh), so the deps cache is keyed on the lockfile the agent will actually see — not on whatever stale snapshot the cache clone happened to have.
+- `cli_reviewer.py` — post-publish CLI reviewer. Detection (`shutil.which`), launch-screen resolution (auto / codex / claude / none), prompt assembly, subprocess invocation (claude via `claude -p --permission-mode bypassPermissions`, codex via `codex exec --sandbox workspace-write --add-dir ~/.cache -o <final_message_path>`), API-key scrubbing (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` blanked in the subprocess env so the CLI cannot silently fall through to paid API usage), `gh pr comment` posting, model + verdict extraction from the JSONL stream, and the H3 metadata header prepended to the posted comment.
+- `prompts/` — INITIAL_PROMPT, SIM tooled persona, SIM review prompt, cli_reviewer prompt; markdown files loaded into module constants for easy tweaking.
 - `actors.py` — process adapters (`FakeActorRunner`, `OpencodeActorRunner`). Opencode containers run **detached** (`docker run -d`) with `contremaitre.run-id=<id>` + `contremaitre.role=<agent|sim|review>` labels; output streamed via `docker logs -f`, exit awaited via `docker wait`.
 - `fake_actor.py` — deterministic fake agent/SIM for fixture smoke runs.
 - `git_utils.py` — logged git command wrapper.
@@ -84,7 +86,7 @@ INIT
 - `fixture.py` — local fixture repo creation for smoke tests.
 - `events.py` — single source of truth for guardrail-event name strings (writer + structural-reader side). TUI classifies by substring pattern, not import.
 - `viewer/` — builds `viewer.html` (single-file HTML over the run dir's JSONL artifacts) from the orchestrator's `finally` so it lands on success and failure paths.
-- `tui.py` — read-only Textual TUI tailing JSONL artifacts. Footer: 6-dot phase trail (Init → Exploring → Grilling → Implementing → Reviewing → Done) + current phase label with sub-info (exchange/turn counts, per-reviewer verdicts) + conditional warning tokens (`↻N`, `tests ✗`, `extra:disagreed`, `↶ R<N> changes_req` after a CHANGES_REQUESTED loop-back) + elapsed/cost + TerminalVerdict badge (`PR PUSHED #N` / `NO_PR · …` / `FAILED · infra`). Exploring → Grilling fires on EITHER `architecture-review.html` being written OR the SIM joining the conversation (whichever first) — the OR fallback handles agents that skip the cards file. Second row shows plain (cmd+clickable) URLs to the PR and viewer at terminal state — not OSC 8, since Apple Terminal doesn't support that. Animated Braille spinner with `active` / `thinking` / `idle` states per pane; per-turn separator in each pane log; elapsed clock + last-write age freeze at terminal state.
+- `tui.py` — read-only Textual TUI tailing JSONL artifacts. Footer: 7-dot phase trail (Init → Exploring → Grilling → Implementing → Reviewing → cli_review → Done) + current phase label with sub-info (exchange/turn counts, per-reviewer verdicts, tool-named CLI review status) + conditional warning tokens (`↻N`, `tests ✗`, `extra:disagreed`, `↶ R<N> changes_req` after a CHANGES_REQUESTED loop-back) + elapsed/cost + TerminalVerdict badge (`PR PUSHED #N` / `NO_PR · …` / `FAILED · infra`). Per-reviewer status glyphs (`Review ✓✓`, `Extra Review ✓✓`, `CODEX Review ✓/!/✗`) stay visible through cli_review and done — the CLI review glyph reflects the agent's verdict glyph parsed from line 1 of the review (🟢/🟠/🔴), not the subprocess exit code. Exploring → Grilling fires on EITHER `architecture-review.html` being written OR the SIM joining the conversation (whichever first) — the OR fallback handles agents that skip the cards file. Second row shows plain (cmd+clickable) URLs to the PR and viewer at terminal state — not OSC 8, since Apple Terminal doesn't support that. Animated Braille spinner with `active` / `thinking` / `idle` states per pane; per-turn separator in each pane log; elapsed clock + last-write age freeze at terminal state. Layout: AGENT and SIM panes (with EXTRA REVIEWER stacked under SIM, lazy-shown on its first actor-start event) occupy the main 2-column row; a full-width cli_review pane (also lazy-shown, on the `cli_review_started` event) appears below them when post-publish review runs, then the orchestrator-activity strip. Yellow active-border anchors on the cli_review pane for the whole post-publish phase regardless of stdout chunk timing. `Ctrl+C` drains the orchestrator subprocess off a worker thread so the TUI keeps ticking and shutdown events (`sigterm_emergency_write`, `worktree_removed`) render live.
 
 ## Host-owned boundaries
 
@@ -128,6 +130,10 @@ Every run writes:
 - `initial_prompt.txt`
 - `raw_export.jsonl` (agent JSONL stream)
 - `sim_raw_export.jsonl` (SIM JSONL stream)
+- `extra_reviewer_raw_export.jsonl` (extra-gatekeeper JSONL stream, only when `--extra-reviewer-model` is set)
+- `claude_review_raw_export.jsonl` OR `codex_review_raw_export.jsonl` (post-publish cli_review stream, only when `--cli-reviewer` is set; whichever tool ran)
+- `<tool>_review.md` (the posted PR-comment body for the cli_review, with the H3 metadata header)
+- `codex_final_message.md` (codex-only — content of `-o`'d final message, source of `codex_review.md`)
 - `transcript.md`
 - `timeline.jsonl`
 - `trajectory.json`
@@ -136,7 +142,7 @@ Every run writes:
 - `test_runs.jsonl`
 - `review_cycles.jsonl`
 - `worktree_state.jsonl`
-- `guardrail_events.jsonl` (per-turn lifecycle events + `check_started`/`check_completed`, `host_commit_created`, `review_verdict`, `hard_gates_checked`, `published`/`publication_blocked`, `worktree_removed`)
+- `guardrail_events.jsonl` (per-turn lifecycle events + `check_started`/`check_completed`, `host_commit_created`, `review_verdict`, `hard_gates_checked`, `published`/`publication_blocked`, `cli_review_started`/`cli_review_completed`/`cli_review_failed`, `worktree_removed`)
 - `recoveries.jsonl` (sqlite-recovery / SIGTERM-emergency events)
 - `pr.json`
 - `subagents/agent_NN_<slug>.md` (one per `task` tool_use; populated by `extract.py` in the orchestrator's `finally`)

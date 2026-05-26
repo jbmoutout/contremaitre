@@ -53,6 +53,7 @@ just deepdeep tui-run main git@github.com:<you>/<target>.git
 | `--repo-cache` | override the auto-derived cache path (default: `~/.cache/contremaitre/<slug>/`) | optional |
 | `--opencode-config` | path to your `opencode.json` (provider + model registry) | **yes** for opencode mode |
 | `--check-cmd` | executable check the post-implementation worktree must pass; repeatable | optional (publication blocked only on a configured-and-failing check) |
+| `--cli-reviewer` | post-publish code review by a locally-installed CLI on your subscription: `auto` / `codex` / `claude` / `none`. `auto` (default) detects what's installed and prompts on TTY. Posts a single review comment on the Draft PR; never blocks the run. | optional (default: `auto`) |
 | `--publish-mode gh` | open a real draft PR via `gh pr create --draft` | optional (default: `stub` — no PR, just simulates) |
 | `--yes` / `-y` | skip the pre-launch Y/n prompt | optional (auto-skipped in non-TTY) |
 | `--allow-open-egress` | accept unrestricted container egress; alternative is `--docker-network` / proxy flags | required if no proxy is configured |
@@ -114,6 +115,8 @@ INIT → WORK → REVIEW → APPROVED → draft PR
 **REVIEW** is a single-shot SIM call against `.contremaitre/SETTLED_DESIGN.md` and the diff. The SIM returns a strict JSON verdict.
 
 **Publication** runs only after `APPROVED` clears hard gates (diff scan, diff-hash match, clean worktree) and any configured executable checks. Skipping `--check-cmd` is fine — the L1 gate becomes a no-op and the scorecard records `executable_confidence: null`.
+
+**Post-publish code review** (optional). If `--cli-reviewer` is set (default `auto` detects `claude`/`codex` on PATH and prompts on TTY), the orchestrator invokes the chosen CLI after the Draft PR opens. It pulls the PR diff via `gh`, produces a verdict-led markdown review (`🟢 LGTM` / `🟠 Needs attention` / `🔴 Must fix`), and posts it as a single PR comment. The CLI runs on your host with your OAuth subscription (Claude Pro/Max, ChatGPT Plus) — no API quota, no container. Subprocess env scrubs `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` so it can't silently bill API. Failures are logged but never block the run — the PR is already published.
 
 See [docs/control-plane.md](docs/control-plane.md) for the implementation map.
 
@@ -186,6 +189,7 @@ All prompts live as markdown in [`contremaitre/prompts/`](contremaitre/prompts/)
 - [`initial_prompt.md`](contremaitre/prompts/initial_prompt.md) — turn-1 message to the agent. Invokes the skill; adds three host-owned scaffolds (no git, write `SETTLED_DESIGN.md`, write `IMPLEMENTATION_COMPLETE`).
 - [`sim_tooled_persona.md`](contremaitre/prompts/sim_tooled_persona.md) — SIM's first-turn persona. Tooled SWE collaborator, `read`/`glob`/`grep` only, skill vocabulary, read-first-claim-second discipline.
 - [`sim_review_prompt.md`](contremaitre/prompts/sim_review_prompt.md) — strict-JSON review against SETTLED + diff.
+- [`cli_reviewer_prompt.md`](contremaitre/prompts/cli_reviewer_prompt.md) — post-publish code review handed to the locally-installed CLI (claude/codex). Enforces a verdict-led format (`🟢 LGTM` / `🟠 Needs attention` / `🔴 Must fix`) + Conventional Comments labels (`issue`/`suggestion`/`nit`/`question`).
 
 ### TUI — attach to a finished run
 
