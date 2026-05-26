@@ -15,6 +15,7 @@ from contremaitre.models import ActorMode, PublishMode, RunConfig
 from contremaitre.orchestrator import Orchestrator
 from contremaitre.paths import build_run_paths
 from contremaitre.publisher import GhPublisher
+from contremaitre.worktree_manager import WorktreeManager
 
 
 class OpencodeBoundaryTest(unittest.TestCase):
@@ -184,7 +185,8 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            orch._commit_agent_changes(repo=GitRepo(orch.paths.worktree, orch.paths.git_log))
+            wm = WorktreeManager(orch.config, orch.paths, orch._emit)
+            wm.commit_agent_changes(repo=GitRepo(orch.paths.worktree, orch.paths.git_log))
 
             status = subprocess.run(["git", "-C", str(orch.paths.worktree), "status", "--porcelain"], check=True, capture_output=True, text=True)
             log_title = subprocess.run(["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%s"], check=True, capture_output=True, text=True)
@@ -203,7 +205,8 @@ class OpencodeBoundaryTest(unittest.TestCase):
             # Body carries the full SETTLED text + a run-id trailer.
             self.assertIn("Delete the duplicate singleton.", log_body.stdout)
             self.assertIn(f"Run: {orch.run_id}", log_body.stdout)
-            orch._cleanup_worktree()
+            source_repo = GitRepo(orch.config.repo, orch.paths.git_log)
+            wm.cleanup(source_repo)
 
     def test_host_commit_succeeds_when_upstream_gitignore_covers_excluded_path(self):
         # Regression: agents sometimes produce build output (e.g. `.next/`)
@@ -248,7 +251,8 @@ class OpencodeBoundaryTest(unittest.TestCase):
 
             # Must not raise. Before the fix this raised GitError(1) on the
             # `git add` step.
-            orch._commit_agent_changes(repo=GitRepo(orch.paths.worktree, orch.paths.git_log))
+            wm = WorktreeManager(orch.config, orch.paths, orch._emit)
+            wm.commit_agent_changes(repo=GitRepo(orch.paths.worktree, orch.paths.git_log))
 
             log_files = subprocess.run(
                 ["git", "-C", str(orch.paths.worktree), "show", "--name-only", "--pretty="],
@@ -257,7 +261,8 @@ class OpencodeBoundaryTest(unittest.TestCase):
             self.assertIn("README.md", log_files.stdout)
             self.assertNotIn(".next", log_files.stdout)
             self.assertNotIn(".contremaitre", log_files.stdout)
-            orch._cleanup_worktree()
+            source_repo = GitRepo(orch.config.repo, orch.paths.git_log)
+            wm.cleanup(source_repo)
 
     def test_gh_publisher_pushes_and_creates_draft_pr_from_host(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"GITHUB_TOKEN": "token"}):
