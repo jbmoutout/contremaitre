@@ -104,6 +104,7 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
 
     guardrails = _read_jsonl(paths.guardrail_events)
     recoveries = _read_jsonl(paths.recoveries)
+    cli_review = _assemble_cli_review(paths, guardrails)
 
     stats = {
         **stats_raw,
@@ -141,7 +142,109 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
         "eval": eval_blob or None,
         "guardrails": guardrails,
         "recoveries": recoveries,
+        "cli_review": cli_review,
     }
+
+
+def _assemble_cli_review(
+    paths: RunPaths,
+    guardrails: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Collect the post-publish CLI-review artifacts into one viewer blob.
+
+    Returns `None` when this run didn't enable a CLI reviewer (no
+    `cli_review_started` event ever fired). Otherwise returns:
+
+      {
+        "tool":       "codex" | "claude",
+        "status":     "completed" | "failed",
+        "verdict":    "🟢"/"🟠"/"🔴" | None,     # parsed agent verdict
+        "duration_s": float | None,                # cli_review_started → completed/failed
+        "model":      str | None,                  # codex preamble only
+        "url":        str | None,                  # PR URL the comment was posted to
+        "markdown":   str | "",                    # body the orchestrator posted
+        "fail_reason": str | None,                 # only when status == "failed"
+      }
+
+    Reads only what already exists on disk — no events emitted, no
+    side effects.
+    """
+
+    started_evt = next((g for g in guardrails if g.get("event") == "cli_review_started"), None)
+    if started_evt is None:
+        return None
+    completed_evt = next((g for g in guardrails if g.get("event") == "cli_review_completed"), None)
+    failed_evt = next((g for g in guardrails if g.get("event") == "cli_review_failed"), None)
+
+    tool = (completed_evt or failed_evt or started_evt).get("tool") or "?"
+    if failed_evt is not None and completed_evt is None:
+        status = "failed"
+    elif completed_evt is not None:
+        status = "completed"
+    else:
+        # Started but no terminal event recorded — treat as failed for
+        # the viewer (run was likely SIGKILL'd mid-review).
+        status = "failed"
+
+    review_md_path = paths.run_dir / f"{tool}_review.md"
+    markdown = ""
+    if review_md_path.is_file():
+        try:
+            markdown = review_md_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            markdown = ""
+
+    # Lazy import — `cli_reviewer` imports `jsonlog` etc.; keep the viewer
+    # import-cycle clean by deferring to call time.
+    from ..cli_reviewer import extract_model, parse_verdict
+
+    sink_name = f"{tool}_review_raw_export.jsonl"
+    sink = paths.run_dir / sink_name
+    model = extract_model(tool, sink) if tool in ("codex", "claude") else None
+
+    verdict: str | None = None
+    if completed_evt is not None:
+        verdict = completed_evt.get("verdict")
+    if not verdict and markdown:
+        verdict = parse_verdict(markdown)
+
+    duration_s = _event_duration(started_evt, completed_evt or failed_evt)
+
+    return {
+        "tool": tool,
+        "status": status,
+        "verdict": verdict,
+        "duration_s": duration_s,
+        "model": model,
+        "url": (completed_evt or started_evt or {}).get("url"),
+        "markdown": markdown,
+        "fail_reason": (failed_evt or {}).get("reason"),
+    }
+
+
+def _event_duration(
+    start_evt: dict[str, Any] | None,
+    end_evt: dict[str, Any] | None,
+) -> float | None:
+    """Seconds between two guardrail-event timestamps (ISO-8601 `ts` field)."""
+
+    if not start_evt or not end_evt:
+        return None
+    from datetime import datetime
+
+    def _parse(ts: Any) -> float | None:
+        if not isinstance(ts, str):
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
+    t0 = _parse(start_evt.get("ts"))
+    t1 = _parse(end_evt.get("ts"))
+    if t0 is None or t1 is None:
+        return None
+    return round(t1 - t0, 3)
 
 
 def _summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:

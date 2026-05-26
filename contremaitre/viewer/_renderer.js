@@ -48,6 +48,26 @@
     ? `<span class="item">extra <b>${esc(stats.extra_reviewer_model.split("/").pop())}</b></span>`
     : "";
 
+  // Post-publish CLI review chip — only when the run actually ran one.
+  // Tier matches the agent's verdict glyph (🟢 green / 🟠 yellow / 🔴 red),
+  // NOT the subprocess exit status, so `🔴 Must fix` reads red even though
+  // the subprocess exited cleanly.
+  const cli = DATA.cli_review;
+  function cliTier(c) {
+    if (!c) return "tier-unknown";
+    if (c.status !== "completed") return "tier-red";
+    if (c.verdict === "🟢") return "tier-green";
+    if (c.verdict === "🟠") return "tier-yellow";
+    if (c.verdict === "🔴") return "tier-red";
+    return "tier-unknown";
+  }
+  // The leading sim-dot IS the verdict signal (tier-green/yellow/red).
+  // We deliberately omit the raw 🟢/🟠/🔴 emoji here — the clean colored
+  // circle is the house-style indicator everywhere else in the viewer.
+  const cliChip = cli
+    ? `<span class="item"><span class="sim-dot ${cliTier(cli)}"></span>${esc((cli.tool || "cli").toUpperCase())} review${cli.model ? " <code>" + esc(cli.model) + "</code>" : ""}${cli.duration_s != null ? " · <span class=\"dim\">" + esc(dur(cli.duration_s)) + "</span>" : ""}</span>`
+    : "";
+
   document.getElementById("stats-header").innerHTML = `
     <span class="item"><span class="sim-dot ${verdictTier}"></span>verdict <b>${esc(verdict)}</b></span>
     <span class="item">cost <b>${esc(cost)}</b></span>
@@ -58,6 +78,7 @@
     <span class="item"><b>${fmt(stats.subagent_count)}</b> sub-agents</span>
     <span class="item"><b>${fmt(stats.files_written_count)}</b> files written</span>
     ${extraModelChip}
+    ${cliChip}
   `;
 
   // ----- tab nav -----
@@ -121,6 +142,18 @@
       <div class="k">recorded cost</div><div class="v">$<b>${(stats.cost_usd ?? 0).toFixed(4)}</b></div>
       ${prRow}
     </div>
+
+    ${cli ? `
+    <h2>post-publish review (${esc(cli.tool)})</h2>
+    <div class="meta-grid">
+      <div class="k">status</div><div class="v"><span class="sim-dot ${cliTier(cli)}"></span><b>${esc(cli.status)}</b></div>
+      ${cli.model ? `<div class="k">model</div><div class="v"><code>${esc(cli.model)}</code></div>` : ""}
+      ${cli.duration_s != null ? `<div class="k">duration</div><div class="v"><b>${esc(dur(cli.duration_s))}</b></div>` : ""}
+      ${cli.url ? `<div class="k">PR comment posted on</div><div class="v"><a href="${esc(cli.url)}">${esc(cli.url)}</a></div>` : ""}
+      ${cli.fail_reason ? `<div class="k">failure reason</div><div class="v" style="color:var(--warning)">${esc(cli.fail_reason)}</div>` : ""}
+    </div>
+    ${cli.markdown ? `<div class="turn"><div class="turn-body"><pre>${esc(cli.markdown)}</pre></div></div>` : ""}
+    ` : ""}
 
     <h2>initial prompt</h2>
     <div class="turn"><div class="turn-body"><pre>${esc(DATA.initial_prompt || "—")}</pre></div></div>

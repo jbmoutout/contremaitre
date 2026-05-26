@@ -70,6 +70,8 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
     if not base and isinstance(pr, dict):
         base = pr.get("base")
 
+    cli_review = _read_cli_review_summary(run_dir)
+
     return {
         "run_id": run_dir.name,
         "viewer_href": f"{run_dir.name}/{VIEWER_FILENAME}",
@@ -91,7 +93,41 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "pr_url": (pr or {}).get("url") if isinstance(pr, dict) else None,
         "pr_title": (pr or {}).get("title") if isinstance(pr, dict) else None,
         "pr_branch": (pr or {}).get("branch") if isinstance(pr, dict) else None,
+        "cli_review_tool": cli_review[0] if cli_review else None,
+        "cli_review_verdict": cli_review[1] if cli_review else None,
     }
+
+
+def _read_cli_review_summary(run_dir: Path) -> tuple[str, str | None] | None:
+    """`(tool, verdict_glyph)` derived from `<tool>_review.md` on disk.
+
+    Skips the I/O round-trip into guardrails — the posted markdown file
+    name carries the tool, and the agent's verdict (🟢/🟠/🔴) lives on
+    line 1 per the prompt spec. Returns `None` when no cli_review.md is
+    present (run didn't enable the feature).
+    """
+
+    for tool in ("codex", "claude"):
+        path = run_dir / f"{tool}_review.md"
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return (tool, None)
+        # Verdict glyph is on line 1 after the H3 header the orchestrator
+        # prepends. Scan a handful of non-blank lines for the first match.
+        verdict: str | None = None
+        for line in text.splitlines()[:8]:
+            stripped = line.strip()
+            for glyph in ("🟢", "🟠", "🔴"):
+                if stripped.startswith(glyph):
+                    verdict = glyph
+                    break
+            if verdict:
+                break
+        return (tool, verdict)
+    return None
 
 
 _SETTLED_MAX_LINES = 3
@@ -233,6 +269,18 @@ def _verdict_tier(verdict: str) -> str:
         return _TIER_BY_VERDICT[verdict]
     if verdict.startswith("NO_PR"):
         return "tier-yellow"
+    return "tier-unknown"
+
+
+def _cli_review_tier(verdict: str | None) -> str:
+    """Map the agent's verdict glyph to a sim-dot tier class."""
+
+    if verdict == "🟢":
+        return "tier-green"
+    if verdict == "🟠":
+        return "tier-yellow"
+    if verdict == "🔴":
+        return "tier-red"
     return "tier-unknown"
 
 
@@ -410,6 +458,14 @@ def _render_row(r: dict[str, Any]) -> str:
         models_bits.append(f'<span style="color:var(--sim)">sim</span> <code>{_escape(r["sim_model"])}</code>')
     if r["extra_model"]:
         models_bits.append(f'<span style="color:var(--extra)">extra</span> <code>{_escape(r["extra_model"])}</code>')
+    if r["cli_review_tool"]:
+        # Colored sim-dot in place of the raw 🟢/🟠/🔴 emoji — keeps the
+        # house style consistent with the other tier dots on the page.
+        cli_tier = _cli_review_tier(r["cli_review_verdict"])
+        models_bits.append(
+            f'<span class="sim-dot {cli_tier}"></span>'
+            f'<span style="color:var(--accent)">{_escape(r["cli_review_tool"])} review</span>'
+        )
     models_line = " · ".join(models_bits) if models_bits else '<span class="no-eval">no model recorded</span>'
 
     branch_line = f'<div class="rep-meta">branch <code>{_escape(r["pr_branch"])}</code></div>' if r["pr_branch"] else ""
