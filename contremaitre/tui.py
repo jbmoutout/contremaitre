@@ -30,6 +30,7 @@ import functools
 import json
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,12 @@ APPLY_PATCH_ARCH_REVIEW_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 DOCKER_REFRESH_S = 2.0
+
+# Sentinel for the "no prior active pane recorded yet" state on the very
+# first tick — distinct from `None` (a legitimate active-pane value meaning
+# "every pane is idle right now") so the wink doesn't fire spuriously on
+# the initial render.
+_UNSET_ACTIVE = object()
 
 
 # ---------- JSONL helpers ----------
@@ -255,7 +262,7 @@ def _render_pane_subheader(
 # included) makes them cmd+clickable. OSC 8 hyperlinks are deliberately not
 # used because Apple Terminal doesn't support them.
 
-_PHASES = ("init", "exploring", "grilling", "implementing", "reviewing", "done")
+_PHASES = ("init", "exploring", "grilling", "implementing", "reviewing", "cli_review", "done")
 
 
 def _derive_phase(
@@ -268,6 +275,9 @@ def _derive_phase(
     architecture_review_done: bool = False,
     sim_started: bool = False,
     review_started: bool = False,
+    cli_review_started: bool = False,
+    cli_review_completed: bool = False,
+    cli_review_failed: bool = False,
 ) -> tuple[str, str]:
     """Return `(phase, color_state)`.
 
@@ -297,10 +307,17 @@ def _derive_phase(
 
     if terminal:
         if terminal_verdict == "READY_FOR_DRAFT_PR":
+            # If the CLI reviewer ran but didn't finish cleanly, surface the
+            # partial state — `done warn` rather than `done ok` so the
+            # operator can see the comment didn't post even though the PR did.
+            if cli_review_started and not cli_review_completed:
+                return ("done", "warn") if cli_review_failed else ("done", "ok")
             return ("done", "ok")
         if terminal_verdict in ("NO_PR_CHANGES_REQUESTED", "NO_PR_NEEDS_HUMAN"):
             return ("done", "warn")
         # FAILED_INFRA (or unknown) — freeze trail at last active phase.
+        if cli_review_started:
+            return ("cli_review", "error")
         if review_started:
             return ("reviewing", "error")
         if settled:
@@ -311,6 +328,8 @@ def _derive_phase(
             return ("exploring", "error")
         return ("init", "error")
     # Running.
+    if cli_review_started and not cli_review_completed:
+        return ("cli_review", "warn" if cli_review_failed else "live")
     if review_started:
         return ("reviewing", "live")
     if settled:
@@ -482,6 +501,73 @@ def _reviewer_glyph(status: str) -> tuple[str, str]:
     return "·", _PAL_DIM
 
 
+def _cli_review_status_glyph(
+    status: str | None,
+    verdict: str | None = None,
+) -> tuple[str, str]:
+    """`(glyph, style)` for the post-publish CLI-review status.
+
+    On `completed`, the glyph reflects the agent's verdict (🟢/🟠/🔴 from
+    line 1 of the review) — NOT the subprocess exit code. The agent can
+    successfully produce a `🔴 Must fix` review, and the footer needs to
+    show that as `✗`, not `✓`. Falls back to ✓ when the completion event
+    didn't carry a verdict (older runs / parse miss).
+    """
+
+    if status == "completed":
+        if verdict == "🔴":
+            return "✗", _PAL_ERROR
+        if verdict == "🟠":
+            return "!", _PAL_WARN
+        return "✓", _PAL_SUCCESS
+    if status == "failed":
+        return "✗", _PAL_ERROR
+    if status == "streaming":
+        return "⏵", f"bold {_PAL_BRIGHT}"
+    return "·", _PAL_DIM
+
+
+def _review_status_tail(
+    *,
+    sim_review_statuses: list[str],
+    extra_review_statuses: list[str],
+    extra_enabled: bool,
+    cli_review_status: str | None,
+    cli_review_tool: str,
+    cli_review_verdict: str | None = None,
+) -> Text:
+    """The `Review ✓ ✓  Extra Review ✓ ✓  CODEX Review ⏵` footer tail.
+
+    Rendered the same way in every phase past REVIEW so the operator's
+    gatekeeper verdicts stay visible through cli_review and done, instead
+    of disappearing the moment the phase transitions out of "Reviewing".
+    """
+
+    tail = Text()
+    if sim_review_statuses:
+        tail.append(" · Review ", style=_PAL_TEXT)
+        for i, s in enumerate(sim_review_statuses):
+            if i:
+                tail.append(" ", style=_PAL_TEXT)
+            g, st = _reviewer_glyph(s)
+            tail.append(g, style=st)
+    if extra_enabled:
+        extras = [s for s in extra_review_statuses if s != "idle"]
+        if extras:
+            tail.append("  Extra Review ", style=_PAL_TEXT)
+            for i, s in enumerate(extras):
+                if i:
+                    tail.append(" ", style=_PAL_TEXT)
+                g, st = _reviewer_glyph(s)
+                tail.append(g, style=st)
+    if cli_review_status is not None:
+        label = (cli_review_tool or "CLI").upper()
+        tail.append(f"  {label} Review ", style=_PAL_TEXT)
+        g, st = _cli_review_status_glyph(cli_review_status, cli_review_verdict)
+        tail.append(g, style=st)
+    return tail
+
+
 def _current_phase_label(
     *,
     phase: str,
@@ -498,6 +584,9 @@ def _current_phase_label(
     sim_review_statuses: list[str] | None = None,
     extra_review_statuses: list[str] | None = None,
     extra_enabled: bool = False,
+    cli_review_status: str | None = None,
+    cli_review_tool: str = "",
+    cli_review_verdict: str | None = None,
     quota_failure: dict | None = None,
 ) -> Text:
     """Phase name + sub-info (right of the trail).
@@ -553,30 +642,37 @@ def _current_phase_label(
         # would be absent).
         if current_review_round > 0:
             text.append(f" (round {current_review_round})", style=_PAL_TEXT)
-        # Always show the primary reviewer slot during this phase — it's
-        # `streaming` from the moment the phase opens, then becomes a
-        # verdict glyph when the verdict lands. One glyph per round, so
-        # past rounds stack up to the right of "Review".
-        sim_statuses = sim_review_statuses or []
-        text.append(" · Review ", style=_PAL_TEXT)
-        for i, s in enumerate(sim_statuses):
-            if i:
-                text.append(" ", style=_PAL_TEXT)
-            g, st = _reviewer_glyph(s)
-            text.append(g, style=st)
-        # Extra-reviewer slot — appears only once the extra reviewer has
-        # actually started for at least one round (orchestrator runs SIM
-        # then extra sequentially, so this is a clean "grow as activity
-        # happens" pattern rather than showing a placeholder `·`). One
-        # glyph per round, same stacking pattern as the SIM slot.
-        extra_statuses = [s for s in (extra_review_statuses or []) if s != "idle"]
-        if extra_enabled and extra_statuses:
-            text.append("  Extra Review ", style=_PAL_TEXT)
-            for i, s in enumerate(extra_statuses):
-                if i:
-                    text.append(" ", style=_PAL_TEXT)
-                g, st = _reviewer_glyph(s)
-                text.append(g, style=st)
+        text.append(
+            _review_status_tail(
+                sim_review_statuses=sim_review_statuses or [],
+                extra_review_statuses=extra_review_statuses or [],
+                extra_enabled=extra_enabled,
+                cli_review_status=cli_review_status,
+                cli_review_tool=cli_review_tool,
+                cli_review_verdict=cli_review_verdict,
+            )
+        )
+        return text
+    if phase == "cli_review":
+        if color_state == "error":
+            text.append(_infra_failure_label("CLI review", quota_failure), style=f"bold {_PAL_ERROR}")
+            return text
+        if color_state == "warn":
+            text.append("CLI review — failed", style=f"bold {_PAL_WARN}")
+        else:
+            label = f"{(cli_review_tool or 'CLI').upper()} review"
+            text.append(label, style=f"bold {_PAL_BRIGHT}")
+            text.append(" (post-publish)", style=_PAL_TEXT)
+        text.append(
+            _review_status_tail(
+                sim_review_statuses=sim_review_statuses or [],
+                extra_review_statuses=extra_review_statuses or [],
+                extra_enabled=extra_enabled,
+                cli_review_status=cli_review_status,
+                cli_review_tool=cli_review_tool,
+                cli_review_verdict=cli_review_verdict,
+            )
+        )
         return text
     # phase == "done"
     if terminal_verdict == "READY_FOR_DRAFT_PR":
@@ -588,6 +684,20 @@ def _current_phase_label(
         if trimmed:
             text.append(" · ", style=_PAL_VDIM)
             text.append(trimmed, style=_PAL_TEXT)
+        # Keep the gatekeeper + cli-review verdict glyphs visible after
+        # the run finishes — they're the most scannable record of "did
+        # every reviewer agree" and disappearing them at terminal was
+        # losing information right when the operator wants to verify.
+        text.append(
+            _review_status_tail(
+                sim_review_statuses=sim_review_statuses or [],
+                extra_review_statuses=extra_review_statuses or [],
+                extra_enabled=extra_enabled,
+                cli_review_status=cli_review_status,
+                cli_review_tool=cli_review_tool,
+                cli_review_verdict=cli_review_verdict,
+            )
+        )
     elif terminal_verdict == "NO_PR_CHANGES_REQUESTED":
         text.append("Reviewing — changes_req (exhausted)", style=f"bold {_PAL_WARN}")
     elif terminal_verdict == "NO_PR_NEEDS_HUMAN":
@@ -1214,6 +1324,26 @@ def _render_event(event: dict[str, Any]):
     return t
 
 
+def _render_cli_review_event(event: dict[str, Any]):
+    """Compact 3-column layout for the post-publish cli_review pane.
+
+    Drops the per-event-type and per-tool columns the agent/sim panes use
+    — every cli_review chunk is `type=text` with no tool tag, so those
+    11+11 chars were always empty. Keeps marker + timestamp at their tight
+    natural widths and gives the rest of the row to the body, so a
+    review's longer lines (file:line citations, markdown sentences) don't
+    wrap as aggressively in the bottom row.
+    """
+
+    marker, ts, _typ, _tool, body = _build_event_row(event)
+    t = Table.grid(padding=(0, 1))
+    t.add_column(width=1, no_wrap=True)
+    t.add_column(width=8, no_wrap=True, style="dim")
+    t.add_column(overflow="fold")
+    t.add_row(marker, ts, body)
+    return t
+
+
 def _turn_separator(turn_number: int, role: str) -> Text:
     """Visual break at an orchestrator-driven handover boundary.
 
@@ -1328,9 +1458,17 @@ if _TEXTUAL_AVAILABLE:
         .sim-subpane { width: 1fr; height: 1fr; border: round white; }
         .sim-subpane.active { border: round yellow; }
         #extra-reviewer-pane.hidden { display: none; }
+        #cli-review-pane {
+            width: 100%;
+            height: 8;
+            border: round white;
+        }
+        #cli-review-pane.active { border: round yellow; }
+        #cli-review-pane.hidden { display: none; }
         RichLog {
             background: $background;
-            scrollbar-size: 1 1;
+            scrollbar-size-vertical: 1;
+            scrollbar-size-horizontal: 1;
             scrollbar-color: white;
             scrollbar-color-active: white;
             scrollbar-color-hover: white;
@@ -1365,6 +1503,7 @@ if _TEXTUAL_AVAILABLE:
             agent_model: str = "?",
             sim_model: str = "?",
             extra_reviewer_model: str | None = None,
+            cli_reviewer: str = "none",
             docker_image: str = "?",
             target_url: str | None = None,
             base: str | None = None,
@@ -1376,6 +1515,10 @@ if _TEXTUAL_AVAILABLE:
             self.agent_model = agent_model
             self.sim_model = sim_model
             self.extra_reviewer_model = extra_reviewer_model
+            # `"codex"`, `"claude"`, or `"none"`. When set, a third column
+            # mounts post-publish and shows the subscription-bound CLI
+            # reviewer's stream.
+            self.cli_reviewer = cli_reviewer
             self.docker_image = docker_image
             self.target_url = target_url
             self.base = base
@@ -1402,6 +1545,13 @@ if _TEXTUAL_AVAILABLE:
             # (~5Hz default) so the rotation is visible to the operator
             # without eating CPU. Resets when both containers go idle.
             self._spin_tick = 0
+            # Active-pane tracker + wink countdown. When the highlighted
+            # pane changes, the free-cost smiley winks (◕‿-) for a few
+            # ticks before returning to (◕‿◕). Sentinel-init prevents a
+            # spurious wink on the very first tick (no prior active to
+            # diff against).
+            self._prev_active: str | None | object = _UNSET_ACTIVE
+            self._wink_ticks_remaining: int = 0
             # Per-pane handover separator counters. Each orchestrator
             # turn handover emits one `opencode_actor_start` event with
             # role agent/sim/review; we render a separator into the
@@ -1410,6 +1560,12 @@ if _TEXTUAL_AVAILABLE:
             self._agent_separators_rendered = 0
             self._sim_separators_rendered = 0
             self._extra_separators_rendered = 0
+            # Post-publish CLI review (claude/codex) chunk stream. Rendered
+            # into its own pane (#cli-review-pane). The detected tool name
+            # is cached so the chrome border-title can flip to e.g.
+            # "CODEX REVIEW" the moment the first chunk lands.
+            self._cli_review_idx = 0
+            self._cli_review_tool: str = ""
             # Captured at terminal state for the post-exit URL summary
             # printed to stdout — gives Apple Terminal users (no OSC 8
             # support) cmd+clickable links in their scrollback.
@@ -1422,6 +1578,8 @@ if _TEXTUAL_AVAILABLE:
                 "raw_export": self.run_dir / "raw_export.jsonl",
                 "sim_raw_export": self.run_dir / "sim_raw_export.jsonl",
                 "extra_reviewer_raw_export": self.run_dir / "extra_reviewer_raw_export.jsonl",
+                "claude_review_raw_export": self.run_dir / "claude_review_raw_export.jsonl",
+                "codex_review_raw_export": self.run_dir / "codex_review_raw_export.jsonl",
                 "guardrail_events": self.run_dir / "guardrail_events.jsonl",
                 "recoveries": self.run_dir / "recoveries.jsonl",
                 "review_cycles": self.run_dir / "review_cycles.jsonl",
@@ -1453,6 +1611,20 @@ if _TEXTUAL_AVAILABLE:
                             id="extra-reviewer-log", auto_scroll=False, markup=False, wrap=True, highlight=False
                         )
                         yield Static("", classes="pane-sub", id="extra-reviewer-sub")
+            # Post-publish CLI reviewer (claude/codex) — full-width row that
+            # appears BELOW the main panes (not inside the Horizontal) the
+            # moment the first chunk arrives. WORK/REVIEW phases get the
+            # uncompressed 2-column layout above; this row only eats vertical
+            # space when it's actually streaming. Stays hidden until then.
+            with Vertical(id="cli-review-pane"):
+                yield RichLog(
+                    id="cli-review-log",
+                    auto_scroll=False,
+                    markup=False,
+                    wrap=True,
+                    highlight=False,
+                )
+                yield Static("", classes="pane-sub", id="cli-review-sub")
             with Vertical(id="activity-panel"):
                 yield RichLog(id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
             with Horizontal(id="footer-bar"):
@@ -1472,10 +1644,20 @@ if _TEXTUAL_AVAILABLE:
             self.title = f"contremaitre · {self.run_dir.name}"
             refresh_s = 1.0 / max(0.5, min(20.0, self.refresh_hz))
             self.set_interval(refresh_s, self._tick)
-            # Hide the extra-reviewer subpane when the run is single-SIM —
-            # visually identical to the pre-extra-reviewer layout.
-            if not self.extra_reviewer_model:
-                self.query_one("#extra-reviewer-pane").set_class(True, "hidden")
+            # Extra-reviewer subpane: stays hidden until the orchestrator
+            # actually starts the extra reviewer (first actor-start event
+            # with reviewer_id=extra). When `extra_reviewer_model` is unset,
+            # the pane stays hidden for the whole run. When set, the pane
+            # only reveals at the moment of the first extra-reviewer turn,
+            # mirroring the cli_review lazy-show pattern — empty panes
+            # don't clutter the layout during phases they're not active in.
+            self.query_one("#extra-reviewer-pane").set_class(True, "hidden")
+            # CLI-review pane is hidden unconditionally on mount; the row
+            # only takes vertical space once the post-publish reviewer
+            # actually writes its first chunk (see `_update_cli_review_log`).
+            # WORK / REVIEW phases get the uncompressed 2-column layout the
+            # whole time, which is most of the run.
+            self.query_one("#cli-review-pane").set_class(True, "hidden")
 
         def _tick(self) -> None:
             now = time.time()
@@ -1487,6 +1669,8 @@ if _TEXTUAL_AVAILABLE:
             self._update_sim_log()
             if self.extra_reviewer_model:
                 self._update_extra_reviewer_log()
+            if self.cli_reviewer in ("codex", "claude"):
+                self._update_cli_review_log()
             self._update_activity_log()
             self._update_chrome()
 
@@ -1521,6 +1705,53 @@ if _TEXTUAL_AVAILABLE:
             if at_bottom:
                 widget.scroll_end(animate=False)
 
+        def _update_cli_review_log(self) -> None:
+            """Stream post-publish CLI reviewer chunks into the bottom row.
+
+            The pane is hidden until the orchestrator emits the
+            `cli_review_started` guardrail event — NOT the first stdout
+            chunk. Codex spins up for several seconds before writing
+            anything to stdout; waiting on the first chunk made the pane
+            appear delayed (looked like "only shows when it's done"). The
+            reveal now coincides with the visible `cli_review_started`
+            line in the activity log directly below.
+            """
+
+            # Unhide as soon as the orchestrator says the CLI reviewer has
+            # started, even before any stdout has arrived.
+            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            if any(g.get("event") == "cli_review_started" for g in guardrails):
+                pane = self.query_one("#cli-review-pane")
+                if pane.has_class("hidden"):
+                    pane.set_class(False, "hidden")
+
+            events, tool = self._read_cli_review_events()
+            if tool:
+                self._cli_review_tool = tool
+            widget = self.query_one("#cli-review-log", RichLog)
+            at_bottom = self._at_bottom(widget)
+            for e in events[self._cli_review_idx :]:
+                widget.write(_render_cli_review_event(e))
+            self._cli_review_idx = len(events)
+            if at_bottom:
+                widget.scroll_end(animate=False)
+
+        def _read_cli_review_events(self) -> tuple[list[dict[str, Any]], str]:
+            """Return (events, tool) for whichever CLI-review sink exists.
+
+            Only one of the two files is written per run; the other path
+            simply doesn't exist on disk. If both somehow exist, claude
+            wins arbitrarily — the orchestrator never writes both.
+            """
+
+            claude = _read_jsonl(self.paths["claude_review_raw_export"])
+            if claude:
+                return claude, "claude"
+            codex = _read_jsonl(self.paths["codex_review_raw_export"])
+            if codex:
+                return codex, "codex"
+            return [], ""
+
         def _update_sim_log(self) -> None:
             events = _read_jsonl(self.paths["sim_raw_export"])
             widget = self.query_one("#sim-log", RichLog)
@@ -1532,6 +1763,19 @@ if _TEXTUAL_AVAILABLE:
                 widget.scroll_end(animate=False)
 
         def _update_extra_reviewer_log(self) -> None:
+            # Unhide the pane as soon as the orchestrator starts the extra
+            # reviewer's first turn, even before any stdout arrives. Same
+            # pattern as `_update_cli_review_log` — file-age alone would
+            # leave the pane hidden during the model's spin-up window.
+            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            if any(
+                g.get("event") == "opencode_actor_start"
+                and g.get("reviewer_id") == "extra"
+                for g in guardrails
+            ):
+                pane = self.query_one("#extra-reviewer-pane")
+                if pane.has_class("hidden"):
+                    pane.set_class(False, "hidden")
             events = _read_jsonl(self.paths["extra_reviewer_raw_export"])
             widget = self.query_one("#extra-reviewer-log", RichLog)
             at_bottom = self._at_bottom(widget)
@@ -1635,12 +1879,20 @@ if _TEXTUAL_AVAILABLE:
                 ("agent", "raw_export"),
                 ("sim", "sim_raw_export"),
                 ("extra", "extra_reviewer_raw_export"),
+                ("cli_review", "claude_review_raw_export"),
+                ("cli_review", "codex_review_raw_export"),
             ):
                 if name == "extra" and not self.extra_reviewer_model:
                     continue
+                if name == "cli_review" and self.cli_reviewer not in ("codex", "claude"):
+                    continue
                 age = _file_age(self.paths[key])
                 if age is not None:
-                    ages[name] = age
+                    # Two cli_review sinks share the same active key — keep
+                    # the freshest one (lowest age) so whichever tool the
+                    # orchestrator chose drives the highlight.
+                    if name not in ages or age < ages[name]:
+                        ages[name] = age
             if ages:
                 return min(ages, key=ages.get)
             # No file has been written yet — fall back to container slots
@@ -1656,6 +1908,24 @@ if _TEXTUAL_AVAILABLE:
             sim_events = _read_jsonl(self.paths["sim_raw_export"])
             recoveries = _read_jsonl(self.paths["recoveries"])
             guardrails = _read_jsonl(self.paths["guardrail_events"])
+
+            # CLI-review event flags — derived early so they're available
+            # to both the CLI pane chrome (mid-function) and the phase
+            # machine (later). Single source of truth per tick.
+            cli_review_started = any(g.get("event") == "cli_review_started" for g in guardrails)
+            cli_review_completed_evt = next(
+                (g for g in guardrails if g.get("event") == "cli_review_completed"),
+                None,
+            )
+            cli_review_completed = cli_review_completed_evt is not None
+            cli_review_failed = any(g.get("event") == "cli_review_failed" for g in guardrails)
+            # Verdict glyph (🟢/🟠/🔴) the agent wrote on line 1 of the
+            # review, surfaced on the completion event payload by the
+            # orchestrator. Drives the footer glyph so `🔴 Must fix`
+            # renders as `✗` instead of the subprocess-exit-0 `✓`.
+            cli_review_verdict: str | None = (
+                cli_review_completed_evt.get("verdict") if cli_review_completed_evt else None
+            )
 
             agent_turns = _text_event_count(agent_events)
             sim_turns = _text_event_count(sim_events)
@@ -1740,8 +2010,25 @@ if _TEXTUAL_AVAILABLE:
             # forever, which contradicts the elapsed-freeze policy below.
             # The extra reviewer feeds the tick too so its pane animates
             # while the SIM is idle (otherwise the thinking loader on the
-            # extra pane would freeze).
-            if agent_state != "idle" or sim_state != "idle" or extra_state != "idle":
+            # extra pane would freeze). Same for the post-publish CLI
+            # review pane — it activates after every other pane has gone
+            # idle, so without feeding the tick the loader would never
+            # animate during the only window it actually runs in.
+            cli_review_file_age: float | None = None
+            if self.cli_reviewer in ("codex", "claude"):
+                cli_review_file_age = _file_age(self.paths["claude_review_raw_export"]) or _file_age(
+                    self.paths["codex_review_raw_export"]
+                )
+            cli_review_running_state = _activity_state(
+                container_present=False,
+                file_age=cli_review_file_age,
+            )
+            if (
+                agent_state != "idle"
+                or sim_state != "idle"
+                or extra_state != "idle"
+                or cli_review_running_state != "idle"
+            ):
                 self._spin_tick = (self._spin_tick + 1) % len(_SPINNER_FRAMES)
             spinner = _SPINNER_FRAMES[self._spin_tick]
 
@@ -1780,6 +2067,24 @@ if _TEXTUAL_AVAILABLE:
             agent_pane.border_title = f"AGENT ({_short_model(self.agent_model)})"
             sim_pane.border_title = f"{sim_label} ({_short_model(self.sim_model)})"
             active = None if terminal else self._determine_active()
+            # During the cli_review phase, the post-publish reviewer owns
+            # the highlight even before its first stdout chunk lands.
+            # Otherwise `_determine_active` would keep returning the
+            # previous freshest writer (the SIM reviewer that just APPROVED
+            # the publish), so the yellow border would lag behind the
+            # actual focus for the codex/claude spin-up window.
+            if cli_review_started and not (cli_review_completed or cli_review_failed):
+                active = "cli_review"
+            # Wink on active-pane changes — small visual cue that focus
+            # just shifted. 3 ticks ≈ 600ms at the default 5Hz refresh,
+            # long enough to register without looking glitchy. Sentinel
+            # init suppresses the wink on the very first render.
+            if (
+                self._prev_active is not _UNSET_ACTIVE
+                and active != self._prev_active
+            ):
+                self._wink_ticks_remaining = 3
+            self._prev_active = active
             agent_pane.set_class(active == "agent", "active")
             sim_pane.set_class(active == "sim", "active")
 
@@ -1800,6 +2105,61 @@ if _TEXTUAL_AVAILABLE:
                 extra_pane = self.query_one("#extra-reviewer-pane")
                 extra_pane.border_title = f"EXTRA REVIEWER ({_short_model(self.extra_reviewer_model)})"
                 extra_pane.set_class(active == "extra", "active")
+
+            # ----- CLI review column (only when configured) -----
+            # `cli_reviewer` is the operator's choice from launch screen
+            # ("codex" / "claude"); `_cli_review_tool` is what the JSONL
+            # actually shows once chunks land. The two match in normal
+            # operation; if no chunks have arrived yet we fall back to the
+            # configured choice so the title doesn't read "(?) REVIEW" mid-
+            # flight.
+            if self.cli_reviewer in ("codex", "claude"):
+                cli_events = _read_jsonl(self.paths["claude_review_raw_export"]) + _read_jsonl(
+                    self.paths["codex_review_raw_export"]
+                )
+                tool_label = (self._cli_review_tool or self.cli_reviewer).upper()
+                # Pane state mirrors the file-age semantics used elsewhere:
+                # `active` while a chunk arrived in the last 2s, otherwise
+                # `idle`. No container backs this — the CLI runs on the host.
+                cli_file_age = (
+                    _file_age(self.paths["claude_review_raw_export"])
+                    if self._cli_review_tool == "claude"
+                    else _file_age(self.paths["codex_review_raw_export"])
+                )
+                cli_state = _activity_state(
+                    container_present=False,
+                    file_age=cli_file_age,
+                )
+                if cli_state != "idle":
+                    # Spinner already ticked above if agent/sim/extra were
+                    # active; tick again here too so the post-publish window
+                    # (when those three are idle) still animates.
+                    pass
+                self.query_one("#cli-review-sub", Static).update(
+                    _render_pane_subheader(
+                        state=cli_state,
+                        spinner=spinner,
+                        turns=_text_event_count(cli_events),
+                        pending_tool=None,
+                        container_id=None,
+                        container_uptime=None,
+                    )
+                )
+                cli_pane = self.query_one("#cli-review-pane")
+                cli_pane.border_title = f"{tool_label} PR REVIEW (post-publish)"
+                # Keep the yellow active border on for the WHOLE cli_review
+                # phase, not just when a stdout chunk lands in the last 2s
+                # (file-age heuristic). Codex/claude spend long stretches
+                # thinking between stdout writes — the border kept flicking
+                # off and the operator couldn't tell at a glance which pane
+                # was the focus. Use the phase signals instead: on between
+                # cli_review_started and cli_review_completed/failed.
+                cli_phase_live = cli_review_started and not (
+                    cli_review_completed or cli_review_failed
+                )
+                cli_pane.set_class(
+                    cli_phase_live or active == "cli_review", "active"
+                )
 
             # ----- Activity panel title -----
             if terminal and self._frozen_gr_age is not None:
@@ -1839,6 +2199,7 @@ if _TEXTUAL_AVAILABLE:
                 g.get("event") == "opencode_actor_start" and g.get("role") == "review" for g in guardrails
             )
             architecture_review_done = _architecture_review_in(agent_events)
+            # cli_review_started / _completed / _failed hoisted above.
             phase, color_state = _derive_phase(
                 terminal=terminal,
                 terminal_verdict=tv,
@@ -1848,6 +2209,9 @@ if _TEXTUAL_AVAILABLE:
                 architecture_review_done=architecture_review_done,
                 sim_started=sim_started,
                 review_started=review_started,
+                cli_review_started=cli_review_started,
+                cli_review_completed=cli_review_completed,
+                cli_review_failed=cli_review_failed,
             )
 
             # Phase counters mirror flow_use.compute_phases so footer matches eval.
@@ -1871,11 +2235,14 @@ if _TEXTUAL_AVAILABLE:
             else:
                 status_text, status_style = f"exited {rc}", f"bold {_PAL_ERROR}"
 
-            # Per-reviewer status for the Reviewing phase label. Computed
-            # only when in (or freshly-terminal-from) reviewing so we don't
-            # pay for it during WORK turns.
+            # Per-reviewer status for the Reviewing / CLI-review / Done
+            # phase labels. Computed once the review phase has started so
+            # the verdict glyphs stay visible through cli_review and done
+            # (used to disappear at terminal — losing the most scannable
+            # "did every reviewer agree" signal right when the operator
+            # wants to verify).
             extra_enabled = bool(self.extra_reviewer_model)
-            if phase in ("reviewing",) or (terminal and review_started):
+            if review_started:
                 current_review_round = _current_review_round(guardrails)
                 sim_review_statuses = [
                     _reviewer_status(
@@ -1904,6 +2271,18 @@ if _TEXTUAL_AVAILABLE:
                 sim_review_statuses = []
                 extra_review_statuses = []
 
+            # CLI-review status derived from the same guardrail events that
+            # drive the phase machine — None when this run didn't enable a
+            # CLI reviewer (so the tail renders nothing).
+            cli_review_status: str | None = None
+            if self.cli_reviewer in ("codex", "claude"):
+                if cli_review_failed:
+                    cli_review_status = "failed"
+                elif cli_review_completed:
+                    cli_review_status = "completed"
+                elif cli_review_started:
+                    cli_review_status = "streaming"
+
             # Left segment: trail + phase label + persistent review token + warnings.
             left = Text()
             left.append(_phase_trail(phase, color_state))
@@ -1924,6 +2303,11 @@ if _TEXTUAL_AVAILABLE:
                     sim_review_statuses=sim_review_statuses,
                     extra_review_statuses=extra_review_statuses,
                     extra_enabled=extra_enabled,
+                    cli_review_status=cli_review_status,
+                    cli_review_tool=self._cli_review_tool or (
+                        self.cli_reviewer if self.cli_reviewer in ("codex", "claude") else ""
+                    ),
+                    cli_review_verdict=cli_review_verdict,
                     quota_failure=quota_failure,
                 )
             )
@@ -1948,7 +2332,11 @@ if _TEXTUAL_AVAILABLE:
             right.append(_fmt_elapsed(elapsed), style=_PAL_DIM)
             right.append(" · ", style=_PAL_VDIM)
             if _is_free_model(self.agent_model) and _is_free_model(self.sim_model):
-                right.append("free (◕‿◕)", style=_PAL_SUCCESS)
+                if self._wink_ticks_remaining > 0:
+                    self._wink_ticks_remaining -= 1
+                    right.append("free (◕‿-)", style=_PAL_SUCCESS)
+                else:
+                    right.append("free (◕‿◕)", style=_PAL_SUCCESS)
             else:
                 cost_usd = sum_costs_in_events(agent_events, sim_events)
                 right.append(f"${cost_usd:.4f}", style=_PAL_TEXT if cost_usd > 0 else _PAL_DIM)
@@ -1988,17 +2376,53 @@ if _TEXTUAL_AVAILABLE:
             self.query_one("#links-line").set_class(not (terminal and (pr_url or has_viewer)), "hidden")
 
         def action_quit(self) -> None:
-            if self.proc and self.proc.poll() is None:
+            """Ctrl+C: ack visibly, then drain the orchestrator off-thread.
+
+            Used to call `proc.wait(timeout=10)` directly here, which blocked
+            the Textual event loop for up to 10 seconds — `_tick` couldn't
+            fire, the screen froze, and the SIGTERM_EMERGENCY_WRITE +
+            WORKTREE_REMOVED events the orchestrator emits during shutdown
+            never rendered. From the operator's seat it looked bugged.
+
+            Now: write an immediate ack to the activity log so the keystroke
+            is acknowledged, then run the wait on a background thread.
+            `_tick`'s set_interval keeps firing and renders shutdown events
+            live (`SIGTERM_EMERGENCY_WRITE`, `worktree_removed`, etc.).
+            """
+
+            if self.proc is None or self.proc.poll() is not None:
+                # Read-only attach, or proc already exited — close immediately.
+                self.exit(self.proc.returncode if self.proc else 0)
+                return
+            self.query_one("#activity-log", RichLog).write(
+                Text(
+                    "⏹ ctrl+c — sending SIGTERM, draining containers + writing stats…",
+                    style=f"bold {_PAL_WARN}",
+                )
+            )
+            threading.Thread(target=self._shutdown_worker, daemon=True).start()
+
+        def _shutdown_worker(self) -> None:
+            """Drain the orchestrator subprocess; called on a background thread.
+
+            `proc.wait` here is safe because we're off the Textual event
+            loop. When the orchestrator exits, we marshal `self.exit(...)`
+            back onto the main thread via `call_from_thread`.
+            """
+
+            proc = self.proc
+            if proc is None:
+                return
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
                 try:
-                    self.proc.terminate()
-                    self.proc.wait(timeout=10)
+                    proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    self.proc.kill()
-                    try:
-                        self.proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        pass
-            self.exit(self.proc.returncode if self.proc else 0)
+                    pass
+            self.call_from_thread(self.exit, proc.returncode)
 
 
 # ---------- Entry points called from cli.py ----------
@@ -2037,12 +2461,21 @@ def attach(run_dir: Path, *, refresh_hz: float = 5.0) -> int:
     run_dir = run_dir.resolve()
     if not run_dir.exists():
         raise SystemExit(f"run dir does not exist: {run_dir}")
-    agent_model, sim_model, extra_reviewer_model, docker_image, target_url, base = _read_run_models(run_dir)
+    (
+        agent_model,
+        sim_model,
+        extra_reviewer_model,
+        cli_reviewer,
+        docker_image,
+        target_url,
+        base,
+    ) = _read_run_models(run_dir)
     app = ContremaitreTUI(
         run_dir,
         agent_model=agent_model,
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
+        cli_reviewer=cli_reviewer,
         docker_image=docker_image,
         target_url=target_url,
         base=base,
@@ -2064,6 +2497,7 @@ def spawn_and_attach(
     agent_model: str = "?",
     sim_model: str = "?",
     extra_reviewer_model: str | None = None,
+    cli_reviewer: str = "none",
     docker_image: str = "?",
     target_url: str | None = None,
     base: str | None = None,
@@ -2114,6 +2548,7 @@ def spawn_and_attach(
         agent_model=agent_model,
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
+        cli_reviewer=cli_reviewer,
         docker_image=docker_image,
         target_url=target_url,
         base=base,
@@ -2125,8 +2560,11 @@ def spawn_and_attach(
     return rc
 
 
-def _read_run_models(run_dir: Path) -> tuple[str, str, str | None, str, str | None, str | None]:
-    """Return (agent_model, sim_model, extra_reviewer_model, docker_image, target_url, base).
+def _read_run_models(
+    run_dir: Path,
+) -> tuple[str, str, str | None, str, str, str | None, str | None]:
+    """Return (agent_model, sim_model, extra_reviewer_model, cli_reviewer,
+    docker_image, target_url, base).
 
     Prefers `run_config.json` (written at orchestrator start — available
     immediately, even for attach against an in-flight run). Falls back to
@@ -2141,6 +2579,7 @@ def _read_run_models(run_dir: Path) -> tuple[str, str, str | None, str, str | No
                 d.get("agent_model", "?"),
                 d.get("sim_model", "?"),
                 d.get("extra_reviewer_model"),
+                d.get("cli_reviewer", "none"),
                 d.get("docker_image", "?"),
                 d.get("target_url"),
                 d.get("base"),
@@ -2155,10 +2594,11 @@ def _read_run_models(run_dir: Path) -> tuple[str, str, str | None, str, str | No
                 d.get("agent_model", "?"),
                 d.get("sim_model", "?"),
                 d.get("extra_reviewer_model"),
+                d.get("cli_reviewer", "none"),
                 "?",
                 None,
                 None,
             )
         except (OSError, json.JSONDecodeError):
             pass
-    return ("?", "?", None, "?", None, None)
+    return ("?", "?", None, "none", "?", None, None)

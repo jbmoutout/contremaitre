@@ -549,6 +549,89 @@ class Orchestrator:
             {"event": f"recovery_{events.EXTRA_REVIEWER_UNAVAILABLE}", **record},
         )
 
+    # ----- post-publish CLI reviewer -----
+
+    def _run_cli_review(
+        self,
+        *,
+        outcome: PublishOutcome,
+        approved_hash: str,
+    ) -> None:
+        """Run `claude -p` / `codex exec` against the PR, post the result.
+
+        Streams subprocess stdout into `<tool>_review_raw_export.jsonl` so
+        the TUI can render progressively. The agent runs with `cwd` set to
+        the worktree of the freshly-published branch, so its Bash / file
+        tools resolve against the right checkout — and it can pull the
+        full diff itself via the local `gh` CLI (no inline paste needed).
+        On success the collected markdown is posted as a single PR
+        comment. Failures are logged but not raised: the PR is already
+        published.
+        """
+
+        from . import cli_reviewer as _cli_reviewer
+
+        tool = self.config.cli_reviewer
+        sink = _cli_reviewer.jsonl_sink_for(self.paths, tool)
+        self._emit(events.CLI_REVIEW_STARTED, tool=tool, url=outcome.url)
+
+        prompt = _cli_reviewer.build_prompt(pr_url=outcome.url)
+        start = time.monotonic()
+        result = _cli_reviewer.run_review(
+            tool=tool,
+            prompt=prompt,
+            jsonl_path=sink,
+            cwd=self.paths.worktree,
+        )
+        duration_s = time.monotonic() - start
+        if result.error or not result.markdown.strip():
+            self._emit(
+                events.CLI_REVIEW_FAILED,
+                tool=tool,
+                exit_code=result.exit_code,
+                reason=result.error or "empty_output",
+            )
+            return
+
+        # Prepend a tool · model · duration H3 header so the human reading
+        # the PR comment sees what produced the review before the verdict
+        # line. H3 (not H1/H2) so it stays visually subordinate to the
+        # agent's `🟢/🟠/🔴` headline.
+        model = _cli_reviewer.extract_model(tool=tool, jsonl_path=sink)
+        header = _cli_reviewer.format_header(
+            tool=tool, model=model, duration_s=duration_s
+        )
+        final_markdown = header + result.markdown.lstrip()
+
+        review_md = self.paths.run_dir / f"{tool}_review.md"
+        try:
+            review_md.write_text(final_markdown, encoding="utf-8")
+        except OSError as exc:
+            self._emit(events.CLI_REVIEW_FAILED, tool=tool, reason=f"write_error: {exc}")
+            return
+
+        posted, message = _cli_reviewer.post_comment(
+            pr_url=outcome.url,
+            body_path=review_md,
+            git_log=self.paths.git_log,
+        )
+        if not posted:
+            self._emit(events.CLI_REVIEW_FAILED, tool=tool, reason=f"post_failed: {message}")
+            return
+        # Parse the agent's verdict glyph (🟢/🟠/🔴) from the raw markdown
+        # — line 1 per the prompt spec. Surfaced as a payload field on the
+        # completion event so the TUI's footer glyph reflects what the
+        # agent actually said, not just whether the subprocess exited 0.
+        verdict = _cli_reviewer.parse_verdict(result.markdown)
+        self._emit(
+            events.CLI_REVIEW_COMPLETED,
+            tool=tool,
+            url=outcome.url,
+            review_chars=len(result.markdown),
+            approved_hash=approved_hash,
+            verdict=verdict,
+        )
+
     # ----- publication gate -----
 
     def _publish_or_block(
@@ -637,6 +720,13 @@ class Orchestrator:
             url=outcome.url,
             dry_run=outcome.dry_run,
         )
+        # Post-publish CLI reviewer (claude/codex on the operator's subscription).
+        # Runs inside the run so the TUI's `done` phase only fires once the
+        # comment has been posted (or the step has explicitly failed). Never
+        # raises — the PR is already published; a missed review is observable
+        # via the CLI_REVIEW_FAILED event and recoverable by the human.
+        if self.config.cli_reviewer in ("codex", "claude") and outcome.url:
+            self._run_cli_review(outcome=outcome, approved_hash=approved_hash)
         self._write_final_stats(State.APPROVED, TerminalVerdict.READY_FOR_DRAFT_PR, outcome.reason)
         return RunResult(
             run_id=self.run_id,
@@ -819,6 +909,7 @@ class Orchestrator:
                 "agent_model": self.config.agent_model,
                 "sim_model": self.config.sim_model,
                 "extra_reviewer_model": self.config.extra_reviewer_model,
+                "cli_reviewer": self.config.cli_reviewer,
                 "docker_image": self.config.docker_image,
                 "target_url": self.config.upstream or self.config.fork or str(self.config.repo),
                 "base": self.config.base,

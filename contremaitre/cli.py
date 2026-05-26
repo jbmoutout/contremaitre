@@ -147,6 +147,17 @@ def build_parser() -> argparse.ArgumentParser:
             "single-SIM (back-compat)."
         ),
     )
+    run_p.add_argument(
+        "--cli-reviewer",
+        choices=["auto", "codex", "claude", "none"],
+        default="auto",
+        help=(
+            "Optional local CLI reviewer run AFTER the Draft PR is published. "
+            "Uses the operator's interactive subscription (claude/codex), not API. "
+            "`auto` (default) detects what's installed and prompts when stdin is a TTY; "
+            "`none` skips. The review is posted as a single comment on the PR."
+        ),
+    )
     run_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value)
     run_p.add_argument("--run-slug", default="run")
     run_p.add_argument("--check-cmd", action="append", default=[], help="Executable check command; repeatable")
@@ -572,6 +583,30 @@ def _launch_screen(
                         break
                     print(f"  enter a number 0–{len(free) - 1}, Enter, s to skip, or q")
 
+    # ----- CLI reviewer (post-publish, subscription-bound) -----
+    # Detects `claude` / `codex` on PATH and asks which (if any) to run
+    # after the Draft PR is published. The chosen tool's review is posted
+    # as a single comment on the PR; it uses the operator's interactive
+    # subscription rather than API credits.
+    from . import cli_reviewer
+
+    cli_reviewer_flag = getattr(args, "cli_reviewer", "auto")
+    cli_reviewer_explicit = _has_flag_in(argv_for_explicit_check, "--cli-reviewer")
+    if not cli_reviewer_explicit:
+        available = cli_reviewer.detect_available()
+        if available:
+            print()
+            chosen = cli_reviewer.resolve_choice(
+                flag_value=cli_reviewer_flag,
+                available=available,
+                tty=True,
+            )
+        else:
+            chosen = "none"
+        args.cli_reviewer = chosen
+        if forwarded_to_subprocess is not None and chosen != "auto":
+            forwarded_to_subprocess.extend(["--cli-reviewer", chosen])
+
     # ----- confirm -----
     print()
     print(_RULE)
@@ -580,6 +615,9 @@ def _launch_screen(
     extra_model = getattr(args, "extra_reviewer_model", None)
     if extra_model:
         print(f"  extra   {_b(extra_model)}")
+    cli_reviewer_choice = getattr(args, "cli_reviewer", "none")
+    if cli_reviewer_choice in ("codex", "claude"):
+        print(f"  review  {_b(cli_reviewer_choice)}  {_d('(post-publish, subscription)')}")
 
     # ----- pre-flight ping -----
     # Free-tier Zen models occasionally land in the catalog while the
@@ -635,7 +673,7 @@ def _launch_screen(
         print()
         return reply in ("y", "yes")
 
-    print(f"  WILL RUN AUTONOMOUSLY AND CREATE A DRAFT PR ON {source_url} — Ctrl-C to abort")
+    print(f"  CONTREMAITRE WILL RUN AUTONOMOUSLY AND CREATE A DRAFT PR ON {source_url} — Ctrl-C to abort")
     print()
     try:
         reply = input("  proceed? [Y/n] ").strip().lower()
@@ -1039,6 +1077,7 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         agent_model=getattr(args, "agent_model", "openrouter/deepseek/deepseek-v4-flash"),
         sim_model=getattr(args, "sim_model", "openrouter/deepseek/deepseek-v4-flash"),
         extra_reviewer_model=getattr(args, "extra_reviewer_model", None),
+        cli_reviewer=getattr(args, "cli_reviewer", "none"),
         actor_mode=ActorMode(args.actor),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
@@ -1173,6 +1212,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     agent_model = _extract_flag_value(forwarded, "--agent-model", "openrouter/deepseek/deepseek-v4-flash")
     sim_model = _extract_flag_value(forwarded, "--sim-model", "openrouter/deepseek/deepseek-v4-flash")
     extra_reviewer_model = _extract_flag_value(forwarded, "--extra-reviewer-model", "") or None
+    cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", "auto")
     docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
     # Confirmation has to happen BEFORE the subprocess spawn, because once
     # Textual attaches, stdin is owned by the TUI and an `input()` in the
@@ -1207,6 +1247,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         agent_model=agent_model,
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
+        cli_reviewer=cli_reviewer_choice,
     )
     try:
         if not _launch_screen(
@@ -1226,6 +1267,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     agent_model = _extract_flag_value(forwarded, "--agent-model", agent_model)
     sim_model = _extract_flag_value(forwarded, "--sim-model", sim_model)
     extra_reviewer_model = _extract_flag_value(forwarded, "--extra-reviewer-model", "") or None
+    cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", cli_reviewer_choice)
     if "--yes" not in forwarded and "-y" not in forwarded:
         forwarded.append("--yes")
     if "--repo-cache" not in " ".join(forwarded):
@@ -1240,6 +1282,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         agent_model=agent_model,
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
+        cli_reviewer=cli_reviewer_choice,
         docker_image=docker_image,
         target_url=source_url,
         base=base,

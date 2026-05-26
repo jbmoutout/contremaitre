@@ -67,6 +67,12 @@ IMPLEMENTATION_COMPLETE_CLEARED = "implementation_complete_cleared"
 PUBLICATION_BLOCKED = "publication_blocked"
 PUBLISHED = "published"
 
+# ----- Post-publish CLI reviewer (claude / codex) -----
+
+CLI_REVIEW_STARTED = "cli_review_started"
+CLI_REVIEW_COMPLETED = "cli_review_completed"
+CLI_REVIEW_FAILED = "cli_review_failed"
+
 # ----- Cleanup -----
 
 WORKTREE_REMOVED = "worktree_removed"

@@ -83,6 +83,11 @@ class RunConfig:
     agent_model: str = "openrouter/deepseek/deepseek-v4-flash"
     sim_model: str = "openrouter/deepseek/deepseek-v4-flash"
     extra_reviewer_model: str | None = None
+    # Local CLI reviewer run AFTER the Draft PR is published, posting a code
+    # review comment on the PR using the operator's subscription-bound CLI
+    # (`claude` or `codex`). Optional. `"none"` skips the step entirely;
+    # the orchestrator's hook is a no-op in that case.
+    cli_reviewer: str = "none"
     check_cmds: tuple[str, ...] = ()
     actor_mode: ActorMode = ActorMode.FAKE
     sim_scenario: str = "approved"
@@ -126,6 +131,11 @@ class RunPaths:
     raw_export: Path
     sim_raw_export: Path
     extra_reviewer_raw_export: Path
+    # Post-publish CLI reviewer streams (`claude -p` or `codex exec`). Only
+    # one of the two is written per run; the unused path is registered for
+    # readers to probe.
+    claude_review_raw_export: Path
+    codex_review_raw_export: Path
     transcript: Path
     timeline: Path
     trajectory: Path

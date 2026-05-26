@@ -8,6 +8,8 @@ Files:
   - `initial_prompt.md`        — sent to the agent on turn 1 of the WORK session.
   - `sim_tooled_persona.md`    — sent to the SIM on its first turn of the WORK session.
   - `sim_review_prompt.md`     — sent to the SIM in the single-shot REVIEW pass.
+  - `cli_reviewer_prompt.md`   — sent to the local CLI reviewer (claude / codex)
+                                 post-publish; takes a `{pr_url}` placeholder.
 
 The agent and SIM share one multi-turn opencode session each (re-using
 session IDs across turns), so first-turn prompts are baked into session memory
@@ -27,6 +29,7 @@ _HERE = Path(__file__).resolve().parent
 INITIAL_PROMPT: str = (_HERE / "initial_prompt.md").read_text(encoding="utf-8")
 SIM_TOOLED_PERSONA: str = (_HERE / "sim_tooled_persona.md").read_text(encoding="utf-8")
 SIM_REVIEW_PROMPT: str = (_HERE / "sim_review_prompt.md").read_text(encoding="utf-8")
+CLI_REVIEWER_PROMPT: str = (_HERE / "cli_reviewer_prompt.md").read_text(encoding="utf-8")
 
 
 def sim_first_turn(agent_text: str) -> str:
