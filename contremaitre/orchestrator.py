@@ -63,24 +63,16 @@ from .publisher import (
     record_publication,
 )
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
-
-
-SETTLED_RELPATH = Path(".contremaitre") / "SETTLED_DESIGN.md"
-IMPLEMENTATION_COMPLETE_RELPATH = Path(".contremaitre") / "IMPLEMENTATION_COMPLETE"
-
-# Paths held out of the host commit. `.contremaitre/` / `opencode.json` are
-# orchestration-internal; the rest are conventionally-gitignored build output
-# that some agents produce as a verification step (the worktree may not carry
-# the upstream .gitignore for all of them, so we belt-and-suspenders).
-_HOST_COMMIT_EXCLUDES = (
-    ".contremaitre",
-    "opencode.json",
-    "dist",
-    "build",
-    "out",
-    ".next",
-    "__pycache__",
+from .git_utils import (
+    SETTLED_RELPATH,
+    _HOST_COMMIT_EXCLUDES,
+    derive_commit_message,
+    is_gitignored,
+    only_contremaitre_changes,
 )
+
+
+IMPLEMENTATION_COMPLETE_RELPATH = Path(".contremaitre") / "IMPLEMENTATION_COMPLETE"
 
 
 @dataclass(frozen=True)
@@ -556,7 +548,7 @@ class Orchestrator:
         # `.contremaitre/*` is excluded from staging by design and stays
         # untracked in the worktree for the SIM to read across rounds —
         # don't count it against clean-worktree.
-        clean = _only_contremaitre_changes(worktree_git.status_porcelain())
+        clean = only_contremaitre_changes(worktree_git.status_porcelain())
         hard_gates = hard_gate_payload(
             diff_scan=diff_scan,
             clean_worktree=clean,
@@ -850,20 +842,15 @@ class Orchestrator:
         self._emit(events.SIMULATED_DIFF_DRIFT)
 
     def _commit_agent_changes(self, repo: GitRepo) -> None:
-        if _only_contremaitre_changes(repo.status_porcelain()):
+        if only_contremaitre_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
-        title, body = _derive_commit_message(self.paths.worktree, self.run_id)
-        # `:(exclude)X` pathspecs hold orchestration-internal / build-output
-        # files out of the staged set. They stay in the worktree (SIM reads
-        # them; agent produces them) but must not land in the PR diff.
-        # Drop excludes already covered by the worktree's .gitignore: git
-        # treats `:(exclude)X` as an explicit mention of X, and the add
-        # aborts when X is also gitignored ("paths are ignored").
+        title, body = derive_commit_message(self.paths.worktree, self.run_id)
+
         excludes = [
             f":(exclude){path}"
             for path in _HOST_COMMIT_EXCLUDES
-            if not _is_gitignored(repo, path)
+            if not is_gitignored(repo, path)
         ]
         repo.run("add", "--", ".", *excludes)
         repo.run("commit", "-m", title, "-m", body)
@@ -1113,76 +1100,7 @@ class Orchestrator:
                 continue
 
 
-def _is_gitignored(repo: GitRepo, path: str) -> bool:
-    """True iff `path` is matched by a .gitignore rule in the worktree.
 
-    Used to skip `:(exclude){path}` pathspecs that would otherwise cause
-    `git add` to abort — git treats `:(exclude)` as explicit mention, and
-    explicit + gitignored is an error.
-    """
-
-    return repo.run("check-ignore", "-q", "--", path, check=False).returncode == 0
-
-
-def _only_contremaitre_changes(porcelain: str) -> bool:
-    """True iff every `git status --porcelain` row is orchestration-internal.
-
-    Files excluded from commits by pathspec (`.contremaitre/*`,
-    `opencode.json`) are deliberately untracked in the worktree. The
-    host-commit step and the clean-worktree hard gate both need to treat
-    a worktree whose only changes are in these paths as "clean for our
-    purposes":
-
-    - host-commit: skip instead of producing an empty PR.
-    - clean-worktree gate: pass.
-
-    Empty porcelain (no changes at all) is also "clean".
-    """
-
-    _INTERNAL_PREFIXES = (
-        ".contremaitre/", ".contremaitre",
-        "opencode.json",
-        "dist/", "build/", "out/", ".next/",
-        "__pycache__/",
-    )
-
-    for line in porcelain.splitlines():
-        if not line.strip():
-            continue
-        path = line[3:].strip().strip('"')
-        if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
-            return False
-    return True
-
-
-def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
-    """Read SETTLED_DESIGN.md and turn it into (commit title, commit body).
-
-    Title: first non-empty line, stripped of `# ` and any "Settled design — "
-    prefix the skill tends to emit. Falls back to a run-id-tagged generic
-    when SETTLED is missing or empty (shouldn't happen post-WORK since the
-    orchestrator gates on it, but the host commit must never fail here).
-    Body: the full SETTLED text + a trailer with the run id, so the commit
-    is self-contained for anyone reading `git log` later.
-    """
-
-    settled = worktree / SETTLED_RELPATH
-    fallback_title = f"Contremaitre refactor ({run_id})"
-    if not settled.exists():
-        return fallback_title, f"Run: {run_id}\n"
-    text = settled.read_text(encoding="utf-8").strip()
-    if not text:
-        return fallback_title, f"Run: {run_id}\n"
-    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    title = first_line.lstrip("#").strip()
-    for prefix in ("Settled design — ", "Settled design - ", "Settled design: "):
-        if title.lower().startswith(prefix.lower()):
-            title = title[len(prefix):].strip()
-            break
-    if not title:
-        title = fallback_title
-    body = f"{text}\n\n---\nRun: {run_id}\n"
-    return title, body
 
 
 _VERDICT_SEVERITY = {
