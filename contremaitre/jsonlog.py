@@ -40,6 +40,32 @@ def append_text_event(path: Path, *, role: str, phase: str, text: str) -> None:
     )
 
 
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL file into a list of dicts.
+
+    Missing files, OSErrors, blank lines, JSON decode errors, and non-dict
+    values are handled silently. Every caller in the project expects dicts.
+    """
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
+
+
 def append_transcript(path: Path, *, speaker: str, phase: str, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
