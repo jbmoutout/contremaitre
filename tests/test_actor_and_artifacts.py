@@ -15,11 +15,11 @@ import unittest
 from pathlib import Path
 
 from contremaitre import events
-from contremaitre.actors import (
-    FakeActorRunner,
-    _harvest_step_finishes_from_sqlite,
-    _recover_text_from_sqlite,
-    _record_recovery,
+from contremaitre.actors import FakeActorRunner
+from contremaitre.recovery import (
+    harvest_step_finishes_from_sqlite,
+    recover_text_from_sqlite,
+    record_recovery,
 )
 from contremaitre.costs import estimate_recorded_cost_usd
 from contremaitre.fixture import init_fixture
@@ -239,7 +239,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
     final step-finish sometimes lands in the DB after docker exits
     without flushing. Both undercount cost by ~2x in subagent-heavy runs.
 
-    Fix: `_harvest_step_finishes_from_sqlite` synthesizes the missing
+    Fix: `harvest_step_finishes_from_sqlite` synthesizes the missing
     events back into raw_export from the DB after every turn. The cost
     estimator walks any JSON for `cost`-like keys, so synthesized parts
     contribute identically to real ones.
@@ -320,7 +320,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
             ("ses_child2", "prt_c2", self._step_finish(0.05)),
         ])
 
-        appended = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
+        appended = harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
         self.assertEqual(appended, 4, "should append all step_finishes except the duplicate")
         events_list = self._read_jsonl(self.raw_export)
@@ -344,8 +344,8 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
             ("ses_child", "prt_c2", self._step_finish(0.04)),
         ])
 
-        first = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
-        second = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
+        first = harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
+        second = harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
         self.assertEqual(first, 2)
         self.assertEqual(second, 0)
@@ -357,7 +357,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
 
         # No DB created.
         self.assertEqual(
-            _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export),
+            harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export),
             0,
         )
         self.assertFalse(self.raw_export.exists())
@@ -383,7 +383,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
         conn.close()
         self.assertNotIn("id", json.loads(blob))
 
-        appended = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
+        appended = harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
         self.assertEqual(appended, 1)
         events_list = self._read_jsonl(self.raw_export)
@@ -401,7 +401,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
             ("ses_child", "prt_sf", self._step_finish(0.02)),
         ])
 
-        appended = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
+        appended = harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
         self.assertEqual(appended, 1)
         events_list = self._read_jsonl(self.raw_export)
@@ -415,7 +415,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
 class RecoverTextFromSqliteTest(unittest.TestCase):
     """Lock the silent-stall recovery: when opencode persisted the message
     parts to sqlite but never flushed the corresponding `text` event to
-    stdout, `_recover_text_from_sqlite` must read the parts back and
+    stdout, `recover_text_from_sqlite` must read the parts back and
     return the concatenated text + a `completed` flag derived from the
     step-finish part's `reason`.
 
@@ -479,7 +479,7 @@ class RecoverTextFromSqliteTest(unittest.TestCase):
             ],
         )
 
-        text, msg_id, completed = _recover_text_from_sqlite(self.state_dir, "ses_a")
+        text, msg_id, completed = recover_text_from_sqlite(self.state_dir, "ses_a")
 
         self.assertEqual(text, "Hello world.")
         self.assertEqual(msg_id, "msg_1")
@@ -498,7 +498,7 @@ class RecoverTextFromSqliteTest(unittest.TestCase):
             ],
         )
 
-        text, _msg_id, completed = _recover_text_from_sqlite(self.state_dir, "ses_a")
+        text, _msg_id, completed = recover_text_from_sqlite(self.state_dir, "ses_a")
 
         self.assertEqual(text, "partial")
         self.assertFalse(completed)
@@ -520,13 +520,13 @@ class RecoverTextFromSqliteTest(unittest.TestCase):
             ],
         )
 
-        text, msg_id, _completed = _recover_text_from_sqlite(self.state_dir, None)
+        text, msg_id, _completed = recover_text_from_sqlite(self.state_dir, None)
 
         self.assertEqual(text, "NEW")
         self.assertEqual(msg_id, "msg_new")
 
     def test_no_db_returns_noop(self):
-        text, msg_id, completed = _recover_text_from_sqlite(self.state_dir, "ses_a")
+        text, msg_id, completed = recover_text_from_sqlite(self.state_dir, "ses_a")
 
         self.assertIsNone(text)
         self.assertIsNone(msg_id)
@@ -541,14 +541,14 @@ class RecordRecoveryTest(unittest.TestCase):
     AND guardrail_events.jsonl (mirrored for single-tail discovery).
     """
 
-    def test_record_recovery_writes_both_files(self):
+    def testrecord_recovery_writes_both_files(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         paths = build_run_paths(root / "runs", new_run_id("rec"))
         paths.run_dir.mkdir(parents=True)
 
-        _record_recovery(
+        record_recovery(
             paths,
             kind=events.SQLITE_RECOVERY_SILENT_STALL,
             role="agent",
