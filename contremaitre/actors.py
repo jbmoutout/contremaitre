@@ -35,7 +35,16 @@ from .models import ActorMode, RunConfig, RunPaths
 
 
 class ActorError(RuntimeError):
-    pass
+    """Generic actor failure surface.
+
+    `kind` is a free-form tag that lets callers (and the TUI) distinguish
+    failure modes worth a custom label without parsing the message string.
+    Defaults to `None` for legacy errors that don't classify themselves.
+    """
+
+    def __init__(self, message: str, *, kind: str | None = None):
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass(frozen=True)
@@ -293,13 +302,29 @@ class OpencodeActorRunner:
             start_event["reviewer_id"] = reviewer_id
         append_jsonl(self.paths.guardrail_events, start_event)
         raw_export.parent.mkdir(parents=True, exist_ok=True)
-        returncode, stderr = _run_detached_container(
+        returncode, stderr, fast_fail_reason = _run_detached_container(
             cmd=cmd,
             env=env,
             stdout_path=raw_export,
             timeout_seconds=timeout_seconds,
             role=role,
+            baseline_text_count=pre_text_count,
         )
+        if fast_fail_reason is not None:
+            append_jsonl(
+                self.paths.guardrail_events,
+                {
+                    "event": events.PROVIDER_QUOTA_EXHAUSTED,
+                    "role": role,
+                    "model": model,
+                    "marker": fast_fail_reason,
+                },
+            )
+            raise ActorError(
+                f"{role} opencode aborted early — provider quota exhausted "
+                f"({fast_fail_reason}) on model {model}",
+                kind=events.PROVIDER_QUOTA_EXHAUSTED,
+            )
         if returncode != 0:
             raise ActorError(f"{role} opencode exited {returncode}: {stderr[:500]}")
         new_session_id = _latest_session_id(raw_export)
@@ -312,6 +337,21 @@ class OpencodeActorRunner:
             # earlier turns left in the multi-turn stream.
             error = _latest_error_after_text_count(raw_export, pre_text_count)
             if error:
+                if any(marker in error for marker in _QUOTA_ERROR_MARKERS):
+                    append_jsonl(
+                        self.paths.guardrail_events,
+                        {
+                            "event": events.PROVIDER_QUOTA_EXHAUSTED,
+                            "role": role,
+                            "model": model,
+                            "marker": "FreeUsageLimitError",
+                        },
+                    )
+                    raise ActorError(
+                        f"{role} opencode emitted free-tier quota error on {model}: "
+                        f"{error[:300]}",
+                        kind=events.PROVIDER_QUOTA_EXHAUSTED,
+                    )
                 raise ActorError(f"{role} opencode emitted error without text: {error[:500]}")
             # opencode silent-stall: the text part landed in opencode's sqlite
             # but the corresponding `text` event was never flushed to stdout
@@ -477,12 +517,20 @@ def _run_detached_container(
     stdout_path: Path,
     timeout_seconds: int,
     role: str,
-) -> tuple[int, str]:
+    baseline_text_count: int = 0,
+) -> tuple[int, str, str | None]:
     """Start the detached container, stream its logs, wait for exit.
 
-    Returns (returncode, stderr). On timeout: docker stop the container,
-    then raise — same surface the previous Popen-based runner had so the
-    orchestrator's caller doesn't need to know about the detached model.
+    Returns `(returncode, stderr, fast_fail_reason)`. `fast_fail_reason` is
+    non-None when the container was killed early because a known
+    non-retryable error landed in `stdout_path` (currently:
+    `FreeUsageLimitError` from OpenCode Zen's free tier — opencode keeps
+    retrying internally, so without this we'd burn the full
+    `timeout_seconds` for an error that won't resolve).
+
+    On timeout (real wall-clock timeout, not fast-fail): docker stop the
+    container, then raise. Same surface the previous Popen-based runner
+    had so the orchestrator doesn't need to know about the detached model.
     """
 
     create = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
@@ -493,6 +541,7 @@ def _run_detached_container(
         raise ActorError(f"{role} docker run -d produced no container id")
 
     log_proc: subprocess.Popen[bytes] | None = None
+    fast_fail_reason: str | None = None
     try:
         with stdout_path.open("ab") as stdout_f:
             log_proc = subprocess.Popen(
@@ -500,34 +549,96 @@ def _run_detached_container(
                 stdout=stdout_f,
                 stderr=subprocess.PIPE,
             )
+            wait_proc = subprocess.Popen(
+                ["docker", "wait", container_id],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + timeout_seconds
+            poll_interval = 2.0
             try:
-                wait = subprocess.run(
-                    ["docker", "wait", container_id],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                )
-            except subprocess.TimeoutExpired as exc:
-                subprocess.run(
-                    ["docker", "stop", "-t", "5", container_id],
-                    capture_output=True,
-                    timeout=15,
-                )
-                log_proc.kill()
-                raise ActorError(f"{role} opencode timed out after {timeout_seconds}s") from exc
-            try:
-                log_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                log_proc.kill()
+                while True:
+                    try:
+                        wait_proc.wait(timeout=poll_interval)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                    if time.monotonic() > deadline:
+                        subprocess.run(
+                            ["docker", "stop", "-t", "5", container_id],
+                            capture_output=True,
+                            timeout=15,
+                        )
+                        log_proc.kill()
+                        try:
+                            wait_proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            wait_proc.kill()
+                        raise ActorError(f"{role} opencode timed out after {timeout_seconds}s")
+                    fast_fail_reason = _detect_provider_quota_exhausted(
+                        stdout_path, baseline_text_count
+                    )
+                    if fast_fail_reason is not None:
+                        subprocess.run(
+                            ["docker", "stop", "-t", "5", container_id],
+                            capture_output=True,
+                            timeout=15,
+                        )
+                        try:
+                            wait_proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            wait_proc.kill()
+                        break
+            finally:
+                try:
+                    log_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    log_proc.kill()
             stderr_bytes = log_proc.stderr.read() if log_proc.stderr else b""
-        returncode = int(wait.stdout.strip() or "1")
-        return returncode, stderr_bytes.decode("utf-8", errors="replace")
+            wait_stdout = wait_proc.stdout.read() if wait_proc.stdout else ""
+        returncode = int((wait_stdout or "").strip() or "1")
+        return returncode, stderr_bytes.decode("utf-8", errors="replace"), fast_fail_reason
     finally:
         subprocess.run(
             ["docker", "rm", "-f", container_id],
             capture_output=True,
             timeout=15,
         )
+
+
+_QUOTA_ERROR_MARKERS = ("FreeUsageLimitError",)
+
+
+def _detect_provider_quota_exhausted(path: Path, baseline_text_count: int) -> str | None:
+    """Scan error events that arrived this turn for free-tier quota markers.
+
+    A single occurrence is enough to fail fast: `FreeUsageLimitError` is a
+    user-quota signal (per-day/per-hour), not a transient burst — opencode
+    marks it retryable and will keep hammering until the docker timeout,
+    but the retry can't change the outcome. Returns a short tag suitable
+    for logging, or None when no quota marker is present yet.
+    """
+
+    if not path.exists():
+        return None
+    events = _read_events(path)
+    seen_text = 0
+    for event in events:
+        if event.get("type") == "text":
+            seen_text += 1
+            if seen_text > baseline_text_count:
+                # A real text reply landed — anything before it is stale.
+                return None
+        if event.get("type") != "error":
+            continue
+        if seen_text < baseline_text_count:
+            continue
+        serialized = json.dumps(event, sort_keys=True)
+        for marker in _QUOTA_ERROR_MARKERS:
+            if marker in serialized:
+                return marker
+    return None
 
 
 def redact_command(cmd: list[str]) -> list[str]:

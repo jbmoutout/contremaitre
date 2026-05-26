@@ -74,6 +74,7 @@ WORKTREE_REMOVED = "worktree_removed"
 # ----- Infrastructure -----
 
 INFRA_FAILURE = "infra_failure"
+PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
 
 
 # ----- Recovery events (recoveries.jsonl, `kind` key) -----

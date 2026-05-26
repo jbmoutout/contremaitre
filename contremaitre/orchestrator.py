@@ -163,7 +163,8 @@ class Orchestrator:
 
             return self._review_rounds(actor=actor, worktree_git=worktree_git, branch=branch)
         except Exception as exc:
-            self._emit(events.INFRA_FAILURE, error=repr(exc))
+            failure_kind = getattr(exc, "kind", None) if isinstance(exc, ActorError) else None
+            self._emit(events.INFRA_FAILURE, error=repr(exc), kind=failure_kind)
             record_publication(
                 self.paths,
                 PublishOutcome(

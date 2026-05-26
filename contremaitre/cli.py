@@ -580,7 +580,61 @@ def _launch_screen(
     extra_model = getattr(args, "extra_reviewer_model", None)
     if extra_model:
         print(f"  extra   {_b(extra_model)}")
+
+    # ----- pre-flight ping -----
+    # Free-tier Zen models occasionally land in the catalog while the
+    # operator's per-model quota is already spent. Without this probe the
+    # first agent turn burns the full 1800s timeout (or just hangs until
+    # SIGTERM) while opencode retries a 429 internally. One tiny chat
+    # completion catches it now and lets the operator pick another model.
+    #
+    # Zen-only: probing happens against `https://opencode.ai/zen/v1/chat/
+    # completions`, which is the endpoint opencode itself uses for the
+    # `opencode/*` prefix. Models with a different prefix are skipped.
+    probe_targets: list[tuple[str, str]] = []
+    seen_models: set[str] = set()
+    for role, model in (
+        ("agent", args.agent_model),
+        ("sim", args.sim_model),
+        ("extra", extra_model),
+    ):
+        if not model or not model.startswith("opencode/"):
+            continue
+        if model in seen_models:
+            continue
+        seen_models.add(model)
+        probe_targets.append((role, model))
+    quota_blockers: list[tuple[str, str]] = []
+    if probe_targets:
+        print()
+        print(f"  {_d('pre-flight ping …')}")
+        for role, model in probe_targets:
+            status, detail = _probe_zen_model(model)
+            short = model.rsplit("/", 1)[-1]
+            if status == "ok":
+                print(f"    {role:<6}  {_d(short)}  ✓")
+            elif status == "quota_exhausted":
+                print(f"    {role:<6}  {_b(short)}  ✗  free-tier quota exhausted")
+                quota_blockers.append((role, model))
+            else:
+                # Network / unexpected status — log and move on. The in-run
+                # fast-fail still catches a real quota error if this missed it.
+                print(f"    {role:<6}  {_d(short)}  ?  {_d(detail or 'probe failed')}")
+
     print()
+    if quota_blockers:
+        print(f"  {_b('free-tier quota exhausted for:')}")
+        for role, model in quota_blockers:
+            print(f"    {role}  {model}")
+        print(f"  {_d('try again later, or pick a different model with --' + 'agent-model/--sim-model.')}")
+        print()
+        try:
+            reply = input("  proceed anyway? [y/N] ").strip().lower()
+        except EOFError:
+            return False
+        print()
+        return reply in ("y", "yes")
+
     print(f"  WILL RUN AUTONOMOUSLY AND CREATE A DRAFT PR ON {source_url} — Ctrl-C to abort")
     print()
     try:
@@ -589,6 +643,55 @@ def _launch_screen(
         return True
     print()
     return reply in ("", "y", "yes")
+
+
+def _probe_zen_model(model: str, *, timeout: float = 10.0) -> tuple[str, str | None]:
+    """One-shot probe of an opencode Zen model. Detects free-tier quota loss.
+
+    Returns one of:
+      - ("ok", None)               — model responded normally
+      - ("quota_exhausted", body)  — 429 with `FreeUsageLimitError`
+      - ("error", description)     — network / unexpected status; caller
+                                     should fall through (the in-run
+                                     fast-fail catches real quota errors)
+
+    The endpoint is unauthenticated for Zen free models (opencode binary
+    uses the same endpoint without an API key), so we can hit it directly
+    from the host without spinning up docker. One-token completion keeps
+    the cost negligible and the latency under a second when healthy.
+    """
+
+    import urllib.error
+    import urllib.request
+
+    model_id = model.rsplit("/", 1)[-1]
+    body = json.dumps(
+        {
+            "model": model_id,
+            "max_tokens": 4,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://opencode.ai/zen/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "contremaitre"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+        return ("ok", None)
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+        if exc.code == 429 and "FreeUsageLimitError" in err_body:
+            return ("quota_exhausted", err_body[:200])
+        return ("error", f"HTTP {exc.code}")
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        return ("error", str(exc)[:120])
 
 
 def _ensure_default_image_built(config: RunConfig) -> int:
