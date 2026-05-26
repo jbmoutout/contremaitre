@@ -193,14 +193,19 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     Title: same shape as the host commit title (first SETTLED line minus
     skill-emitted "Settled design — " prefix) so the PR, the commit, and
     `git log` all agree.
-    Body: lede stamp + SETTLED design + SIM review (summary + collapsible
-    checklist) + revision callout if the SIM bounced + footer seal.
+    Body: lede stamp + IMPLEMENTATION_COMPLETE one-liner + SETTLED design
+    (headings demoted) + SIM review (summary + collapsible checklist) +
+    revision callout if the SIM bounced + eval scorecard + footer seal.
     Self-contained so reviewers don't need to clone the run dir.
     """
 
     import json as _json
+    import re as _re
     from .flow_use import compute_phases
-    from .orchestrator import _derive_commit_message
+    from .orchestrator import (
+        IMPLEMENTATION_COMPLETE_RELPATH,
+        _derive_commit_message,
+    )
 
     def _read_jsonl(p: Path) -> list[dict]:
         if not p.exists():
@@ -210,7 +215,26 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         except (OSError, ValueError):
             return []
 
+    def _read_json(p: Path) -> dict | None:
+        if not p.exists():
+            return None
+        try:
+            return _json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
+    # `_derive_commit_message` appends `\n\n---\nRun: <id>\n` for `git log`
+    # readability. The PR body has its own footer with run_id + diff hash,
+    # so strip the commit-only trailer to avoid a double separator.
+    settled_body = _re.sub(r"\n+---\nRun: [^\n]+\n*$", "", settled_body)
+    # Demote SETTLED headings 2 levels so the body's own H2 sections
+    # (## Design, ## SIM review) stay the top of the visible hierarchy
+    # and the SETTLED H1/H2 don't blow up GitHub's rendering.
+    settled_body = _re.sub(r"^(#{1,4}) ", r"\1## ", settled_body, flags=_re.MULTILINE)
+
+    impl_complete = _read_impl_complete(paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH)
+    pr_eval = _read_json(paths.eval_dir / "pr_eval.json")
 
     review_cycles = _read_jsonl(paths.review_cycles)
     test_runs = _read_jsonl(paths.test_runs)
@@ -308,9 +332,13 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
             f"{items}\n\n</details>"
         )
 
+    scorecard_block = _build_scorecard_block(pr_eval)
+
     # ----- assemble -----
     parts: list[str] = []
     parts.append(" · ".join(lede_parts))
+    if impl_complete:
+        parts.append("\n" + "\n".join(f"> {ln}" for ln in impl_complete.splitlines()))
     parts.append("\n---\n")
     parts.append("## Design\n")
     parts.append(settled_body.rstrip())
@@ -323,9 +351,81 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         parts.append("\n" + "\n".join(revision_lines))
     if checklist_block:
         parts.append(checklist_block)
+    if scorecard_block:
+        parts.append("\n---\n")
+        parts.append(scorecard_block)
     parts.append(f"\n---\n\n`{paths.run_id}` · diff `{diff_hash[:16]}…`\n")
 
     return title, "\n".join(parts)
+
+
+def _read_impl_complete(marker_path: Path) -> str:
+    """Return the agent's one-line summary, or "" if the marker is missing.
+
+    The marker is written by the agent as the last step of WORK (per
+    initial_prompt.md). Content is free-form prose; we trim trailing
+    whitespace but otherwise preserve what the agent wrote.
+    """
+
+    if not marker_path.exists():
+        return ""
+    try:
+        return marker_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _build_scorecard_block(pr_eval: dict | None) -> str:
+    """Collapsed `<details>` summarising hard gates + reviewer discipline.
+
+    Adds signal not visible in the lede line: hard-gate pass/fail and the
+    `self_verified` / `settled_before_code` booleans from the eval
+    scorecard. Returns "" if eval data is missing (e.g. older runs).
+    """
+
+    if not isinstance(pr_eval, dict):
+        return ""
+    hard_gates = pr_eval.get("hard_gates")
+    scorecard = pr_eval.get("scorecard") or {}
+    if not hard_gates and not scorecard:
+        return ""
+
+    lines: list[str] = []
+    if hard_gates:
+        mark = "✓" if hard_gates == "PASS" else "✗"
+        lines.append(f"- Hard gates: {mark} {hard_gates}")
+    sim_conf = scorecard.get("sim_confidence")
+    extra_conf = scorecard.get("extra_reviewer_confidence")
+    cross_family = scorecard.get("cross_family_agreement")
+    if sim_conf is not None or extra_conf is not None:
+        bits = []
+        if sim_conf is not None:
+            bits.append(f"sim {sim_conf:.2f}")
+        if extra_conf is not None:
+            bits.append(f"extra {extra_conf:.2f}")
+        if cross_family is True:
+            bits.append("cross-family agreement")
+        elif cross_family is False:
+            bits.append("cross-family disagreement")
+        lines.append(f"- Reviewer confidence: {' · '.join(bits)}")
+    discipline_bits: list[str] = []
+    if scorecard.get("self_verified") is not None:
+        discipline_bits.append(
+            f"self-verified {'✓' if scorecard['self_verified'] else '✗'}"
+        )
+    if scorecard.get("settled_before_code") is not None:
+        discipline_bits.append(
+            f"settled-before-code {'✓' if scorecard['settled_before_code'] else '✗'}"
+        )
+    if discipline_bits:
+        lines.append(f"- Agent discipline: {' · '.join(discipline_bits)}")
+    if not lines:
+        return ""
+    items = "\n".join(lines)
+    return (
+        "<details>\n<summary>Eval scorecard</summary>\n\n"
+        f"{items}\n\n</details>"
+    )
 
 
 def _extract_url(stdout: str) -> str | None:

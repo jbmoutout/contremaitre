@@ -611,6 +611,18 @@ class Orchestrator:
                 sim_verdict=parsed,
             )
 
+        # Write eval BEFORE publish so `_derive_pr_metadata` can read the
+        # scorecard into the PR body. Safe because eval inputs (hard_gates,
+        # checks, parsed) are all in scope here, and `reason` is unused
+        # downstream when `sim_verdict` is set (always the case on this path).
+        self._write_eval(
+            verdict=TerminalVerdict.READY_FOR_DRAFT_PR,
+            checks=checks,
+            hard_gates=hard_gates,
+            needs_human=[],
+            sim_verdict=parsed,
+            reason="approved",
+        )
         publisher = make_publisher(self.config)
         outcome = publisher.publish(
             config=self.config,
@@ -624,14 +636,6 @@ class Orchestrator:
             branch=branch,
             url=outcome.url,
             dry_run=outcome.dry_run,
-        )
-        self._write_eval(
-            verdict=TerminalVerdict.READY_FOR_DRAFT_PR,
-            checks=checks,
-            hard_gates=hard_gates,
-            needs_human=[],
-            sim_verdict=parsed,
-            reason=outcome.reason,
         )
         self._write_final_stats(State.APPROVED, TerminalVerdict.READY_FOR_DRAFT_PR, outcome.reason)
         return RunResult(

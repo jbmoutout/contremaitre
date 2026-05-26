@@ -85,6 +85,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "turns": stats.get("turns"),
         "cost_usd": stats.get("recorded_cost_usd"),
         "reason": (stats.get("reason") or "").strip(),
+        "impl_complete": _read_impl_complete(run_dir),
         "settled_preamble": _read_settled_preamble(run_dir),
         "pr_kind": (pr or {}).get("kind") if isinstance(pr, dict) else None,
         "pr_url": (pr or {}).get("url") if isinstance(pr, dict) else None,
@@ -95,6 +96,26 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
 
 _SETTLED_MAX_LINES = 3
 _SETTLED_MAX_CHARS = 280
+
+
+def _read_impl_complete(run_dir: Path) -> str:
+    """Return the agent's IMPLEMENTATION_COMPLETE one-liner, or "".
+
+    Cleanup tooling extracts the worktree marker to
+    `extracted_files/.contremaitre__IMPLEMENTATION_COMPLETE`. Single-line
+    file; trim to `_SETTLED_MAX_CHARS` so the index row stays compact.
+    """
+
+    src = run_dir / "extracted_files" / ".contremaitre__IMPLEMENTATION_COMPLETE"
+    if not src.is_file():
+        return ""
+    try:
+        text = src.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if len(text) > _SETTLED_MAX_CHARS:
+        text = text[:_SETTLED_MAX_CHARS].rstrip() + "…"
+    return text
 
 
 def _read_settled_preamble(run_dir: Path) -> str:
@@ -393,7 +414,7 @@ def _render_row(r: dict[str, Any]) -> str:
 
     branch_line = f'<div class="rep-meta">branch <code>{_escape(r["pr_branch"])}</code></div>' if r["pr_branch"] else ""
 
-    blurb = r["settled_preamble"] or r["reason"]
+    blurb = r["impl_complete"] or r["settled_preamble"] or r["reason"]
     if blurb and len(blurb) > 280:
         blurb = blurb[:280].rstrip() + "…"
     blurb_line = f'<div class="rep-meta" style="color:var(--text-dim)">{_escape(blurb)}</div>' if blurb else ""
