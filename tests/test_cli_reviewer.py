@@ -471,6 +471,77 @@ class HeaderTest(unittest.TestCase):
             self.assertIsNone(cli_reviewer.extract_model("claude", sink))
 
 
+class HideOrchestratorScaffoldsTest(unittest.TestCase):
+    """Suppress .contremaitre/* from `git status` in the cli_review cwd.
+
+    Without this, codex/claude see the orchestrator's per-run scaffolds
+    (SETTLED_DESIGN.md, IMPLEMENTATION_COMPLETE, …) as uncommitted files
+    and may flag them as drift from the PR.
+    """
+
+    def test_appends_to_dir_style_git_info_exclude(self):
+        with TemporaryDirectory() as td:
+            worktree = Path(td)
+            (worktree / ".git" / "info").mkdir(parents=True)
+            cli_reviewer.hide_orchestrator_scaffolds(worktree)
+            exclude = (worktree / ".git" / "info" / "exclude").read_text()
+            self.assertIn(".contremaitre/", exclude)
+
+    def test_idempotent(self):
+        # Running cli_review on the same cached repo across runs must not
+        # grow the exclude file with duplicates.
+        with TemporaryDirectory() as td:
+            worktree = Path(td)
+            (worktree / ".git" / "info").mkdir(parents=True)
+            cli_reviewer.hide_orchestrator_scaffolds(worktree)
+            cli_reviewer.hide_orchestrator_scaffolds(worktree)
+            cli_reviewer.hide_orchestrator_scaffolds(worktree)
+            exclude = (worktree / ".git" / "info" / "exclude").read_text()
+            self.assertEqual(exclude.count(".contremaitre/"), 1)
+
+    def test_follows_gitlink_to_per_worktree_exclude(self):
+        # `git worktree add` makes `<worktree>/.git` a file pointing to the
+        # main repo's worktrees/<name> dir. Writing to that PER-WORKTREE
+        # exclude keeps other concurrent runs sharing the cache clean.
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            main_git = root / "main" / ".git"
+            per_worktree = main_git / "worktrees" / "run-x"
+            per_worktree.mkdir(parents=True)
+            worktree = root / "wt"
+            worktree.mkdir()
+            (worktree / ".git").write_text(f"gitdir: {per_worktree}\n")
+
+            cli_reviewer.hide_orchestrator_scaffolds(worktree)
+
+            self.assertTrue((per_worktree / "info" / "exclude").exists())
+            self.assertIn(
+                ".contremaitre/",
+                (per_worktree / "info" / "exclude").read_text(),
+            )
+            # Main repo's exclude must NOT have been touched.
+            self.assertFalse((main_git / "info" / "exclude").exists())
+
+    def test_preserves_existing_excludes(self):
+        # Don't clobber other patterns the operator already had in there.
+        with TemporaryDirectory() as td:
+            worktree = Path(td)
+            info = worktree / ".git" / "info"
+            info.mkdir(parents=True)
+            (info / "exclude").write_text("# operator's patterns\n*.log\nbuild/\n")
+            cli_reviewer.hide_orchestrator_scaffolds(worktree)
+            content = (info / "exclude").read_text()
+            self.assertIn("*.log", content)
+            self.assertIn("build/", content)
+            self.assertIn(".contremaitre/", content)
+
+    def test_no_git_dir_is_a_noop(self):
+        # Best-effort: cli_review still works without this if the cwd
+        # somehow isn't a git checkout; just don't raise.
+        with TemporaryDirectory() as td:
+            cli_reviewer.hide_orchestrator_scaffolds(Path(td))  # no .git
+
+
 class JsonlSinkForTest(unittest.TestCase):
     def test_picks_right_sink(self):
         with TemporaryDirectory() as td:

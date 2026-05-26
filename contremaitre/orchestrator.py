@@ -576,6 +576,11 @@ class Orchestrator:
         self._emit(events.CLI_REVIEW_STARTED, tool=tool, url=outcome.url)
 
         prompt = _cli_reviewer.build_prompt(pr_url=outcome.url)
+        # Hide the orchestrator's .contremaitre/* scaffolds from `git status`
+        # in the cli_review cwd, so codex/claude don't mistake them for
+        # uncommitted drift from the PR (the host commit excludes them via
+        # a pathspec, so they exist in the worktree but never in the PR).
+        _cli_reviewer.hide_orchestrator_scaffolds(self.paths.worktree)
         start = time.monotonic()
         result = _cli_reviewer.run_review(
             tool=tool,

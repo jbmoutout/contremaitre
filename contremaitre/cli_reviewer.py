@@ -34,6 +34,13 @@ from .jsonlog import append_jsonl, append_text_event
 VALID_TOOLS = ("codex", "claude")
 SUBPROCESS_TIMEOUT_S = 600
 
+# Path the orchestrator stashes its per-run scaffolds under (SETTLED_DESIGN.md,
+# IMPLEMENTATION_COMPLETE, architecture-review.html, etc.). The committed
+# diff excludes them via a `:(exclude).contremaitre` pathspec; we additionally
+# hide them from `git status` for the cli_review subprocess so codex/claude
+# don't see phantom "untracked" files that aren't part of the PR.
+_SCAFFOLD_EXCLUDE_PATTERN = ".contremaitre/"
+
 
 @dataclass(frozen=True)
 class ReviewResult:
@@ -141,6 +148,74 @@ def build_prompt(*, pr_url: str) -> str:
     from .prompts import CLI_REVIEWER_PROMPT
 
     return CLI_REVIEWER_PROMPT.format(pr_url=pr_url)
+
+
+# ---------- worktree prep ----------
+
+
+def hide_orchestrator_scaffolds(worktree: Path) -> None:
+    """Suppress `.contremaitre/*` from `git status` in the cli_review cwd.
+
+    The orchestrator's host commit excludes `.contremaitre/` via a
+    `:(exclude).contremaitre` pathspec, so the scaffolds (SETTLED_DESIGN.md,
+    IMPLEMENTATION_COMPLETE, …) sit in the worktree as uncommitted files.
+    The cli_review subprocess runs with `cwd=worktree`, so without this
+    hide step `git status` shows phantom "untracked" entries the agent
+    might mistake for drift from the PR.
+
+    Writes the pattern to `$GIT_DIR/info/exclude`. Resolves `$GIT_DIR`
+    through the `.git` gitlink file when `worktree` was created by
+    `git worktree add` (per-worktree exclude, doesn't pollute the shared
+    main repo). Best-effort: failures are swallowed since this is purely
+    cosmetic and the rest of cli_review still works without it.
+    """
+
+    try:
+        git_dir = _resolve_git_dir(worktree)
+        if git_dir is None:
+            return
+        exclude_path = git_dir / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = (
+            exclude_path.read_text(encoding="utf-8")
+            if exclude_path.exists()
+            else ""
+        )
+        # Line-by-line check, not substring, so a comment containing the
+        # pattern doesn't make this falsely think it's already present.
+        for line in existing.splitlines():
+            if line.strip() == _SCAFFOLD_EXCLUDE_PATTERN:
+                return
+        with exclude_path.open("a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(f"{_SCAFFOLD_EXCLUDE_PATTERN}\n")
+    except OSError:
+        return
+
+
+def _resolve_git_dir(worktree: Path) -> Path | None:
+    """Return the worktree's `$GIT_DIR`, honoring the gitlink file shape.
+
+    For repos created via `git worktree add`, `worktree/.git` is a text
+    file like `gitdir: /path/to/main/.git/worktrees/<name>` rather than a
+    directory. We follow the pointer so we write to the PER-WORKTREE
+    exclude, not the shared main one.
+    """
+
+    gitlink = worktree / ".git"
+    if gitlink.is_file():
+        try:
+            content = gitlink.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not content.startswith("gitdir:"):
+            return None
+        target = content.split(":", 1)[1].strip()
+        return Path(target)
+    if gitlink.is_dir():
+        return gitlink
+    return None
 
 
 # ---------- subprocess invocation ----------
