@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import events, prompts
+from . import settled_utils as _su
 from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
@@ -64,9 +65,6 @@ from .publisher import (
 )
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
 
-
-SETTLED_RELPATH = Path(".contremaitre") / "SETTLED_DESIGN.md"
-IMPLEMENTATION_COMPLETE_RELPATH = Path(".contremaitre") / "IMPLEMENTATION_COMPLETE"
 
 # Paths held out of the host commit. `.contremaitre/` / `opencode.json` are
 # orchestration-internal; the rest are conventionally-gitignored build output
@@ -239,7 +237,7 @@ class Orchestrator:
                     branch=branch,
                 )
 
-            settled_file = self.paths.worktree / SETTLED_RELPATH
+            settled_file = self.paths.worktree / _su.SETTLED_RELPATH
             if not settled_file.exists():
                 return self._terminal_no_pr(
                     TerminalVerdict.NO_PR_NEEDS_HUMAN,
@@ -870,7 +868,8 @@ class Orchestrator:
         if _only_contremaitre_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
-        title, body = _derive_commit_message(self.paths.worktree, self.run_id)
+        title, settled_text = _su.read_settled_design(self.paths.worktree, self.run_id)
+        body = f"{settled_text}\n\n---\nRun: {self.run_id}\n"
         # `:(exclude)X` pathspecs hold orchestration-internal / build-output
         # files out of the staged set. They stay in the worktree (SIM reads
         # them; agent produces them) but must not land in the PR diff.
@@ -893,10 +892,10 @@ class Orchestrator:
     # ----- terminal signal -----
 
     def _implementation_complete(self) -> bool:
-        return (self.paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH).exists()
+        return (self.paths.worktree / _su.IMPLEMENTATION_COMPLETE_RELPATH).exists()
 
     def _clear_implementation_complete(self) -> None:
-        marker = self.paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH
+        marker = self.paths.worktree / _su.IMPLEMENTATION_COMPLETE_RELPATH
         if marker.exists():
             marker.unlink()
             self._emit(events.IMPLEMENTATION_COMPLETE_CLEARED)
@@ -1170,36 +1169,6 @@ def _only_contremaitre_changes(porcelain: str) -> bool:
         if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
             return False
     return True
-
-
-def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
-    """Read SETTLED_DESIGN.md and turn it into (commit title, commit body).
-
-    Title: first non-empty line, stripped of `# ` and any "Settled design — "
-    prefix the skill tends to emit. Falls back to a run-id-tagged generic
-    when SETTLED is missing or empty (shouldn't happen post-WORK since the
-    orchestrator gates on it, but the host commit must never fail here).
-    Body: the full SETTLED text + a trailer with the run id, so the commit
-    is self-contained for anyone reading `git log` later.
-    """
-
-    settled = worktree / SETTLED_RELPATH
-    fallback_title = f"Contremaitre refactor ({run_id})"
-    if not settled.exists():
-        return fallback_title, f"Run: {run_id}\n"
-    text = settled.read_text(encoding="utf-8").strip()
-    if not text:
-        return fallback_title, f"Run: {run_id}\n"
-    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    title = first_line.lstrip("#").strip()
-    for prefix in ("Settled design — ", "Settled design - ", "Settled design: "):
-        if title.lower().startswith(prefix.lower()):
-            title = title[len(prefix):].strip()
-            break
-    if not title:
-        title = fallback_title
-    body = f"{text}\n\n---\nRun: {run_id}\n"
-    return title, body
 
 
 _VERDICT_SEVERITY = {
