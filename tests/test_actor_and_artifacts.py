@@ -23,6 +23,7 @@ from contremaitre.actors import (
 )
 from contremaitre.costs import estimate_recorded_cost_usd
 from contremaitre.fixture import init_fixture
+from contremaitre.jsonlog import read_jsonl
 from contremaitre.models import Caps, RunConfig, TerminalVerdict
 from contremaitre.orchestrator import run
 from contremaitre.paths import build_run_paths, new_run_id
@@ -60,18 +61,11 @@ class FakeActorWritesItsOwnArtifactsTest(unittest.TestCase):
             sim_scenario="approved",
         )
 
-    def _read_jsonl(self, path: Path) -> list[dict]:
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-
     def test_agent_turn_writes_text_event_with_role_and_phase(self):
         out = self.actor.agent_turn("ignored by fake")
 
         self.assertTrue(out.text)
-        events_list = self._read_jsonl(self.paths.raw_export)
+        events_list = read_jsonl(self.paths.raw_export)
         text_events = [e for e in events_list if e.get("type") == "text"]
         self.assertEqual(len(text_events), 1)
         self.assertEqual(text_events[0]["role"], "agent")
@@ -84,7 +78,7 @@ class FakeActorWritesItsOwnArtifactsTest(unittest.TestCase):
         self.assertTrue(out.text)
         # No leakage into the agent stream.
         self.assertFalse(self.paths.raw_export.exists())
-        events_list = self._read_jsonl(self.paths.sim_raw_export)
+        events_list = read_jsonl(self.paths.sim_raw_export)
         text_events = [e for e in events_list if e.get("type") == "text"]
         self.assertEqual(len(text_events), 1)
         self.assertEqual(text_events[0]["role"], "sim")
@@ -110,7 +104,7 @@ class FakeActorWritesItsOwnArtifactsTest(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "APPROVED")
         self.assertIn("confidence", verdict)
         # The actor's REVIEW-phase event lands in sim_raw_export.
-        events_list = self._read_jsonl(self.paths.sim_raw_export)
+        events_list = read_jsonl(self.paths.sim_raw_export)
         review_text_events = [
             e for e in events_list if e.get("type") == "text" and e.get("phase") == "REVIEW"
         ]
@@ -294,13 +288,6 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
                        "cache": {"read": 0, "write": 0}},
         }
 
-    def _read_jsonl(self, path: Path) -> list[dict]:
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-
     def test_harvest_appends_parent_and_subagent_step_finishes(self):
         # Parent already has one step_finish in raw_export (from stdout).
         self.raw_export.write_text(
@@ -323,7 +310,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
         appended = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
         self.assertEqual(appended, 4, "should append all step_finishes except the duplicate")
-        events_list = self._read_jsonl(self.raw_export)
+        events_list = read_jsonl(self.raw_export)
         self.assertEqual(len(events_list), 5)
         synthesized = [e for e in events_list if e.get("_synthesized_from_sqlite")]
         self.assertEqual(len(synthesized), 4)
@@ -386,7 +373,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
         appended = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
         self.assertEqual(appended, 1)
-        events_list = self._read_jsonl(self.raw_export)
+        events_list = read_jsonl(self.raw_export)
         self.assertEqual(events_list[0]["part"]["id"], "prt_table_only")
         # messageID + sessionID get reassembled from columns too.
         self.assertEqual(events_list[0]["part"]["messageID"], "msg_prt_table_only")
@@ -404,7 +391,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
         appended = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
         self.assertEqual(appended, 1)
-        events_list = self._read_jsonl(self.raw_export)
+        events_list = read_jsonl(self.raw_export)
         self.assertEqual(len(events_list), 1)
         self.assertEqual(events_list[0]["part"]["id"], "prt_sf")
 
