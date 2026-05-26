@@ -19,6 +19,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .jsonlog import read_jsonl
 from .models import RunPaths
 
 
@@ -58,22 +59,6 @@ def parse_apply_patch(patch_text: str):
             yield op, path, chunk
 
 
-def _read_events(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    events: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-    return events
-
 
 def _host_name(fp: str) -> str:
     rel = fp.replace("/app/", "").replace("/app", "").lstrip("/")
@@ -86,7 +71,7 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
     Returns counts suitable for inclusion in stats.json.
     """
 
-    events = _read_events(paths.raw_export) + _read_events(paths.sim_raw_export)
+    events = read_jsonl(paths.raw_export) + read_jsonl(paths.sim_raw_export)
 
     paths.extracted_files_dir.mkdir(parents=True, exist_ok=True)
     paths.subagents_dir.mkdir(parents=True, exist_ok=True)

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from contremaitre import events
 from contremaitre.fixture import init_fixture
+from contremaitre.jsonlog import read_jsonl
 from contremaitre.models import Caps, RunConfig, TerminalVerdict
 from contremaitre.orchestrator import run
 
@@ -102,7 +103,7 @@ class ControlPlaneTest(unittest.TestCase):
         result, _ = self._run_fixture(run_slug="extra-off")
 
         self.assertEqual(result.verdict, TerminalVerdict.READY_FOR_DRAFT_PR)
-        cycles = self._read_jsonl(result.run_dir / "review_cycles.jsonl")
+        cycles = read_jsonl(result.run_dir / "review_cycles.jsonl")
         self.assertEqual(len(cycles), 1)
         self.assertEqual(cycles[0]["reviewer"], "sim")
         pr_eval = self._read_json(result.run_dir / "eval" / "pr_eval.json")
@@ -125,7 +126,7 @@ class ControlPlaneTest(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, TerminalVerdict.READY_FOR_DRAFT_PR)
-        cycles = self._read_jsonl(result.run_dir / "review_cycles.jsonl")
+        cycles = read_jsonl(result.run_dir / "review_cycles.jsonl")
         # Two entries: one sim + one extra in round 1.
         self.assertEqual(len(cycles), 2)
         reviewers = sorted(c["reviewer"] for c in cycles)
@@ -154,7 +155,7 @@ class ControlPlaneTest(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_NEEDS_HUMAN)
-        cycles = self._read_jsonl(result.run_dir / "review_cycles.jsonl")
+        cycles = read_jsonl(result.run_dir / "review_cycles.jsonl")
         sim_entry = next(c for c in cycles if c["reviewer"] == "sim")
         extra_entry = next(c for c in cycles if c["reviewer"] == "extra")
         self.assertEqual(sim_entry["verdict"], "APPROVED")
@@ -173,7 +174,7 @@ class ControlPlaneTest(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_CHANGES_REQUESTED)
-        guardrails = self._read_jsonl(result.run_dir / "guardrail_events.jsonl")
+        guardrails = read_jsonl(result.run_dir / "guardrail_events.jsonl")
         revisions = [g for g in guardrails if g.get("event") == events.REVISION_REQUESTED]
         self.assertGreaterEqual(len(revisions), 1)
         # Required changes carry the [EXTRA] tag (since SIM had no required
@@ -197,12 +198,12 @@ class ControlPlaneTest(unittest.TestCase):
         )
 
         self.assertEqual(result.verdict, TerminalVerdict.READY_FOR_DRAFT_PR)
-        cycles = self._read_jsonl(result.run_dir / "review_cycles.jsonl")
+        cycles = read_jsonl(result.run_dir / "review_cycles.jsonl")
         sim_entry = next(c for c in cycles if c["reviewer"] == "sim")
         extra_entry = next(c for c in cycles if c["reviewer"] == "extra")
         self.assertEqual(sim_entry["verdict"], "APPROVED")
         self.assertTrue(extra_entry["unavailable"])
-        recoveries = self._read_jsonl(result.run_dir / "recoveries.jsonl")
+        recoveries = read_jsonl(result.run_dir / "recoveries.jsonl")
         self.assertTrue(
             any(r.get("kind") == events.EXTRA_REVIEWER_UNAVAILABLE for r in recoveries)
         )
@@ -247,13 +248,7 @@ class ControlPlaneTest(unittest.TestCase):
     def _read_json(path: Path):
         return json.loads(path.read_text(encoding="utf-8"))
 
-    @staticmethod
-    def _read_jsonl(path: Path) -> list[dict]:
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+
 
 
 if __name__ == "__main__":
