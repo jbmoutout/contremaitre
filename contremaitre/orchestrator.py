@@ -64,9 +64,12 @@ from .publisher import (
 )
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
 
-
-SETTLED_RELPATH = Path(".contremaitre") / "SETTLED_DESIGN.md"
-IMPLEMENTATION_COMPLETE_RELPATH = Path(".contremaitre") / "IMPLEMENTATION_COMPLETE"
+from .artifact_contract import (
+    IMPLEMENTATION_COMPLETE_RELPATH,
+    SETTLED_RELPATH,
+    derive_commit_message,
+    only_contremaitre_changes,
+)
 
 # Paths held out of the host commit. `.contremaitre/` / `opencode.json` are
 # orchestration-internal; the rest are conventionally-gitignored build output
@@ -569,7 +572,7 @@ class Orchestrator:
         # `.contremaitre/*` is excluded from staging by design and stays
         # untracked in the worktree for the SIM to read across rounds —
         # don't count it against clean-worktree.
-        clean = _only_contremaitre_changes(worktree_git.status_porcelain())
+        clean = only_contremaitre_changes(worktree_git.status_porcelain())
         hard_gates = hard_gate_payload(
             diff_scan=diff_scan,
             clean_worktree=clean,
@@ -867,10 +870,10 @@ class Orchestrator:
         self._emit(events.SIMULATED_DIFF_DRIFT)
 
     def _commit_agent_changes(self, repo: GitRepo) -> None:
-        if _only_contremaitre_changes(repo.status_porcelain()):
+        if only_contremaitre_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
-        title, body = _derive_commit_message(self.paths.worktree, self.run_id)
+        title, body = derive_commit_message(self.paths.worktree, self.run_id)
         # `:(exclude)X` pathspecs hold orchestration-internal / build-output
         # files out of the staged set. They stay in the worktree (SIM reads
         # them; agent produces them) but must not land in the PR diff.
@@ -1139,67 +1142,6 @@ def _is_gitignored(repo: GitRepo, path: str) -> bool:
     """
 
     return repo.run("check-ignore", "-q", "--", path, check=False).returncode == 0
-
-
-def _only_contremaitre_changes(porcelain: str) -> bool:
-    """True iff every `git status --porcelain` row is orchestration-internal.
-
-    Files excluded from commits by pathspec (`.contremaitre/*`,
-    `opencode.json`) are deliberately untracked in the worktree. The
-    host-commit step and the clean-worktree hard gate both need to treat
-    a worktree whose only changes are in these paths as "clean for our
-    purposes":
-
-    - host-commit: skip instead of producing an empty PR.
-    - clean-worktree gate: pass.
-
-    Empty porcelain (no changes at all) is also "clean".
-    """
-
-    _INTERNAL_PREFIXES = (
-        ".contremaitre/", ".contremaitre",
-        "opencode.json",
-        "dist/", "build/", "out/", ".next/",
-        "__pycache__/",
-    )
-
-    for line in porcelain.splitlines():
-        if not line.strip():
-            continue
-        path = line[3:].strip().strip('"')
-        if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
-            return False
-    return True
-
-
-def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
-    """Read SETTLED_DESIGN.md and turn it into (commit title, commit body).
-
-    Title: first non-empty line, stripped of `# ` and any "Settled design — "
-    prefix the skill tends to emit. Falls back to a run-id-tagged generic
-    when SETTLED is missing or empty (shouldn't happen post-WORK since the
-    orchestrator gates on it, but the host commit must never fail here).
-    Body: the full SETTLED text + a trailer with the run id, so the commit
-    is self-contained for anyone reading `git log` later.
-    """
-
-    settled = worktree / SETTLED_RELPATH
-    fallback_title = f"Contremaitre refactor ({run_id})"
-    if not settled.exists():
-        return fallback_title, f"Run: {run_id}\n"
-    text = settled.read_text(encoding="utf-8").strip()
-    if not text:
-        return fallback_title, f"Run: {run_id}\n"
-    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    title = first_line.lstrip("#").strip()
-    for prefix in ("Settled design — ", "Settled design - ", "Settled design: "):
-        if title.lower().startswith(prefix.lower()):
-            title = title[len(prefix):].strip()
-            break
-    if not title:
-        title = fallback_title
-    body = f"{text}\n\n---\nRun: {run_id}\n"
-    return title, body
 
 
 _VERDICT_SEVERITY = {
