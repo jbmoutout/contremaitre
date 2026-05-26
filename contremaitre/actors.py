@@ -425,6 +425,71 @@ def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
     raise ActorError(f"unknown actor mode: {config.actor_mode}")
 
 
+def build_docker_run_cmd(
+    *,
+    config: RunConfig,
+    paths: RunPaths,
+    worktree: Path,
+    mount_mode: str,
+    role_label: str,
+    container_mode: str = "detached",
+    extra_mounts: list[tuple[Path, str, str]] | None = None,
+    extra_env_names: list[str] | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """Build the shared docker run flags common to actor and check containers.
+
+    Returns ``(cmd, env)`` where *cmd* is the docker invocation up to (but
+    not including) the trailing entrypoint, and *env* is a subprocess
+    environment with proxy variables set (when configured). Callers append
+    their own entrypoint (opencode_cmd or ``sh -c …``).
+
+    *container_mode* — ``"detached"`` produces ``docker run -d …`` (actor),
+    ``"interactive"`` produces ``docker run --rm …`` (check sidecar).
+    *extra_env_names* — env-var names forwarded via ``-e`` (resolved from
+    the returned *env* dict at container launch). Proxy env vars are always
+    forwarded when the corresponding config field is set.
+    """
+
+    env = os.environ.copy()
+    proxy_vars: list[str] = []
+    if config.http_proxy:
+        env["HTTP_PROXY"] = config.http_proxy
+        proxy_vars.append("HTTP_PROXY")
+    if config.https_proxy:
+        env["HTTPS_PROXY"] = config.https_proxy
+        proxy_vars.append("HTTPS_PROXY")
+    if config.no_proxy:
+        env["NO_PROXY"] = config.no_proxy
+        proxy_vars.append("NO_PROXY")
+
+    if container_mode == "detached":
+        cmd = ["docker", "run", "-d"]
+    else:
+        cmd = ["docker", "run", "--rm"]
+
+    cmd.extend(["--label", f"contremaitre.run-id={paths.run_id}"])
+    cmd.extend(["--label", f"contremaitre.role={role_label}"])
+    if config.container_user:
+        cmd.extend(["--user", config.container_user])
+    if config.docker_network:
+        cmd.extend(["--network", config.docker_network])
+    cmd.extend(["-v", f"{worktree}:/app:{mount_mode}"])
+    if config.deps_volume:
+        cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
+        for key, value in config.deps_volume.runtime_env:
+            cmd.extend(["-e", f"{key}={value}"])
+    if config.opencode_config:
+        cmd.extend(["-v", f"{config.opencode_config}:/app/opencode.json:ro"])
+    for host_path, container_path, mode in extra_mounts or []:
+        cmd.extend(["-v", f"{host_path}:{container_path}:{mode}"])
+    for name in extra_env_names or []:
+        cmd.extend(["-e", name])
+    for proxy_var in proxy_vars:
+        cmd.extend(["-e", proxy_var])
+    cmd.extend(["-w", "/app", config.docker_image])
+    return cmd, env
+
+
 def build_docker_command(
     *,
     config: RunConfig,
@@ -438,20 +503,9 @@ def build_docker_command(
     role: str,
     extra_mounts: list[tuple[Path, str, str]] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
-    env = os.environ.copy()
     env_var = config.openrouter_env_var
-    if env_var not in env:
+    if env_var not in os.environ:
         raise ActorError(f"{env_var} is required for opencode actor mode")
-    proxy_vars: list[str] = []
-    if config.http_proxy:
-        env["HTTP_PROXY"] = config.http_proxy
-        proxy_vars.append("HTTP_PROXY")
-    if config.https_proxy:
-        env["HTTPS_PROXY"] = config.https_proxy
-        proxy_vars.append("HTTPS_PROXY")
-    if config.no_proxy:
-        env["NO_PROXY"] = config.no_proxy
-        proxy_vars.append("NO_PROXY")
 
     opencode_cmd = [
         "/root/.opencode/bin/opencode",
@@ -466,47 +520,23 @@ def build_docker_command(
         opencode_cmd.extend(["--session", session_id])
     opencode_cmd.append(prompt)
 
-    # Detached so the container's lifecycle is owned by the docker daemon,
-    # not by this python process: terminal close / SIGHUP no longer
-    # orphans the run, signal handlers can `docker stop` by label, and
-    # we get the container id back on stdout without a cidfile.
-    cmd = ["docker", "run", "-d"]
-    cmd.extend(["--label", f"contremaitre.run-id={paths.run_id}"])
-    cmd.extend(["--label", f"contremaitre.role={role}"])
-    if config.container_user:
-        cmd.extend(["--user", config.container_user])
-    if config.docker_network:
-        cmd.extend(["--network", config.docker_network])
-    cmd.extend(
-        [
-            "-v",
-            f"{paths.run_dir}:/results",
-            "-v",
-            f"{state_dir}:/root/.local/share/opencode",
-            "-v",
-            f"{worktree}:/app:{mount_mode}",
-        ]
+    # State-dir and results mounts are actor-specific; prepend so they
+    # appear before any caller-supplied extra_mounts.
+    actor_mounts = list(extra_mounts or [])
+    actor_mounts.insert(0, (state_dir, "/root/.local/share/opencode", "rw"))
+    actor_mounts.insert(0, (paths.run_dir, "/results", "ro"))
+
+    cmd, env = build_docker_run_cmd(
+        config=config,
+        paths=paths,
+        worktree=worktree,
+        mount_mode=mount_mode,
+        role_label=role,
+        container_mode="detached",
+        extra_mounts=actor_mounts,
+        extra_env_names=[env_var],
     )
-    if config.deps_volume:
-        # Lockhash-keyed deps volume, RW so the agent can install
-        # mid-run when the design genuinely needs a new dep (test
-        # framework, lint plugin, etc.). The trade-off: parallel runs
-        # against the same lockfile share the volume and can race on
-        # writes. Acceptable for solo-operator sequential workflow;
-        # revisit if multi-run-in-parallel becomes a real pattern.
-        # Mounted over the worktree bind at /app/{mount_path}; the
-        # worktree's own copy of that directory (if any) is shadowed.
-        cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
-        for key, value in config.deps_volume.runtime_env:
-            cmd.extend(["-e", f"{key}={value}"])
-    if config.opencode_config:
-        cmd.extend(["-v", f"{config.opencode_config}:/app/opencode.json:ro"])
-    for host_path, container_path, mode in extra_mounts or []:
-        cmd.extend(["-v", f"{host_path}:{container_path}:{mode}"])
-    cmd.extend(["-e", env_var])
-    for proxy_var in proxy_vars:
-        cmd.extend(["-e", proxy_var])
-    cmd.extend(["-w", "/app", config.docker_image, *opencode_cmd])
+    cmd.extend(opencode_cmd)
     return cmd, env
 
 

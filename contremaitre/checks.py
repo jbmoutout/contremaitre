@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import events
+from .actors import build_docker_run_cmd
 from .jsonlog import append_jsonl
 from .models import ActorMode, RunConfig, RunPaths
 
@@ -128,29 +129,21 @@ def _run_sidecar(
     config: RunConfig,
     paths: RunPaths,
 ) -> subprocess.CompletedProcess[str]:
-    docker_cmd = [
-        "docker", "run", "--rm",
-        "--label", f"contremaitre.run-id={paths.run_id}",
-        "--label", "contremaitre.role=check",
-    ]
-    if config.container_user:
-        docker_cmd.extend(["--user", config.container_user])
-    if config.docker_network:
-        docker_cmd.extend(["--network", config.docker_network])
-    docker_cmd.extend(["-v", f"{paths.worktree}:/app:rw"])
-    if config.deps_volume:
-        # RW so a check that needs to install something (rare but real)
-        # doesn't hit EACCES. Matches the agent-side mount mode.
-        docker_cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
-        for key, value in config.deps_volume.runtime_env:
-            docker_cmd.extend(["-e", f"{key}={value}"])
+    base_cmd, _ = build_docker_run_cmd(
+        config=config,
+        paths=paths,
+        worktree=paths.worktree,
+        mount_mode="rw",
+        role_label="check",
+        container_mode="interactive",
+    )
     # `sh -c` (not `-lc`). A login shell sources /etc/profile, which
     # resets PATH and silently drops any `-e PATH=…` we passed (verified:
     # node:24-bookworm-slim's profile is the offender). We rely on PATH
     # to point at /app/.venv/bin so user check-cmds like `pytest -q`
     # resolve through the deps volume. Non-login shells inherit env
     # untouched, which is what we want.
-    docker_cmd.extend(["-w", "/app", config.docker_image, "sh", "-c", cmd])
+    docker_cmd = base_cmd + ["sh", "-c", cmd]
     return subprocess.run(
         docker_cmd,
         capture_output=True,
