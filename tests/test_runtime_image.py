@@ -310,6 +310,30 @@ class CloneDepsVolumeForRunTest(unittest.TestCase):
         self.assertEqual(handle.name, "contremaitre-run-20260524-abcd-deps")
         self.assertNotEqual(handle.name, pristine.name)
 
+        # Two subprocess.run calls: `docker volume create` then the
+        # `docker run … cp -a` copy. Locking these down so a future refactor
+        # that drops either step (silently leaving the per-run volume empty)
+        # fails the test instead of leaking volumes in production.
+        self.assertEqual(fake_run.call_count, 2)
+        create_cmd = fake_run.call_args_list[0].args[0]
+        copy_cmd = fake_run.call_args_list[1].args[0]
+        # Volume create with the run-id label — that label is how the
+        # orchestrator's `finally` cleanup finds and removes per-run volumes.
+        # Lose the label and we leak a volume per run forever.
+        self.assertEqual(create_cmd[:3], ["docker", "volume", "create"])
+        self.assertIn("contremaitre.run-id=20260524-abcd", create_cmd)
+        self.assertIn("contremaitre-run-20260524-abcd-deps", create_cmd)
+        # The clone itself: read-only mount of pristine, RW mount of per-run,
+        # `cp -a` to preserve permissions/timestamps.
+        self.assertEqual(copy_cmd[:3], ["docker", "run", "--rm"])
+        self.assertIn(f"{pristine.name}:/src:ro", copy_cmd)
+        self.assertIn("contremaitre-run-20260524-abcd-deps:/dst", copy_cmd)
+        self.assertIn("contremaitre.run-id=20260524-abcd", copy_cmd)
+        self.assertTrue(
+            any("cp -a /src/. /dst/" in arg for arg in copy_cmd),
+            f"expected cp -a in copy_cmd, got {copy_cmd!r}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

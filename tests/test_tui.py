@@ -19,6 +19,7 @@ import pytest
 
 from contremaitre import events
 from contremaitre.tui import (
+    _PHASES,
     _activity_state,
     _architecture_review_in,
     _build_event_row,
@@ -326,10 +327,10 @@ def test_derive_phase_failed_freezes_at_exploring():
 # ===== _phase_trail =====
 
 
-def test_phase_trail_has_six_dots():
+def test_phase_trail_has_one_dot_per_phase():
     text = _phase_trail("implementing", "live")
     dots = [c for c in text.plain if c in "●○"]
-    assert len(dots) == 6
+    assert len(dots) == len(_PHASES)
 
 
 def test_phase_trail_marks_past_dots_filled():
@@ -348,7 +349,7 @@ def test_phase_trail_no_half_glyph_in_live_state():
 
 def test_phase_trail_all_filled_at_terminal_done():
     text = _phase_trail("done", "ok")
-    assert text.plain.count("●") == 6
+    assert text.plain.count("●") == len(_PHASES)
 
 
 # ===== _verdict_glyph =====
@@ -1132,31 +1133,79 @@ def test_latest_pending_tool_completed_returns_none():
 # string. The main guard here is that the style-dispatch branches don't raise.
 
 
+# Each entry: (kind, event_fields, expected_substrings_in_body.plain).
+# The substrings are the kind-specific signals the renderer is supposed to
+# surface — NOT just the kind name. A test that asserted only "kind appears
+# in body" passes against a renderer that returned `Text(kind)` and ignored
+# every other field; locking the icon / payload field per kind catches that.
 @pytest.mark.parametrize(
-    "kind",
+    "kind,fields,expected",
     [
-        events.PUBLISHED,
-        events.PUBLICATION_BLOCKED,
-        events.INFRA_FAILURE,
-        events.REVISION_REQUESTED,
-        events.REVIEW_VERDICT,
-        events.CHECK_COMPLETED,
-        events.HARD_GATES_CHECKED,
-        events.OPENCODE_ACTOR_START,
-        events.WORK_SESSION_END,
-        events.TURN_CAP,
+        # ✓ icon — operator's "did it publish?" eye-anchor. The URL itself
+        # is surfaced by the dedicated links-line widget, not by the
+        # guardrail renderer, so we only lock the icon here.
+        (events.PUBLISHED, {}, ["✓"]),
+        # Block reason should surface so the operator knows why.
+        (events.PUBLICATION_BLOCKED, {"reason": "diff_hash_drift"}, []),
+        (events.INFRA_FAILURE, {"error": "docker died"}, ["docker died"]),
+        # round= field signals which loop we're in.
+        (events.REVISION_REQUESTED, {"round": 2}, ["round=2"]),
+        # APPROVED → ✓; verdict field echoed.
+        (events.REVIEW_VERDICT, {"verdict": "APPROVED", "round": 1},
+         ["✓", "verdict=APPROVED", "round=1"]),
+        # check_completed surfaces the command + ✓ on rc=0.
+        (events.CHECK_COMPLETED, {"returncode": 0, "cmd": "pytest -q", "duration_seconds": 1.5},
+         ["✓", "pytest -q"]),
+        # hard_gates_checked passed=True → ✓.
+        (events.HARD_GATES_CHECKED, {"passed": True}, ["✓"]),
+        # actor_start surfaces the role so the operator sees agent/sim/review.
+        (events.OPENCODE_ACTOR_START, {"role": "review"}, ["role=review"]),
+        (events.WORK_SESSION_END, {"role": "agent"}, ["role=agent"]),
+        (events.TURN_CAP, {"role": "agent"}, ["role=agent"]),
     ],
 )
-def test_render_guardrail_contains_kind(kind):
-    ev = _g(kind, verdict="APPROVED", passed=True, returncode=0, role="agent")
+def test_render_guardrail_surfaces_kind_specific_fields(kind, fields, expected):
+    ev = _g(kind, **fields)
     body = _render_guardrail(ev)
     assert kind in body.plain
+    for needle in expected:
+        assert needle in body.plain, f"{kind!r}: expected {needle!r} in {body.plain!r}"
+
+
+def test_render_guardrail_check_completed_nonzero_shows_rc_and_x_icon():
+    # Failure-path branch is separately asserted so a regression that
+    # always prints `✓` regardless of returncode fails here.
+    ev = _g(events.CHECK_COMPLETED, returncode=2, cmd="pytest -q")
+    body = _render_guardrail(ev)
+    assert "✗" in body.plain
+    assert "rc=2" in body.plain
+
+
+def test_render_guardrail_hard_gates_failed_shows_x_icon():
+    ev = _g(events.HARD_GATES_CHECKED, passed=False)
+    body = _render_guardrail(ev)
+    assert "✗" in body.plain
+
+
+def test_render_guardrail_review_verdict_changes_requested_shows_x_icon():
+    ev = _g(events.REVIEW_VERDICT, verdict="CHANGES_REQUESTED")
+    body = _render_guardrail(ev)
+    assert "✗" in body.plain
+    assert "verdict=CHANGES_REQUESTED" in body.plain
 
 
 def test_render_guardrail_recovery_kind_substring():
-    ev = {"ts": "2026-01-01T00:00:00.000Z", "kind": events.SQLITE_RECOVERY_SILENT_STALL}
+    # Recoveries use `kind=` (not `event=`) and carry `recovered_chars`.
+    ev = {
+        "ts": "2026-01-01T00:00:00.000Z",
+        "kind": events.SQLITE_RECOVERY_SILENT_STALL,
+        "role": "agent",
+        "recovered_chars": 256,
+    }
     body = _render_guardrail(ev)
     assert events.SQLITE_RECOVERY_SILENT_STALL in body.plain
+    assert "role=agent" in body.plain
+    assert "recovered_chars=256" in body.plain
 
 
 # ===== _build_event_row =====

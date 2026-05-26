@@ -53,6 +53,13 @@ class DockerfileHashRebuildTest(unittest.TestCase):
                 rc = cli._ensure_default_image_built(config)
         self.assertEqual(rc, 0)
         fake_build.assert_called_once()
+        # Variant dispatch routed the build at the patched Dockerfile for
+        # the configured image. A regression that built from the wrong
+        # variant (e.g. always `base`, ignoring `rust`/`go`) would surface
+        # here as a path mismatch.
+        kwargs = fake_build.call_args.kwargs
+        self.assertEqual(kwargs["dockerfile"], df)
+        self.assertEqual(kwargs["image_name"], cli._DEFAULT_IMAGE)
 
     def test_hash_match_skips_build(self):
         with tempfile.TemporaryDirectory() as tmp:

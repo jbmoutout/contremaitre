@@ -28,6 +28,7 @@ exit 7
 
 SHIM_ENV_DUMP = """#!/bin/sh
 echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-unset}"
+echo "ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN-unset}"
 echo "OPENAI_API_KEY=${OPENAI_API_KEY-unset}"
 """
 
@@ -342,6 +343,10 @@ pwd
             env_patch = {
                 "PATH": f"{tmp}:{os.environ.get('PATH','')}",
                 "ANTHROPIC_API_KEY": "should-not-leak",
+                # OAuth token: claude CLI prefers this over the API key,
+                # so blanking only API_KEY but leaving AUTH_TOKEN set still
+                # lands paid API calls instead of subscription usage.
+                "ANTHROPIC_AUTH_TOKEN": "auth-token-must-not-leak",
                 "OPENAI_API_KEY": "also-should-not-leak",
             }
             with mock.patch.dict(os.environ, env_patch):
@@ -351,8 +356,42 @@ pwd
                 )
             self.assertEqual(result.exit_code, 0)
             self.assertIn("ANTHROPIC_API_KEY=", result.markdown)
+            self.assertIn("ANTHROPIC_AUTH_TOKEN=", result.markdown)
             self.assertNotIn("should-not-leak", result.markdown)
+            self.assertNotIn("auth-token-must-not-leak", result.markdown)
             self.assertNotIn("also-should-not-leak", result.markdown)
+
+
+class ScrubbedEnvTest(unittest.TestCase):
+    """Lock the deny set on `_scrubbed_env` so a future refactor that
+    removes an entry from the list (e.g. drops `ANTHROPIC_AUTH_TOKEN` by
+    mistake) fails loudly instead of silently shipping a leak."""
+
+    def test_blanks_all_known_provider_keys(self):
+        env_patch = {
+            "ANTHROPIC_API_KEY": "a",
+            "ANTHROPIC_AUTH_TOKEN": "b",
+            "OPENAI_API_KEY": "c",
+            "UNRELATED_KEY": "keep-me",
+        }
+        with mock.patch.dict(os.environ, env_patch, clear=False):
+            env = cli_reviewer._scrubbed_env()
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertEqual(env["OPENAI_API_KEY"], "")
+        # Unrelated env vars pass through — operator's PATH / HOME / shell
+        # plumbing must not get clobbered.
+        self.assertEqual(env["UNRELATED_KEY"], "keep-me")
+
+    def test_blanks_present_keys_even_if_some_unset(self):
+        # Partial operator env (only one of the three set): the present
+        # key still gets blanked, missing ones don't crash.
+        env_patch = {"OPENAI_API_KEY": "only-this-one"}
+        with mock.patch.dict(os.environ, env_patch, clear=True):
+            env = cli_reviewer._scrubbed_env()
+        self.assertEqual(env.get("OPENAI_API_KEY"), "")
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
 
 
 class PostCommentTest(unittest.TestCase):
@@ -370,7 +409,17 @@ class PostCommentTest(unittest.TestCase):
                     git_log=log,
                 )
             self.assertTrue(ok)
-            self.assertEqual(srun.call_args.args[0][:3], ["gh", "pr", "comment"])
+            # Lock the full gh invocation shape: target PR URL is positional,
+            # body is passed via `--body-file` (NOT `--body`, which has a
+            # length limit + shell-escaping headaches). A regression that
+            # swapped to `--body` or dropped the body path entirely would
+            # ship empty/truncated comments.
+            cmd = srun.call_args.args[0]
+            self.assertEqual(cmd[:3], ["gh", "pr", "comment"])
+            self.assertIn("https://github.com/x/y/pull/1", cmd)
+            self.assertIn("--body-file", cmd)
+            self.assertEqual(cmd[cmd.index("--body-file") + 1], str(body))
+            self.assertNotIn("--body", [c for c in cmd if c == "--body"])
             entries = [json.loads(ln) for ln in log.read_text().splitlines() if ln.strip()]
             self.assertEqual(entries[0]["returncode"], 0)
             self.assertEqual(entries[0]["publisher"], "cli_reviewer")
@@ -537,9 +586,15 @@ class HideOrchestratorScaffoldsTest(unittest.TestCase):
 
     def test_no_git_dir_is_a_noop(self):
         # Best-effort: cli_review still works without this if the cwd
-        # somehow isn't a git checkout; just don't raise.
+        # somehow isn't a git checkout. Two invariants: (a) doesn't raise,
+        # (b) doesn't fabricate a .git directory or any other files —
+        # otherwise we'd silently turn a non-git directory into one.
         with TemporaryDirectory() as td:
-            cli_reviewer.hide_orchestrator_scaffolds(Path(td))  # no .git
+            tmp = Path(td)
+            before = sorted(tmp.iterdir())
+            cli_reviewer.hide_orchestrator_scaffolds(tmp)
+            self.assertFalse((tmp / ".git").exists())
+            self.assertEqual(sorted(tmp.iterdir()), before)
 
 
 class JsonlSinkForTest(unittest.TestCase):
