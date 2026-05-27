@@ -40,16 +40,9 @@ from pathlib import Path
 from typing import Any
 
 from .extract import parse_apply_patch
-
-# ---------------------------------------------------------------------------
-# JSONL reader — delegated to jsonlog.read_jsonl
-# ---------------------------------------------------------------------------
+from .jsonlog import read_jsonl
 
 
-def _read_jsonl(path: Path) -> list[dict]:
-    from .jsonlog import read_jsonl as _rj
-
-    return _rj(path)
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +79,8 @@ def compute_flow_use(paths: Any) -> dict[str, Any]:
     `paths` is a RunPaths instance; fields used:
       raw_export, sim_raw_export, review_cycles, guardrail_events.
     """
-    agent_events = _read_jsonl(paths.raw_export)
-    sim_events = _read_jsonl(paths.sim_raw_export)
+    agent_events = read_jsonl(paths.raw_export)
+    sim_events = read_jsonl(paths.sim_raw_export)
     agent = _agent_metrics(agent_events)
     return {
         "schema": "flow_use v1",
@@ -110,7 +103,7 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     and rolled into the PR body lede.
     """
     if agent_events is None:
-        agent_events = _read_jsonl(paths.raw_export)
+        agent_events = read_jsonl(paths.raw_export)
     tool_calls = [e for e in agent_events if e.get("type") == "tool_use"]
     settled_event = _find_write_to(tool_calls, _SETTLED_RE)
     impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
@@ -118,7 +111,7 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     impl_ms = _timestamp_ms(impl_event)
 
     guardrails_path = getattr(paths, "guardrail_events", None)
-    guardrails = _read_jsonl(guardrails_path) if guardrails_path else []
+    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
     starts: list[tuple[float, str]] = []
     for g in guardrails:
         if g.get("event") != "opencode_actor_start":
@@ -159,7 +152,7 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     # max(round), not len(): with the extra reviewer enabled, review_cycles
     # carries two entries per round plus optional `unavailable` entries; the
     # round number is the canonical counter.
-    cycles = _read_jsonl(paths.review_cycles)
+    cycles = read_jsonl(paths.review_cycles)
     review_rounds = (
         max((e.get("round") or 0) for e in cycles) if cycles else 0
     )
@@ -320,7 +313,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     # or an `unavailable` marker row) so the ratio reflects SIM tool-use → SIM
     # verdict alignment.
     sim_useful_ratio: float | None = None
-    review_cycles = _read_jsonl(paths.review_cycles)
+    review_cycles = read_jsonl(paths.review_cycles)
     sim_cycles = [
         c for c in review_cycles
         if c.get("reviewer", "sim") == "sim" and not c.get("unavailable")

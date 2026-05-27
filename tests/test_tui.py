@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from contremaitre import events
+from contremaitre.jsonlog import read_jsonl as _read_jsonl
 from contremaitre.tui import (
     _PHASES,
     _activity_state,
@@ -33,7 +34,6 @@ from contremaitre.tui import (
     _persistent_review_token,
     _phase_trail,
     _pr_number_from_url,
-    _read_jsonl,
     _render_guardrail,
     _reviewer_glyph,
     _reviewer_status,

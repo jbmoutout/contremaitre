@@ -202,15 +202,11 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     import json as _json
     import re as _re
     from .flow_use import compute_phases
+    from .jsonlog import read_jsonl as _read_jsonl
     from .orchestrator import (
         IMPLEMENTATION_COMPLETE_RELPATH,
         _derive_commit_message,
     )
-
-    def _read_jsonl(p: Path) -> list[dict]:
-        from .jsonlog import read_jsonl as _rj
-
-        return _rj(p)
 
     def _read_json(p: Path) -> dict | None:
         if not p.exists():

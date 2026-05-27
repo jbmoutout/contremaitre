@@ -58,12 +58,6 @@ def parse_apply_patch(patch_text: str):
             yield op, path, chunk
 
 
-def _read_events(path: Path) -> list[dict[str, Any]]:
-    from .jsonlog import read_jsonl as _rj
-
-    return _rj(path)
-
-
 def _host_name(fp: str) -> str:
     rel = fp.replace("/app/", "").replace("/app", "").lstrip("/")
     return rel.replace("/", "__")
@@ -75,7 +69,9 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
     Returns counts suitable for inclusion in stats.json.
     """
 
-    events = _read_events(paths.raw_export) + _read_events(paths.sim_raw_export)
+    from .jsonlog import read_jsonl as _read_jsonl
+
+    events = _read_jsonl(paths.raw_export) + _read_jsonl(paths.sim_raw_export)
 
     paths.extracted_files_dir.mkdir(parents=True, exist_ok=True)
     paths.subagents_dir.mkdir(parents=True, exist_ok=True)
