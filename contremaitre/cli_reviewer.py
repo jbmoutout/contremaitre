@@ -20,7 +20,6 @@ Boundaries:
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -28,7 +27,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .jsonlog import append_jsonl, append_text_event
+from .jsonlog import append_jsonl, append_text_event, read_jsonl
 
 
 VALID_TOOLS = ("codex", "claude")
@@ -470,20 +469,10 @@ def extract_model(tool: str, jsonl_path: Path) -> str | None:
 
     if tool != "codex" or not jsonl_path.exists():
         return None
-    try:
-        for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            text = (event.get("part") or {}).get("text", "")
-            if isinstance(text, str) and text.startswith("model:"):
-                return text.split(":", 1)[1].strip() or None
-    except OSError:
-        return None
+    for event in read_jsonl(jsonl_path):
+        text = (event.get("part") or {}).get("text", "")
+        if isinstance(text, str) and text.startswith("model:"):
+            return text.split(":", 1)[1].strip() or None
     return None
 
 
