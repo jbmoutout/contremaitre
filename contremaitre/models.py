@@ -26,6 +26,12 @@ class ReviewVerdict(str, Enum):
     NEEDS_HUMAN = "NEEDS_HUMAN"
 
 
+class CliReviewVerdict(str, Enum):
+    MUST_FIX = "MUST_FIX"
+    NEEDS_ATTENTION = "NEEDS_ATTENTION"
+    LOOKS_GOOD = "LOOKS_GOOD"
+
+
 class TerminalVerdict(str, Enum):
     READY_FOR_DRAFT_PR = "READY_FOR_DRAFT_PR"
     NO_PR_CHANGES_REQUESTED = "NO_PR_CHANGES_REQUESTED"

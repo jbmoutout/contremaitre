@@ -507,17 +507,17 @@ def _cli_review_status_glyph(
 ) -> tuple[str, str]:
     """`(glyph, style)` for the post-publish CLI-review status.
 
-    On `completed`, the glyph reflects the agent's verdict (🟢/🟠/🔴 from
-    line 1 of the review) — NOT the subprocess exit code. The agent can
-    successfully produce a `🔴 Must fix` review, and the footer needs to
-    show that as `✗`, not `✓`. Falls back to ✓ when the completion event
-    didn't carry a verdict (older runs / parse miss).
+    On `completed`, the glyph reflects the agent's verdict key (MUST_FIX /
+    NEEDS_ATTENTION / LOOKS_GOOD from line 1 of the review) — NOT the
+    subprocess exit code. The agent can successfully produce a `MUST_FIX`
+    review, and the footer needs to show that as `✗`, not `✓`. Falls back
+    to ✓ when the completion event didn't carry a verdict (parse miss).
     """
 
     if status == "completed":
-        if verdict == "🔴":
+        if verdict == "MUST_FIX":
             return "✗", _PAL_ERROR
-        if verdict == "🟠":
+        if verdict == "NEEDS_ATTENTION":
             return "!", _PAL_WARN
         return "✓", _PAL_SUCCESS
     if status == "failed":
@@ -1919,10 +1919,11 @@ if _TEXTUAL_AVAILABLE:
             )
             cli_review_completed = cli_review_completed_evt is not None
             cli_review_failed = any(g.get("event") == "cli_review_failed" for g in guardrails)
-            # Verdict glyph (🟢/🟠/🔴) the agent wrote on line 1 of the
-            # review, surfaced on the completion event payload by the
-            # orchestrator. Drives the footer glyph so `🔴 Must fix`
-            # renders as `✗` instead of the subprocess-exit-0 `✓`.
+            # Verdict key (MUST_FIX / NEEDS_ATTENTION / LOOKS_GOOD) the
+            # agent wrote on line 1 of the review, surfaced on the
+            # completion event payload by the orchestrator. Drives the
+            # footer glyph so `MUST_FIX` renders as `✗` instead of the
+            # subprocess-exit-0 `✓`.
             cli_review_verdict: str | None = (
                 cli_review_completed_evt.get("verdict") if cli_review_completed_evt else None
             )

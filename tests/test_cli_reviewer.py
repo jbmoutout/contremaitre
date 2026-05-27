@@ -199,11 +199,16 @@ class BuildPromptTest(unittest.TestCase):
 
     def test_specifies_traffic_light_format(self):
         # Output format is locked down so reviews start with a scannable
-        # 🟢/🟠/🔴 verdict instead of codex/claude's default verbose preamble.
+        # `<glyph> <KEY>` verdict instead of codex/claude's default verbose
+        # preamble. Both halves are specified — the glyph for humans, the
+        # SCREAMING_SNAKE_CASE key for machine parsing.
         prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
         self.assertIn("🟢", prompt)
         self.assertIn("🟠", prompt)
         self.assertIn("🔴", prompt)
+        self.assertIn("LOOKS_GOOD", prompt)
+        self.assertIn("NEEDS_ATTENTION", prompt)
+        self.assertIn("MUST_FIX", prompt)
         # Conventional-comments labels for the body.
         self.assertIn("**issue:**", prompt)
         self.assertIn("**nit:**", prompt)
@@ -442,25 +447,28 @@ class PostCommentTest(unittest.TestCase):
 
 
 class ParseVerdictTest(unittest.TestCase):
-    """Verdict glyph drives the TUI footer color — must reflect what the
+    """Verdict key drives the TUI footer color — must reflect what the
     agent wrote (line 1 per the prompt), not the subprocess exit code."""
 
-    def test_green_lgtm(self):
-        self.assertEqual(cli_reviewer.parse_verdict("🟢 LGTM\n\nlooks fine\n"), "🟢")
-
-    def test_orange_needs_attention(self):
+    def test_looks_good(self):
         self.assertEqual(
-            cli_reviewer.parse_verdict("🟠 Needs attention\n\n…"),
-            "🟠",
+            cli_reviewer.parse_verdict("🟢 LOOKS_GOOD — no blocking issues\n\nlooks fine\n"),
+            "LOOKS_GOOD",
         )
 
-    def test_red_must_fix(self):
+    def test_needs_attention(self):
         self.assertEqual(
-            cli_reviewer.parse_verdict("🔴 Must fix\n\nblocking issue at …"),
-            "🔴",
+            cli_reviewer.parse_verdict("🟠 NEEDS_ATTENTION — non-blocking concerns\n\n…"),
+            "NEEDS_ATTENTION",
         )
 
-    def test_returns_none_when_no_glyph(self):
+    def test_must_fix(self):
+        self.assertEqual(
+            cli_reviewer.parse_verdict("🔴 MUST_FIX — blocking issues found\n\nblocking issue at …"),
+            "MUST_FIX",
+        )
+
+    def test_returns_none_when_no_key(self):
         # Agent didn't follow format; better to fall back gracefully than
         # crash. TUI maps None → ✓ as a permissive default.
         self.assertIsNone(cli_reviewer.parse_verdict("Looks good\n\n…"))
@@ -469,8 +477,16 @@ class ParseVerdictTest(unittest.TestCase):
         # Agent sometimes emits a stray blank line before the verdict.
         # Scan a few lines defensively per the parser comment.
         self.assertEqual(
-            cli_reviewer.parse_verdict("\n\n🟢 LGTM\n\n…"),
-            "🟢",
+            cli_reviewer.parse_verdict("\n\n🟢 LOOKS_GOOD — fine\n\n…"),
+            "LOOKS_GOOD",
+        )
+
+    def test_key_works_without_glyph(self):
+        # The KEY is the canonical machine-parseable token. If the agent
+        # drops the glyph but still emits the key, we still classify.
+        self.assertEqual(
+            cli_reviewer.parse_verdict("MUST_FIX — broken\n\n…"),
+            "MUST_FIX",
         )
 
 
@@ -508,7 +524,7 @@ class HeaderTest(unittest.TestCase):
             sink.write_text(
                 '{"part": {"text": "OpenAI Codex v0.128"}, "type": "text"}\n'
                 '{"part": {"text": "model: gpt-5.5"}, "type": "text"}\n'
-                '{"part": {"text": "🟢 LGTM"}, "type": "text"}\n'
+                '{"part": {"text": "🟢 LOOKS_GOOD — fine"}, "type": "text"}\n'
             )
             self.assertEqual(cli_reviewer.extract_model("codex", sink), "gpt-5.5")
 

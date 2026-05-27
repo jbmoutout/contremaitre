@@ -601,7 +601,7 @@ class Orchestrator:
         # Prepend a tool · model · duration H3 header so the human reading
         # the PR comment sees what produced the review before the verdict
         # line. H3 (not H1/H2) so it stays visually subordinate to the
-        # agent's `🟢/🟠/🔴` headline.
+        # agent's verdict headline (`🔴 MUST_FIX — …` etc.).
         model = _cli_reviewer.extract_model(tool=tool, jsonl_path=sink)
         header = _cli_reviewer.format_header(
             tool=tool, model=model, duration_s=duration_s
@@ -623,10 +623,11 @@ class Orchestrator:
         if not posted:
             self._emit(events.CLI_REVIEW_FAILED, tool=tool, reason=f"post_failed: {message}")
             return
-        # Parse the agent's verdict glyph (🟢/🟠/🔴) from the raw markdown
-        # — line 1 per the prompt spec. Surfaced as a payload field on the
-        # completion event so the TUI's footer glyph reflects what the
-        # agent actually said, not just whether the subprocess exited 0.
+        # Parse the agent's verdict key (MUST_FIX / NEEDS_ATTENTION /
+        # LOOKS_GOOD) from line 1 of the raw markdown per the prompt spec.
+        # Surfaced as a payload field on the completion event so the TUI's
+        # footer glyph reflects what the agent actually said, not just
+        # whether the subprocess exited 0.
         verdict = _cli_reviewer.parse_verdict(result.markdown)
         self._emit(
             events.CLI_REVIEW_COMPLETED,

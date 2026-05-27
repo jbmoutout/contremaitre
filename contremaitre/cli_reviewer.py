@@ -438,25 +438,24 @@ def post_comment(
     return True, proc.stdout.strip()
 
 
-VERDICT_GLYPHS = ("🟢", "🟠", "🔴")
+VERDICT_KEYS = ("MUST_FIX", "NEEDS_ATTENTION", "LOOKS_GOOD")
 
 
 def parse_verdict(markdown: str) -> str | None:
-    """Return the first verdict glyph (🟢 / 🟠 / 🔴) found in `markdown`.
+    """Return the verdict key (MUST_FIX / NEEDS_ATTENTION / LOOKS_GOOD).
 
-    The prompt enforces "line 1 is exactly one of {🟢 LGTM, 🟠 Needs
-    attention, 🔴 Must fix}", so the first non-blank line typically
-    carries the verdict. We scan a few extra lines defensively in case
-    the agent prepends stray whitespace or a stray blank — the verdict
-    needs to be findable even if the agent isn't 100% compliant with
-    the format spec.
+    The prompt enforces `<glyph> <KEY> — <justification>` on line 1, so
+    the first non-blank line carries one of the three SCREAMING_SNAKE_CASE
+    keys. We scan a few extra lines defensively in case the agent prepends
+    stray whitespace — the verdict needs to be findable even if the agent
+    isn't 100% compliant with the format spec. The keys are mutually
+    disjoint substrings, so a containment check is unambiguous.
     """
 
     for line in markdown.lstrip().splitlines()[:5]:
-        stripped = line.strip()
-        for glyph in VERDICT_GLYPHS:
-            if stripped.startswith(glyph):
-                return glyph
+        for key in VERDICT_KEYS:
+            if key in line:
+                return key
     return None
 
 

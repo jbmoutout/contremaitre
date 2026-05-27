@@ -49,21 +49,22 @@
     : "";
 
   // Post-publish CLI review chip — only when the run actually ran one.
-  // Tier matches the agent's verdict glyph (🟢 green / 🟠 yellow / 🔴 red),
-  // NOT the subprocess exit status, so `🔴 Must fix` reads red even though
-  // the subprocess exited cleanly.
+  // Tier matches the agent's verdict key (LOOKS_GOOD → green,
+  // NEEDS_ATTENTION → yellow, MUST_FIX → red), NOT the subprocess exit
+  // status, so `MUST_FIX` reads red even though the subprocess exited
+  // cleanly.
   const cli = DATA.cli_review;
   function cliTier(c) {
     if (!c) return "tier-unknown";
     if (c.status !== "completed") return "tier-red";
-    if (c.verdict === "🟢") return "tier-green";
-    if (c.verdict === "🟠") return "tier-yellow";
-    if (c.verdict === "🔴") return "tier-red";
+    if (c.verdict === "LOOKS_GOOD") return "tier-green";
+    if (c.verdict === "NEEDS_ATTENTION") return "tier-yellow";
+    if (c.verdict === "MUST_FIX") return "tier-red";
     return "tier-unknown";
   }
   // The leading sim-dot IS the verdict signal (tier-green/yellow/red).
-  // We deliberately omit the raw 🟢/🟠/🔴 emoji here — the clean colored
-  // circle is the house-style indicator everywhere else in the viewer.
+  // We deliberately omit any raw emoji here — the clean colored circle
+  // is the house-style indicator everywhere else in the viewer.
   const cliChip = cli
     ? `<span class="item"><span class="sim-dot ${cliTier(cli)}"></span>${esc((cli.tool || "cli").toUpperCase())} review${cli.model ? " <code>" + esc(cli.model) + "</code>" : ""}${cli.duration_s != null ? " · <span class=\"dim\">" + esc(dur(cli.duration_s)) + "</span>" : ""}</span>`
     : "";

@@ -116,7 +116,7 @@ INIT → WORK → REVIEW → APPROVED → draft PR
 
 **Publication** runs only after `APPROVED` clears hard gates (diff scan, diff-hash match, clean worktree) and any configured executable checks. Skipping `--check-cmd` is fine — the L1 gate becomes a no-op and the scorecard records `executable_confidence: null`.
 
-**Post-publish code review** (optional). If `--cli-reviewer` is set (default `auto` detects `claude`/`codex` on PATH and prompts on TTY), the orchestrator invokes the chosen CLI after the Draft PR opens. It pulls the PR diff via `gh`, produces a verdict-led markdown review (`🟢 LGTM` / `🟠 Needs attention` / `🔴 Must fix`), and posts it as a single PR comment. The CLI runs on your host with your OAuth subscription (Claude Pro/Max, ChatGPT Plus) — no API quota, no container. Subprocess env scrubs `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` so it can't silently bill API. Failures are logged but never block the run — the PR is already published.
+**Post-publish code review** (optional). If `--cli-reviewer` is set (default `auto` detects `claude`/`codex` on PATH and prompts on TTY), the orchestrator invokes the chosen CLI after the Draft PR opens. It pulls the PR diff via `gh`, produces a verdict-led markdown review (line 1 is `🟢 LOOKS_GOOD` / `🟠 NEEDS_ATTENTION` / `🔴 MUST_FIX` followed by a one-sentence justification), and posts it as a single PR comment. The CLI runs on your host with your OAuth subscription (Claude Pro/Max, ChatGPT Plus) — no API quota, no container. Subprocess env scrubs `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` so it can't silently bill API. Failures are logged but never block the run — the PR is already published.
 
 See [docs/control-plane.md](docs/control-plane.md) for the implementation map.
 
@@ -189,7 +189,7 @@ All prompts live as markdown in [`contremaitre/prompts/`](contremaitre/prompts/)
 - [`initial_prompt.md`](contremaitre/prompts/initial_prompt.md) — turn-1 message to the agent. Invokes the skill; adds three host-owned scaffolds (no git, write `SETTLED_DESIGN.md`, write `IMPLEMENTATION_COMPLETE`).
 - [`sim_tooled_persona.md`](contremaitre/prompts/sim_tooled_persona.md) — SIM's first-turn persona. Tooled SWE collaborator, `read`/`glob`/`grep` only, skill vocabulary, read-first-claim-second discipline.
 - [`sim_review_prompt.md`](contremaitre/prompts/sim_review_prompt.md) — strict-JSON review against SETTLED + diff.
-- [`cli_reviewer_prompt.md`](contremaitre/prompts/cli_reviewer_prompt.md) — post-publish code review handed to the locally-installed CLI (claude/codex). Enforces a verdict-led format (`🟢 LGTM` / `🟠 Needs attention` / `🔴 Must fix`) + Conventional Comments labels (`issue`/`suggestion`/`nit`/`question`).
+- [`cli_reviewer_prompt.md`](contremaitre/prompts/cli_reviewer_prompt.md) — post-publish code review handed to the locally-installed CLI (claude/codex). Enforces a verdict-led format (`🟢 LOOKS_GOOD` / `🟠 NEEDS_ATTENTION` / `🔴 MUST_FIX` + one-sentence justification) + Conventional Comments labels (`issue`/`suggestion`/`nit`/`question`).
 
 ### TUI — attach to a finished run
 

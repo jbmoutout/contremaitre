@@ -99,12 +99,13 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
 
 
 def _read_cli_review_summary(run_dir: Path) -> tuple[str, str | None] | None:
-    """`(tool, verdict_glyph)` derived from `<tool>_review.md` on disk.
+    """`(tool, verdict_key)` derived from `<tool>_review.md` on disk.
 
     Skips the I/O round-trip into guardrails — the posted markdown file
-    name carries the tool, and the agent's verdict (🟢/🟠/🔴) lives on
-    line 1 per the prompt spec. Returns `None` when no cli_review.md is
-    present (run didn't enable the feature).
+    name carries the tool, and the agent's verdict key (MUST_FIX /
+    NEEDS_ATTENTION / LOOKS_GOOD) lives on line 1 per the prompt spec.
+    Returns `None` when no cli_review.md is present (run didn't enable
+    the feature).
     """
 
     for tool in ("codex", "claude"):
@@ -115,14 +116,13 @@ def _read_cli_review_summary(run_dir: Path) -> tuple[str, str | None] | None:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return (tool, None)
-        # Verdict glyph is on line 1 after the H3 header the orchestrator
+        # Verdict key is on line 1 after the H3 header the orchestrator
         # prepends. Scan a handful of non-blank lines for the first match.
         verdict: str | None = None
         for line in text.splitlines()[:8]:
-            stripped = line.strip()
-            for glyph in ("🟢", "🟠", "🔴"):
-                if stripped.startswith(glyph):
-                    verdict = glyph
+            for key in ("MUST_FIX", "NEEDS_ATTENTION", "LOOKS_GOOD"):
+                if key in line:
+                    verdict = key
                     break
             if verdict:
                 break
@@ -273,13 +273,13 @@ def _verdict_tier(verdict: str) -> str:
 
 
 def _cli_review_tier(verdict: str | None) -> str:
-    """Map the agent's verdict glyph to a sim-dot tier class."""
+    """Map the agent's verdict key to a sim-dot tier class."""
 
-    if verdict == "🟢":
+    if verdict == "LOOKS_GOOD":
         return "tier-green"
-    if verdict == "🟠":
+    if verdict == "NEEDS_ATTENTION":
         return "tier-yellow"
-    if verdict == "🔴":
+    if verdict == "MUST_FIX":
         return "tier-red"
     return "tier-unknown"
 
@@ -459,8 +459,9 @@ def _render_row(r: dict[str, Any]) -> str:
     if r["extra_model"]:
         models_bits.append(f'<span style="color:var(--extra)">extra</span> <code>{_escape(r["extra_model"])}</code>')
     if r["cli_review_tool"]:
-        # Colored sim-dot in place of the raw 🟢/🟠/🔴 emoji — keeps the
-        # house style consistent with the other tier dots on the page.
+        # Colored sim-dot keyed on the verdict (MUST_FIX/NEEDS_ATTENTION/
+        # LOOKS_GOOD) — keeps the house style consistent with the other
+        # tier dots on the page.
         cli_tier = _cli_review_tier(r["cli_review_verdict"])
         models_bits.append(
             f'<span class="sim-dot {cli_tier}"></span>'

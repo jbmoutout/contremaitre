@@ -158,7 +158,7 @@ def _assemble_cli_review(
       {
         "tool":       "codex" | "claude",
         "status":     "completed" | "failed",
-        "verdict":    "🟢"/"🟠"/"🔴" | None,     # parsed agent verdict
+        "verdict":    "MUST_FIX" | "NEEDS_ATTENTION" | "LOOKS_GOOD" | None,
         "duration_s": float | None,                # cli_review_started → completed/failed
         "model":      str | None,                  # codex preamble only
         "url":        str | None,                  # PR URL the comment was posted to
