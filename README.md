@@ -22,7 +22,7 @@ GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
 
 The target repo is cloned lazily into `~/.cache/contremaitre/<host>-<owner>-<repo>/` on first run (subsequent runs reuse the cache + `git fetch origin <base>` for freshness). You never need a parallel local checkout — only the `--fork` URL.
 
-Before launching, contremaitre prints a one-screen summary (base branch, source, PR target, caps) and asks `Continue? [Y/n]`. Pass `-y` / `--yes` to skip the prompt (CI / scripts).
+Before launching, contremaitre walks through pre-flight checks and decisions in this order: an OpenRouter key-status banner, the model picker (free OpenCode Zen models by default — paste any OpenRouter slug when a key is set), a cli-reviewer availability check, a free-tier quota probe, then a decision-free recap (target, branch, models, code-review, caps, network) and `Continue? [Y/n]`. Pass `-y` / `--yes` to skip the prompt (CI / scripts); non-TTY mode collapses the banners to `[info]` log lines so logs explain what was auto-assumed.
 
 Add `--check-cmd "<command>"` (repeatable) if your target has a fast deterministic check worth gating publication on — see [ecosystem examples](#executable-checks-per-ecosystem) below. Without it, publication still requires SIM approval + L0 hard gates (diff scan, diff-hash match, clean worktree).
 
@@ -40,7 +40,7 @@ just deepdeep tui-run main git@github.com:<you>/<target>.git
 - Local clone cache is created on demand under `~/.cache/contremaitre/`.
 - Runtime image `contremaitre-agent:latest` builds itself on first opencode-mode run. ~3 min on a warm host. Auto-rebuilds on subsequent runs when the Dockerfile content changes (image carries a `contremaitre.dockerfile-sha256` label; mismatch triggers a rebuild). Ships with `uv` + `poetry` so Python targets get a working runtime out of the box.
 - TUI requires `textual` — run `uv sync --extra tui` (or `--extra tui --group dev` for the full dev env). Skip if you'd rather watch via JSONL tail.
-- `OPENROUTER_API_KEY` in `.env` (cwd or repo root) — bounded by a provider-side daily limit. Preflight refuses to start a run without one.
+- `OPENROUTER_API_KEY` in `.env` (cwd or repo root) — **optional**. Without a key, runs use free [OpenCode Zen](https://opencode.ai/docs/zen/) models served by OpenCode (no auth needed). Set a key to unlock paid OpenRouter models and to paste arbitrary OpenRouter slugs in the picker; preflight verifies the key has a provider-side credit limit (configurable in your OpenRouter dashboard) and warns on unlimited keys. See [`.env.example`](.env.example).
 
 ### What each flag does
 
@@ -242,7 +242,7 @@ Ambient proxy environment variables are not forwarded into containers — only w
 
 ### `.env` loading
 
-The CLI loads `.env` from the current directory and the source checkout before argument parsing. Shell values win. Intended for `OPENROUTER_API_KEY`; `.env` is gitignored.
+The CLI loads `.env` from the current directory and the source checkout before argument parsing. Shell values win. Intended for `OPENROUTER_API_KEY` (optional — see [`.env.example`](.env.example) and the one-time-setup note above); `.env` is gitignored.
 
 ## Tests
 

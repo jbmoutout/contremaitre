@@ -515,6 +515,27 @@ def _key_state_info_line(env_var: str, state: dict) -> str:
         return f"[info] {env_var} detected."
 
 
+def _normalize_openrouter_slug(pasted: str) -> str:
+    """Prepend `openrouter/` to a pasted OpenRouter model id if missing.
+
+    Bound to the picker's `c` option, which advertises itself as taking
+    an OpenRouter slug — operators copy `<vendor>/<model>` straight from
+    openrouter.ai/models. The opencode binary needs the `openrouter/`
+    provider prefix to dispatch; without it the run dies on turn one
+    with `Model not found: <slug>`. Already-prefixed inputs pass
+    through so a returning operator who pastes the full id doesn't get
+    double-prefixed. Other providers, if added later, get their own
+    normalizer + picker branch.
+    """
+
+    slug = pasted.strip()
+    if not slug:
+        return slug
+    if slug.startswith("openrouter/") or slug.startswith("opencode/"):
+        return slug
+    return f"openrouter/{slug}"
+
+
 def _print_no_cli_reviewer_banner() -> None:
     print()
     print(_RULE)
@@ -606,7 +627,7 @@ def _launch_screen(
                 marker = f"  {_d('← default')}" if i == default_idx else ""
                 print(f"    {i:>{width}}  {m['id']}{marker}")
             if allow_custom:
-                print(f"    {'c':>{width}}  {_d('paste any OpenRouter model name')}")
+                print(f"    {'c':>{width}}  {_d('paste any OpenRouter model name (openrouter.ai/models)')}")
             print()
 
             def _pick_inline(role: str, current_idx: int) -> tuple[str, int]:
@@ -632,7 +653,7 @@ def _launch_screen(
                         except EOFError:
                             continue
                         if slug:
-                            return slug, current_idx
+                            return _normalize_openrouter_slug(slug), current_idx
                         continue
                     suffix = ", c" if allow_custom else ""
                     print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, or q")
@@ -672,9 +693,7 @@ def _launch_screen(
                 opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
                 if suggested_idx is not None:
                     suggested_id = free[suggested_idx]["id"]
-                    extra_prompt = (
-                        f"  extra [{suggested_idx} - {suggested_id}] (Enter=accept, s=skip, {opts}, q): "
-                    )
+                    extra_prompt = f"  extra [{suggested_idx} - {suggested_id}] (Enter=accept, s=skip, {opts}, q): "
                 else:
                     extra_prompt = f"  extra  (Enter=skip, {opts}, q): "
                 while True:
@@ -709,6 +728,7 @@ def _launch_screen(
                         except EOFError:
                             continue
                         if slug:
+                            slug = _normalize_openrouter_slug(slug)
                             args.extra_reviewer_model = slug
                             extra_model = slug
                             if forwarded_to_subprocess is not None:
@@ -737,39 +757,63 @@ def _launch_screen(
         if forwarded_to_subprocess is not None and chosen != "auto":
             forwarded_to_subprocess.extend(["--cli-reviewer", chosen])
 
-    # ----- pre-flight ping (Zen quota probe) -----
-    # Free-tier Zen models occasionally land in the catalog while the
-    # operator's per-model quota is already spent. Without this probe the
-    # first agent turn burns the full 1800s timeout (or just hangs until
-    # SIGTERM) while opencode retries a 429 internally. One tiny chat
-    # completion catches it now and lets the operator pick another model.
-    probe_targets: list[tuple[str, str]] = []
+    # ----- pre-flight ping (per-provider liveness probe) -----
+    # Zen: free-tier models occasionally land in the catalog while the
+    # operator's per-model quota is already spent. One tiny chat
+    # completion catches it now and lets the operator pick another
+    # model rather than burn the full 1800s timeout on turn one.
+    # OpenRouter: pasted slugs are easy to typo or to copy without the
+    # `openrouter/` provider prefix; cross-referencing OR's public
+    # catalog catches `Model not found` before launch.
+    probe_targets: list[tuple[str, str, str]] = []  # (role, model, kind)
     seen_models: set[str] = set()
     for role, model in (
         ("agent", args.agent_model),
         ("sim", args.sim_model),
         ("extra", extra_model),
     ):
-        if not model or not model.startswith("opencode/"):
+        if not model:
+            continue
+        if model.startswith("opencode/"):
+            kind = "zen"
+        elif model.startswith("openrouter/"):
+            kind = "openrouter"
+        else:
             continue
         if model in seen_models:
             continue
         seen_models.add(model)
-        probe_targets.append((role, model))
+        probe_targets.append((role, model, kind))
     quota_blockers: list[tuple[str, str]] = []
+    unknown_or_models: list[tuple[str, str]] = []
+    or_catalog: set[str] | None = None
+    or_catalog_fetched = False
     if probe_targets:
         print()
         print(f"  {_d('pre-flight ping …')}")
-        for role, model in probe_targets:
-            status, detail = _probe_zen_model(model)
-            short = model.rsplit("/", 1)[-1]
-            if status == "ok":
-                print(f"    {role:<6}  {_d(short)}  ✓")
-            elif status == "quota_exhausted":
-                print(f"    {role:<6}  {_b(short)}  ✗  free-tier quota exhausted")
-                quota_blockers.append((role, model))
-            else:
-                print(f"    {role:<6}  {_d(short)}  ?  {_d(detail or 'probe failed')}")
+        for role, model, kind in probe_targets:
+            if kind == "zen":
+                short = model.rsplit("/", 1)[-1]
+                status, detail = _probe_zen_model(model)
+                if status == "ok":
+                    print(f"    {role:<6}  {_d(short)}  ✓")
+                elif status == "quota_exhausted":
+                    print(f"    {role:<6}  {_b(short)}  ✗  free-tier quota exhausted")
+                    quota_blockers.append((role, model))
+                else:
+                    print(f"    {role:<6}  {_d(short)}  ?  {_d(detail or 'probe failed')}")
+            else:  # openrouter
+                short = model[len("openrouter/") :]
+                if not or_catalog_fetched:
+                    or_catalog = _fetch_openrouter_catalog()
+                    or_catalog_fetched = True
+                if or_catalog is None:
+                    print(f"    {role:<6}  {_d(short)}  ?  {_d('OpenRouter catalog unavailable')}")
+                elif short in or_catalog:
+                    print(f"    {role:<6}  {_d(short)}  ✓")
+                else:
+                    print(f"    {role:<6}  {_b(short)}  ✗  not found on OpenRouter")
+                    unknown_or_models.append((role, model))
 
     # ----- recap (decision-free) -----
     publish = getattr(args, "publish_mode", "stub")
@@ -819,12 +863,19 @@ def _launch_screen(
     print(_RULE)
     print()
 
-    if quota_blockers:
-        print(f"  {_b('free-tier quota exhausted for:')}")
-        for role, model in quota_blockers:
-            print(f"    {role}  {model}")
-        print(f"  {_d('try again later, or pick a different model with --' + 'agent-model/--sim-model.')}")
-        print()
+    if quota_blockers or unknown_or_models:
+        if quota_blockers:
+            print(f"  {_b('free-tier quota exhausted for:')}")
+            for role, model in quota_blockers:
+                print(f"    {role}  {model}")
+            print(f"  {_d('try again later, or pick a different model with --' + 'agent-model/--sim-model.')}")
+            print()
+        if unknown_or_models:
+            print(f"  {_b('unknown OpenRouter model:')}")
+            for role, model in unknown_or_models:
+                print(f"    {role}  {model}")
+            print(f"  {_d('check the slug at openrouter.ai/models, or pick a different model.')}")
+            print()
         try:
             reply = input("  proceed anyway? [y/N] ").strip().lower()
         except EOFError:
@@ -841,6 +892,42 @@ def _launch_screen(
         return True
     print()
     return reply in ("", "y", "yes")
+
+
+def _fetch_openrouter_catalog(timeout: float = 8.0) -> set[str] | None:
+    """Set of available OpenRouter model ids, or None on failure.
+
+    The `/api/v1/models` endpoint is unauthenticated and returns the
+    full public catalog. Used to validate pasted OpenRouter slugs in
+    pre-flight — catches typos and the missing-prefix shape (e.g. a
+    raw `qwen/qwen3.7-max` paste that opencode would later reject as
+    `Model not found`) without burning a real completion. Returns None
+    on network or parse failure so the picker degrades to a soft `?`
+    rather than blocking a run that would otherwise launch fine.
+    """
+
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/models",
+        headers={"User-Agent": "contremaitre"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError):
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
+    ids: set[str] = set()
+    for entry in data:
+        if isinstance(entry, dict):
+            mid = entry.get("id")
+            if isinstance(mid, str) and mid:
+                ids.add(mid)
+    return ids
 
 
 def _probe_zen_model(model: str, *, timeout: float = 10.0) -> tuple[str, str | None]:
