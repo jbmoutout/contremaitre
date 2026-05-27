@@ -16,7 +16,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install
-        run: uv sync --extra tui
+        run: uv sync --extra tui --group dev
+
+      - name: Lint
+        run: uv run ruff check .
 
       - name: Test
         run: uv run --with pytest pytest tests/ -q

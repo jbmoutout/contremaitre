@@ -21,11 +21,21 @@ tui = ["textual>=0.50"]
 contremaitre = "contremaitre.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "rich>=13"]
+dev = ["pytest>=8", "rich>=13", "ruff>=0.6"]
 
 [tool.setuptools.packages.find]
 include = ["contremaitre*"]
 
 [tool.setuptools.package-data]
 contremaitre = ["Dockerfile", "prompts/*.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".contremaitre"]
+
+[tool.ruff.lint]
+# Default (E4, E7, E9, F) + W (whitespace: trailing spaces, EOF newline, etc.).
+# The W rules are what keep `git diff --check` from failing on PRs.
+extend-select = ["W"]
 

@@ -19,7 +19,6 @@ patterns we adopt are copied in.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from .checks import CheckResult

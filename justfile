@@ -28,6 +28,16 @@ docker_image    := ""   # e.g. "contremaitre-agent-rust:latest"; empty → CLI d
 default:
     @just --list
 
+# Run ruff (lint + auto-fix). Catches trailing whitespace / missing EOF
+# newlines so `git diff --check` doesn't fail in review.
+lint:
+    uvx ruff check --fix .
+
+# Install the local git pre-commit hook (runs ruff before each commit).
+# One-time per clone.
+install-hooks:
+    uvx pre-commit install
+
 # Generic TUI run. Required: base, fork. Optional: check_cmd (no default —
 # pass an ecosystem-appropriate check or omit to skip L1 gating entirely).
 #   just tui-run main git@github.com:me/foo.git "npx tsc --noEmit"
@@ -75,3 +85,17 @@ deepdeep target *args:
 #   just rust tui-run main git@github.com:me/rust-repo.git "cargo check --all-targets"
 rust target *args:
     @just docker_image="contremaitre-agent-rust:latest" {{target}} {{args}}
+
+# === Eval canary ==============================================================
+# v0 regression canary. See golden_cases/README.md.
+
+# Run every golden case n=3 and compare to its baseline. Exits non-zero on any
+# regression. Manual trigger — invoke after a prompt edit or before merging a
+# risky change. Fake actor by default; takes ~30s total.
+eval n="3":
+    uv run contremaitre eval all --n {{n}}
+
+# Fast iteration on one case (default: case_01_happy_path).
+eval-quick case="case_01_happy_path" n="3":
+    uv run contremaitre eval run {{case}} --n {{n}}
+    uv run contremaitre eval compare {{case}} --n {{n}}

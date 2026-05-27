@@ -1,0 +1,8 @@
+# Local git hook config. Install with `just install-hooks` (or
+# `uvx pre-commit install`). Ruff config lives in pyproject.toml.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14
+    hooks:
+      - id: ruff-check
+        args: [--fix]

@@ -320,7 +320,7 @@ def _fmt_turns(turns: int | None) -> str:
 def _render_html(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
     css = _CSS_PATH.read_text(encoding="utf-8")
     body = _render_body(rows, runs_root=runs_root)
-    title = f"contremaitre · runs"
+    title = "contremaitre · runs"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>

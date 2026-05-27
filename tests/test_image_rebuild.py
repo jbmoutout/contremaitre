@@ -114,7 +114,7 @@ class DockerfileHashRebuildTest(unittest.TestCase):
                 "contremaitre.cli._build_image_inline", return_value=0
             ) as fake_build:
                 fake_run.return_value = MagicMock(returncode=0, stdout="\n", stderr="")
-                rc = cli._ensure_default_image_built(config)
+                cli._ensure_default_image_built(config)
         fake_build.assert_called_once()
 
     def test_fake_actor_mode_skips_entirely(self):
