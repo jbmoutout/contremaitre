@@ -59,20 +59,9 @@ def parse_apply_patch(patch_text: str):
 
 
 def _read_events(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    events: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-    return events
+    from .jsonlog import read_jsonl as _rj
+
+    return _rj(path)
 
 
 def _host_name(fp: str) -> str:

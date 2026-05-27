@@ -208,12 +208,9 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     )
 
     def _read_jsonl(p: Path) -> list[dict]:
-        if not p.exists():
-            return []
-        try:
-            return [_json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        except (OSError, ValueError):
-            return []
+        from .jsonlog import read_jsonl as _rj
+
+        return _rj(p)
 
     def _read_json(p: Path) -> dict | None:
         if not p.exists():

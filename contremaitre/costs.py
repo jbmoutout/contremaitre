@@ -13,15 +13,11 @@ from typing import Any
 
 
 def estimate_recorded_cost_usd(*paths: Path) -> float:
+    from .jsonlog import read_jsonl as _rj
+
     total = 0.0
     for path in paths:
-        if not path.exists():
-            continue
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        for event in _rj(path):
             total += _sum_costs(event)
     return round(total, 6)
 

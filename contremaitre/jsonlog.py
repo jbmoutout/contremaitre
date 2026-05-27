@@ -45,3 +45,24 @@ def append_transcript(path: Path, *, speaker: str, phase: str, text: str) -> Non
     with path.open("a", encoding="utf-8") as f:
         f.write(f"\n\n## {phase} - {speaker}\n\n{text.strip()}\n")
 
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
+
