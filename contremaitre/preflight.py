@@ -192,7 +192,25 @@ def _check_openrouter_key(config: RunConfig) -> PreflightCheck:
         return _warn("openrouter_key", "OpenRouter key check skipped", {})
     key = os.environ.get(config.openrouter_env_var)
     if not key:
-        return _fail("openrouter_key", f"{config.openrouter_env_var} is not set", {})
+        # Free OpenCode Zen models (opencode/*) don't need a key — the
+        # opencode binary has built-in access. Only fail when a non-Zen
+        # model was selected (any OpenRouter slug would need the key).
+        selected = [
+            m for m in (config.agent_model, config.sim_model, config.extra_reviewer_model) if m
+        ]
+        non_free = [m for m in selected if not m.startswith("opencode/")]
+        if non_free:
+            return _fail(
+                "openrouter_key",
+                f"{config.openrouter_env_var} is not set and non-free model(s) selected: "
+                + ", ".join(non_free),
+                {"non_free_models": non_free},
+            )
+        return _pass(
+            "openrouter_key",
+            f"{config.openrouter_env_var} is not set; using free OpenCode Zen models only",
+            {"models": selected},
+        )
     try:
         info = _fetch_openrouter_key(config.openrouter_key_url, key)
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:

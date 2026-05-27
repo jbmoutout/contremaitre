@@ -435,6 +435,96 @@ def _d(s: str) -> str:
     return f"\033[2m{s}\033[0m" if sys.stdout.isatty() else s
 
 
+def _y(s: str) -> str:
+    return f"\033[33m{s}\033[0m" if sys.stdout.isatty() else s
+
+
+def _openrouter_key_state(env_var: str, key_url: str, *, timeout: float = 5.0) -> dict:
+    """Best-effort probe of the OpenRouter key for the pre-launch banner.
+
+    Always returns a dict — never raises — so a network blip can't block
+    the launch screen. Caller renders presence, limit, and error fields
+    into either a banner (TTY) or a one-line info string (non-TTY).
+    """
+
+    import urllib.error
+    import urllib.request
+
+    key = os.environ.get(env_var)
+    if not key:
+        return {"present": False, "limit": None, "remaining": None, "error": None}
+    try:
+        req = urllib.request.Request(key_url, headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        return {"present": True, "limit": None, "remaining": None, "error": str(exc)[:80]}
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return {"present": True, "limit": None, "remaining": None, "error": "malformed response"}
+    return {
+        "present": True,
+        "limit": data.get("limit"),
+        "remaining": data.get("limit_remaining"),
+        "error": None,
+    }
+
+
+def _print_key_banner(env_var: str, state: dict) -> None:
+    """Decision-driving banner shown BEFORE the model picker."""
+
+    print()
+    print(_RULE)
+    if not state["present"]:
+        print(f"  {_b(f'{env_var} not found in .env')}")
+        print()
+        print(f"  {_d('Only free OpenCode Zen models available below.')}")
+        print(f"  {_d('Add a key to .env to unlock paid OpenRouter models')}")
+        print(f"  {_d('(set a credit limit in your OpenRouter dashboard first).')}")
+    elif state["error"]:
+        print(f"  {_b(f'{env_var} detected')}  {_d('(key info unavailable)')}")
+    elif state["limit"] is None:
+        print(f"  {_b(f'{env_var} detected')}  {_y('limit: unlimited ⚠')}")
+        print()
+        print(f"  {_d('Set a credit limit in your OpenRouter dashboard for safety.')}")
+    else:
+        try:
+            limit = float(state["limit"])
+            remaining = float(state["remaining"] or 0)
+            details = f"limit ${limit:.2f}  ·  remaining ${remaining:.2f}"
+        except (TypeError, ValueError):
+            details = "limited"
+        print(f"  {_b(f'{env_var} detected')}  {_d(details)}")
+    print(_RULE)
+
+
+def _key_state_info_line(env_var: str, state: dict) -> str:
+    """Single-line equivalent of `_print_key_banner` for non-TTY logs."""
+
+    if not state["present"]:
+        return f"[info] {env_var} not set — free OpenCode Zen models only."
+    if state["error"]:
+        return f"[info] {env_var} detected (limit info unavailable)."
+    if state["limit"] is None:
+        return f"[info] {env_var} detected with no credit limit set."
+    try:
+        limit = float(state["limit"])
+        remaining = float(state["remaining"] or 0)
+        return f"[info] {env_var} detected — limit ${limit:.2f}, remaining ${remaining:.2f}."
+    except (TypeError, ValueError):
+        return f"[info] {env_var} detected."
+
+
+def _print_no_cli_reviewer_banner() -> None:
+    print()
+    print(_RULE)
+    print(f"  {_b('No claude/codex CLI on PATH')}")
+    print()
+    print(f"  {_d('Install either to enable a free post-publish code review on')}")
+    print(f"  {_d('your subscription (no API spend). Continuing without it.')}")
+    print(_RULE)
+
+
 def _launch_screen(
     *,
     args: argparse.Namespace,
@@ -442,50 +532,71 @@ def _launch_screen(
     argv_for_explicit_check: list[str],
     forwarded_to_subprocess: list[str] | None = None,
 ) -> bool:
-    """Unified pre-launch screen: run summary → model picker → Y/n.
+    """Pre-launch screen: status banners → pickers → recap → Y/n.
 
-    Returns True to proceed, False to abort. Auto-proceeds when --yes or
-    stdin is not a TTY. Replaces the old _confirm_launch +
-    _resolve_models_interactive pair, which split information across two
-    disconnected prompts and rendered the model list twice.
+    Order matters. Decision-driving info (key status, cli-reviewer
+    availability) lives in banners BEFORE the picker it affects, so the
+    operator sees the constraints at the moment they pick. The recap at
+    the bottom is purely a confirmation of the resolved config — no
+    warnings, no decisions left to make.
+
+    In --yes / non-TTY mode the banners collapse to one-line `[info]`
+    log lines (so CI output explains what was auto-assumed) and the
+    function returns True without prompting.
     """
 
-    if getattr(args, "yes", False) or not sys.stdin.isatty():
+    from . import cli_reviewer
+
+    env_var = getattr(args, "openrouter_env_var", "OPENROUTER_API_KEY")
+    key_url = getattr(args, "openrouter_key_url", "https://openrouter.ai/api/v1/key")
+    cli_reviewer_explicit = _has_flag_in(argv_for_explicit_check, "--cli-reviewer")
+    available_clis = cli_reviewer.detect_available()
+
+    yes_mode = getattr(args, "yes", False) or not sys.stdin.isatty()
+
+    if yes_mode:
+        # Skip the network probe in non-TTY mode — we only need presence
+        # in the log line, and probing on every CI invocation is wasted
+        # latency.
+        key_state = {
+            "present": bool(os.environ.get(env_var)),
+            "limit": None,
+            "remaining": None,
+            "error": None,
+        }
+        print(_key_state_info_line(env_var, key_state))
+        if not available_clis and not cli_reviewer_explicit:
+            print("[info] No claude/codex CLI on PATH — post-publish code review disabled.")
         return True
+
+    # ----- interactive path -----
+    key_state = _openrouter_key_state(env_var, key_url)
+    allow_custom = key_state["present"]
+
+    print()
+    print(_RULE)
+    print(f"  {_b('contremaitre')}")
+
+    # Banner before the picker: tells the operator whether paid models
+    # are reachable at all, so the `c` paste option makes sense in
+    # context.
+    _print_key_banner(env_var, key_state)
 
     agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
     sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
     extra_explicit = _has_flag_in(argv_for_explicit_check, "--extra-reviewer-model")
 
-    publish = getattr(args, "publish_mode", "stub")
-    cost = getattr(args, "max_cost_usd", None)
-    wall = getattr(args, "max_wall_minutes", None)
-    base = getattr(args, "base", "?")
+    extra_model = getattr(args, "extra_reviewer_model", None)
 
-    # ----- run summary -----
-    print()
-    print(_RULE)
-    print(f"  {_b('contremaitre')}")
-    print(_RULE)
-    print(f"  target   {source_url}")
-    print(f"  branch   {base}  {_d(f'({publish})')}")
-    caps_parts = []
-    if cost is not None:
-        caps_parts.append(f"${cost}")
-    if wall is not None:
-        caps_parts.append(f"{wall}m wall")
-    if caps_parts:
-        print(f"  caps     {_d('  ·  '.join(caps_parts))}")
-
-    # ----- model picker (single list, agent then SIM) -----
+    # ----- model picker (single list, agent then SIM, then extra) -----
     if not (agent_explicit and sim_explicit and extra_explicit):
         free = _fetch_free_models()
         if free is None:
             print()
             print(_d("  (model catalog unavailable — using CLI defaults)"))
         else:
-            print(_RULE)
-            print(f"  free models  {_d('(OpenCode Zen — no key needed)')}")
+            print()
+            print(f"  {_b('Pick models')}  {_d('(free OpenCode Zen — no key needed)')}")
             print()
             bare = (args.agent_model or "").rsplit("/", 1)[-1]
             candidates = {bare, f"{bare}-free"}
@@ -494,24 +605,37 @@ def _launch_screen(
             for i, m in enumerate(free):
                 marker = f"  {_d('← default')}" if i == default_idx else ""
                 print(f"    {i:>{width}}  {m['id']}{marker}")
+            if allow_custom:
+                print(f"    {'c':>{width}}  {_d('paste any OpenRouter model name')}")
             print()
 
             def _pick_inline(role: str, current_idx: int) -> tuple[str, int]:
                 default_id = free[current_idx]["id"]
-                prompt = f"  {role:<6}[{current_idx} - {default_id}] " f"(Enter=accept, 0–{len(free) - 1}, q): "
+                opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
+                prompt = f"  {role:<6}[{current_idx} - {default_id}] (Enter=accept, {opts}, q): "
                 while True:
                     try:
-                        reply = input(prompt).strip().lower()
+                        reply = input(prompt).strip()
                     except EOFError:
                         return f"opencode/{free[current_idx]['id']}", current_idx
-                    if reply == "":
+                    low = reply.lower()
+                    if low == "":
                         return f"opencode/{free[current_idx]['id']}", current_idx
-                    if reply == "q":
+                    if low == "q":
                         raise KeyboardInterrupt
-                    if reply.isdigit() and 0 <= int(reply) < len(free):
-                        idx = int(reply)
+                    if low.isdigit() and 0 <= int(low) < len(free):
+                        idx = int(low)
                         return f"opencode/{free[idx]['id']}", idx
-                    print(f"  enter a number 0–{len(free) - 1}, Enter, or q")
+                    if allow_custom and low == "c":
+                        try:
+                            slug = input(f"  paste OpenRouter model for {role}: ").strip()
+                        except EOFError:
+                            continue
+                        if slug:
+                            return slug, current_idx
+                        continue
+                    suffix = ", c" if allow_custom else ""
+                    print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, or q")
 
             agent_idx = default_idx
             if not agent_explicit:
@@ -527,19 +651,13 @@ def _launch_screen(
                 if forwarded_to_subprocess is not None:
                     forwarded_to_subprocess.extend(["--sim-model", chosen_sim])
 
-            # ----- optional extra reviewer (different model family) -----
-            # Default suggestion: first model whose family differs from the
-            # chosen SIM — Enter accepts it. `s` skips (extra is optional).
-            # When family detection can't find a cross-family pick (unknown
-            # families, or every listed model shares SIM's family), fall
-            # back to the first model that isn't SIM itself — still useful
-            # diversity, just not family-level. Skip-only fallback only
-            # triggers when there's a single model in the catalog.
+            # extra reviewer (cross-family diversity by default)
             if not extra_explicit:
                 from .model_family import model_family
 
-                sim_full = f"opencode/{free[sim_idx]['id']}"
-                sim_fam = model_family(sim_full)
+                # Family suggestion is based on the resolved sim_model,
+                # not sim_idx — a custom paste invalidates the index.
+                sim_fam = model_family(args.sim_model)
                 suggested_idx: int | None = None
                 if sim_fam != "unknown":
                     for i, m in enumerate(free):
@@ -551,84 +669,80 @@ def _launch_screen(
                         if i != sim_idx:
                             suggested_idx = i
                             break
+                opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
                 if suggested_idx is not None:
                     suggested_id = free[suggested_idx]["id"]
                     extra_prompt = (
-                        f"  extra [{suggested_idx} - {suggested_id}] " f"(Enter=accept, s=skip, 0–{len(free) - 1}, q): "
+                        f"  extra [{suggested_idx} - {suggested_id}] (Enter=accept, s=skip, {opts}, q): "
                     )
                 else:
-                    extra_prompt = f"  extra  (Enter=skip, 0–{len(free) - 1}, q): "
+                    extra_prompt = f"  extra  (Enter=skip, {opts}, q): "
                 while True:
                     try:
-                        reply = input(extra_prompt).strip().lower()
+                        reply = input(extra_prompt).strip()
                     except EOFError:
                         break
-                    if reply == "":
+                    low = reply.lower()
+                    if low == "":
                         if suggested_idx is not None:
                             chosen_extra = f"opencode/{free[suggested_idx]['id']}"
                             args.extra_reviewer_model = chosen_extra
+                            extra_model = chosen_extra
                             if forwarded_to_subprocess is not None:
                                 forwarded_to_subprocess.extend(["--extra-reviewer-model", chosen_extra])
                         break
-                    if reply in ("s", "skip"):
+                    if low in ("s", "skip"):
                         break
-                    if reply == "q":
+                    if low == "q":
                         raise KeyboardInterrupt
-                    if reply.isdigit() and 0 <= int(reply) < len(free):
-                        idx = int(reply)
+                    if low.isdigit() and 0 <= int(low) < len(free):
+                        idx = int(low)
                         chosen_extra = f"opencode/{free[idx]['id']}"
                         args.extra_reviewer_model = chosen_extra
+                        extra_model = chosen_extra
                         if forwarded_to_subprocess is not None:
                             forwarded_to_subprocess.extend(["--extra-reviewer-model", chosen_extra])
                         break
-                    print(f"  enter a number 0–{len(free) - 1}, Enter, s to skip, or q")
+                    if allow_custom and low == "c":
+                        try:
+                            slug = input("  paste OpenRouter model for extra: ").strip()
+                        except EOFError:
+                            continue
+                        if slug:
+                            args.extra_reviewer_model = slug
+                            extra_model = slug
+                            if forwarded_to_subprocess is not None:
+                                forwarded_to_subprocess.extend(["--extra-reviewer-model", slug])
+                            break
+                        continue
+                    suffix = ", c" if allow_custom else ""
+                    print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, s to skip, or q")
 
     # ----- CLI reviewer (post-publish, subscription-bound) -----
-    # Detects `claude` / `codex` on PATH and asks which (if any) to run
-    # after the Draft PR is published. The chosen tool's review is posted
-    # as a single comment on the PR; it uses the operator's interactive
-    # subscription rather than API credits.
-    from . import cli_reviewer
-
-    cli_reviewer_flag = getattr(args, "cli_reviewer", "auto")
-    cli_reviewer_explicit = _has_flag_in(argv_for_explicit_check, "--cli-reviewer")
+    # Banner-then-picker mirrors the OpenRouter-key flow above: when no
+    # CLI is on PATH, the hint banner explains the missing capability;
+    # otherwise we fall through to the normal picker.
     if not cli_reviewer_explicit:
-        available = cli_reviewer.detect_available()
-        if available:
+        if available_clis:
             print()
             chosen = cli_reviewer.resolve_choice(
-                flag_value=cli_reviewer_flag,
-                available=available,
+                flag_value=getattr(args, "cli_reviewer", "auto"),
+                available=available_clis,
                 tty=True,
             )
         else:
+            _print_no_cli_reviewer_banner()
             chosen = "none"
         args.cli_reviewer = chosen
         if forwarded_to_subprocess is not None and chosen != "auto":
             forwarded_to_subprocess.extend(["--cli-reviewer", chosen])
 
-    # ----- confirm -----
-    print()
-    print(_RULE)
-    print(f"  agent   {_b(args.agent_model)}")
-    print(f"  sim     {_b(args.sim_model)}")
-    extra_model = getattr(args, "extra_reviewer_model", None)
-    if extra_model:
-        print(f"  extra   {_b(extra_model)}")
-    cli_reviewer_choice = getattr(args, "cli_reviewer", "none")
-    if cli_reviewer_choice in ("codex", "claude"):
-        print(f"  review  {_b(cli_reviewer_choice)}  {_d('(post-publish, subscription)')}")
-
-    # ----- pre-flight ping -----
+    # ----- pre-flight ping (Zen quota probe) -----
     # Free-tier Zen models occasionally land in the catalog while the
     # operator's per-model quota is already spent. Without this probe the
     # first agent turn burns the full 1800s timeout (or just hangs until
     # SIGTERM) while opencode retries a 429 internally. One tiny chat
     # completion catches it now and lets the operator pick another model.
-    #
-    # Zen-only: probing happens against `https://opencode.ai/zen/v1/chat/
-    # completions`, which is the endpoint opencode itself uses for the
-    # `opencode/*` prefix. Models with a different prefix are skipped.
     probe_targets: list[tuple[str, str]] = []
     seen_models: set[str] = set()
     for role, model in (
@@ -655,11 +769,56 @@ def _launch_screen(
                 print(f"    {role:<6}  {_b(short)}  ✗  free-tier quota exhausted")
                 quota_blockers.append((role, model))
             else:
-                # Network / unexpected status — log and move on. The in-run
-                # fast-fail still catches a real quota error if this missed it.
                 print(f"    {role:<6}  {_d(short)}  ?  {_d(detail or 'probe failed')}")
 
+    # ----- recap (decision-free) -----
+    publish = getattr(args, "publish_mode", "stub")
+    cost = getattr(args, "max_cost_usd", None)
+    wall = getattr(args, "max_wall_minutes", None)
+    base = getattr(args, "base", "?")
+    cli_reviewer_choice = getattr(args, "cli_reviewer", "none")
+
     print()
+    print(_RULE)
+    print(f"  {_b('Run summary')}")
+    print()
+    print(f"  target          {source_url}")
+    print(f"  branch          {base}  {_d(f'({publish})')}")
+    print()
+    print(f"  agent           {_b(args.agent_model)}")
+    print(f"  sim             {_b(args.sim_model)}")
+    if extra_model:
+        print(f"  extra           {_b(extra_model)}")
+    if cli_reviewer_choice in ("codex", "claude"):
+        print(f"  code-review     {_b(cli_reviewer_choice)}  {_d('(post-publish, subscription)')}")
+    elif cli_reviewer_choice == "none":
+        print(f"  code-review     {_d('skipped')}")
+    caps_parts: list[str] = []
+    if cost is not None:
+        caps_parts.append(f"${cost}")
+    if wall is not None:
+        caps_parts.append(f"{wall}m wall")
+    if caps_parts:
+        print(f"  caps            {_d('  ·  '.join(caps_parts))}")
+
+    # Network posture mirrors preflight._check_network_policy: an explicit
+    # proxy or docker-network wins over the --allow-open-egress fallback.
+    http_proxy = getattr(args, "http_proxy", None)
+    https_proxy = getattr(args, "https_proxy", None)
+    docker_network = getattr(args, "docker_network", None)
+    allow_open_egress = getattr(args, "allow_open_egress", False)
+    if http_proxy or https_proxy:
+        network_label = "proxy"
+    elif docker_network:
+        network_label = f"network: {docker_network}"
+    elif allow_open_egress:
+        network_label = "open egress"
+    else:
+        network_label = "not configured"
+    print(f"  network         {_d(network_label)}")
+    print(_RULE)
+    print()
+
     if quota_blockers:
         print(f"  {_b('free-tier quota exhausted for:')}")
         for role, model in quota_blockers:
@@ -673,7 +832,8 @@ def _launch_screen(
         print()
         return reply in ("y", "yes")
 
-    print(f"  CONTREMAITRE WILL RUN AUTONOMOUSLY AND CREATE A DRAFT PR ON {source_url} — Ctrl-C to abort")
+    print(f"  {_d('Contremaitre will run autonomously and create a Draft PR on')} {source_url}")
+    print(f"  {_d('Ctrl-C to abort')}")
     print()
     try:
         reply = input("  proceed? [Y/n] ").strip().lower()
@@ -1248,6 +1408,10 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer_choice,
+        allow_open_egress=("--allow-open-egress" in forwarded),
+        docker_network=_extract_flag_value(forwarded, "--docker-network", "") or None,
+        http_proxy=_extract_flag_value(forwarded, "--http-proxy", "") or None,
+        https_proxy=_extract_flag_value(forwarded, "--https-proxy", "") or None,
     )
     try:
         if not _launch_screen(

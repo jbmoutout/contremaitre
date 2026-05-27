@@ -70,6 +70,30 @@ class PreflightTest(unittest.TestCase):
 
         self.assertTrue(report.passed, report.failure_summary())
 
+    def test_missing_key_passes_with_only_free_models(self):
+        config = self._config(
+            http_proxy="http://proxy.local:8080",
+            agent_model="opencode/grok-code",
+            sim_model="opencode/grok-code",
+        )
+        with patch.dict(os.environ, {}, clear=False), self._mock_docker_ok():
+            os.environ.pop("OPENROUTER_API_KEY", None)
+            report = run_preflight(config)
+
+        self.assertTrue(report.passed, report.failure_summary())
+        self.assertEqual("PASS", self._status_by_name(report)["openrouter_key"])
+
+    def test_missing_key_fails_with_paid_model(self):
+        # Default RunConfig models point at `openrouter/...` — paid slugs
+        # that require a key. Absent key + paid model must still FAIL.
+        config = self._config(http_proxy="http://proxy.local:8080")
+        with patch.dict(os.environ, {}, clear=False), self._mock_docker_ok():
+            os.environ.pop("OPENROUTER_API_KEY", None)
+            report = run_preflight(config)
+
+        self.assertFalse(report.passed)
+        self.assertIn("openrouter_key", self._fail_names(report))
+
     def test_non_byok_limited_openrouter_key_warns_but_passes(self):
         config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}), self._mock_docker_ok(), patch(
