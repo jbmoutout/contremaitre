@@ -65,6 +65,11 @@ _DRIFT_ENVELOPES = {
     "cost_usd": 0.20,  # per roadmap §2
     "wall_seconds": 0.30,
     "cross_family_agreement": 0.30,
+    # Continuous panels added in the post-v0 refinement: tighter envelopes
+    # since they don't have the 3-state coarseness of cli_review_score.
+    "agent_discipline_score": 0.20,
+    "cli_findings_weighted": 0.50,  # severity-weighted finding count; rise = regression
+    "cli_citation_density": 0.30,  # drop = ungrounded reviews
 }
 
 
@@ -565,6 +570,94 @@ def _parse_cli_review(run_dir: Path, cli_reviewer: str) -> dict[str, Any]:
     }
 
 
+# Severity weights for Conventional Comments labels. `issue` is the
+# blocking-quality bucket per the cli_reviewer prompt; `suggestion` and
+# `nit` are lighter. `question` doesn't imply a defect. `praise` /
+# `thought` are positive-or-neutral so they're zero-weight too — we're
+# measuring the magnitude of negative signal, not net sentiment.
+_FINDING_SEVERITY_WEIGHTS = {
+    "issue": 3,
+    "suggestion": 2,
+    "nit": 1,
+    "question": 0,
+    "praise": 0,
+    "thought": 0,
+}
+
+
+def _weighted_findings(by_label: dict[str, int]) -> int:
+    """Severity-weighted sum of findings.
+
+    A MUST_FIX run with one critical `**issue:**` scores 3; a MUST_FIX with
+    four `**nit:**` items scores 4. Both look identical when collapsed to
+    `cli_review_score=0.0`, but they're meaningfully different signals.
+    """
+
+    return sum(
+        count * _FINDING_SEVERITY_WEIGHTS.get(label, 0)
+        for label, count in by_label.items()
+    )
+
+
+def _citation_density(cli: dict[str, Any]) -> float | None:
+    """Fraction of findings with a `path:line` citation. None when no findings.
+
+    Grounded reviews (high density) cite the offending line; ungrounded
+    reviews (low density) hand-wave. A drop across runs would suggest the
+    reviewer is producing less-trustworthy output, independent of the
+    verdict mix.
+    """
+
+    findings = cli.get("finding_count")
+    if not findings:
+        return None
+    citations = cli.get("citation_count") or 0
+    return citations / findings
+
+
+_EXPLORATION_TO_SCORE = {
+    "mostly_narrowed": 1.0,
+    "narrowed": 1.0,
+    "mixed": 0.5,
+    "scattered": 0.0,
+    "thrashed": 0.0,
+}
+
+
+def _agent_discipline_score(
+    *,
+    exploration: str | None,
+    sim_useful_ratio: float | None,
+    self_verified: bool | None,
+) -> float | None:
+    """Continuous [0, 1] composite over three independent discipline signals.
+
+    Components:
+    - `exploration`: flow_use's `exploration_convergence.value` —
+      narrowed → 1.0, mixed → 0.5, scattered/thrashed → 0.0.
+    - `sim_useful_ratio`: flow_use's `sim_useful_call_ratio` — fraction of
+      SIM grep outputs cited in the verdict (already 0..1).
+    - `self_verified`: scorecard boolean — did the agent run tests itself.
+
+    Mean of available components. Returns None when no component resolves.
+    The signal complements `cli_review_score` because all three measure
+    things the cli_reviewer cannot see (process, not artifact).
+    """
+
+    parts: list[float] = []
+    if isinstance(exploration, str):
+        score = _EXPLORATION_TO_SCORE.get(exploration)
+        if score is not None:
+            parts.append(score)
+    if isinstance(sim_useful_ratio, (int, float)):
+        parts.append(max(0.0, min(1.0, float(sim_useful_ratio))))
+    if isinstance(self_verified, bool):
+        parts.append(1.0 if self_verified else 0.0)
+    if not parts:
+        return None
+    return sum(parts) / len(parts)
+
+
 def _diff_stats(run_dir: Path) -> dict[str, int | None]:
     """LoC + files_changed by parsing the latest `review_diff_round_<N>.diff`.
 
@@ -714,9 +807,33 @@ def check_run(case: CaseDef, run_dir: Path) -> CanaryReport:
     terminal = stats.get("verdict") or pr_eval.get("verdict")
     terminal_score = _TERMINAL_TO_SCORE.get(terminal) if terminal else None
 
+    # Severity-weighted finding count: Conventional Comments labels already
+    # encode severity (issue >> suggestion >> nit). Sum with weights so a
+    # MUST_FIX with one critical issue scores differently from a MUST_FIX
+    # with four trivial nits. Praise/thought ignored — usually 0 anyway.
+    cli_findings_weighted = _weighted_findings(cli.get("by_label") or {}) if cli.get("ran") else None
+    cli_citation_density = _citation_density(cli)
+
+    # Continuous orchestrator-side discipline composite. Per-run [0, 1] score
+    # derived from three independent signals the cli_reviewer cannot see:
+    # how convergently the agent explored, whether it self-verified, and
+    # whether the SIM grounded its verdict in actual greps. Sensitive to
+    # the kind of regression a single 3-state verdict can't catch.
+    agent_discipline = _agent_discipline_score(
+        exploration=(flow_agent.get("exploration_convergence") or {}).get("value"),
+        sim_useful_ratio=_flow_value(flow_sim, "sim_useful_call_ratio"),
+        self_verified=scorecard.get("self_verified"),
+    )
+
     headline = {
         "cli_review_score": cli["verdict_score"],
         "cli_review_verdict_key": cli["verdict_key"],
+        "cli_findings_weighted": cli_findings_weighted,
+        "cli_issue_count": (cli.get("by_label") or {}).get("issue") if cli.get("ran") else None,
+        "cli_suggestion_count": (cli.get("by_label") or {}).get("suggestion") if cli.get("ran") else None,
+        "cli_nit_count": (cli.get("by_label") or {}).get("nit") if cli.get("ran") else None,
+        "cli_citation_density": cli_citation_density,
+        "agent_discipline_score": agent_discipline,
         "terminal_score": terminal_score,
         "terminal_verdict": terminal,
         "files_changed": diff["files_changed"],
@@ -894,6 +1011,12 @@ def aggregate_cell(reports: list[CanaryReport]) -> Cell:
     headline = {
         "cli_review_score": _median_range(headline_panel("cli_review_score")),
         "cli_review_verdict_mix": _mix(headline_panel("cli_review_verdict_key")),
+        "cli_findings_weighted": _median_range(headline_panel("cli_findings_weighted")),
+        "cli_issue_count": _median_range(headline_panel("cli_issue_count")),
+        "cli_suggestion_count": _median_range(headline_panel("cli_suggestion_count")),
+        "cli_nit_count": _median_range(headline_panel("cli_nit_count")),
+        "cli_citation_density": _median_range(headline_panel("cli_citation_density")),
+        "agent_discipline_score": _median_range(headline_panel("agent_discipline_score")),
         "terminal_score": _median_range(headline_panel("terminal_score")),
         "terminal_verdict_mix": _mix(headline_panel("terminal_verdict")),
         "files_changed": _median_range(headline_panel("files_changed")),
@@ -1076,6 +1199,9 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
     h_cur, h_base = current.headline, baseline.headline
 
     # cli_review_score: drop ≥ envelope = regression; rise = improvement.
+    # Keep on headline because it IS the LLM-as-judge signal (codex reviewing
+    # the produced PR), even though n=3 + 3-state encoding makes the
+    # threshold coarse — see complementary panels below for finer signal.
     cur_score = _median(h_cur.get("cli_review_score"))
     base_score = _median(h_base.get("cli_review_score"))
     msg = _envelope_check(
@@ -1085,6 +1211,46 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
         regressions.append(msg)
     elif cur_score is not None and base_score is not None and cur_score > base_score:
         improvements.append(f"cli_review_score {base_score:.2f} → {cur_score:.2f}")
+
+    # agent_discipline_score: continuous composite (exploration_convergence +
+    # sim_useful_call_ratio + self_verified). Captures process-quality drift
+    # the cli_reviewer cannot see — independent regression signal.
+    cur_d = _median(h_cur.get("agent_discipline_score"))
+    base_d = _median(h_base.get("agent_discipline_score"))
+    msg = _envelope_check(
+        "agent_discipline_score", cur_d, base_d,
+        envelope=_DRIFT_ENVELOPES["agent_discipline_score"], direction="down",
+    )
+    if msg:
+        regressions.append(msg)
+    elif cur_d is not None and base_d is not None and cur_d > base_d + 0.10:
+        improvements.append(f"agent_discipline_score {base_d:.2f} → {cur_d:.2f}")
+
+    # cli_findings_weighted: severity-weighted finding count. INCREASE is the
+    # bad direction (more / more-serious findings per run). Uses absolute
+    # threshold for low-baseline cases (0 → 3 is meaningful even though
+    # the % is infinite); falls back to the envelope for higher baselines.
+    cur_w = _median(h_cur.get("cli_findings_weighted"))
+    base_w = _median(h_base.get("cli_findings_weighted"))
+    if cur_w is not None and base_w is not None:
+        absolute_jump = cur_w - base_w >= 3
+        env_jump = (
+            base_w > 0 and (cur_w - base_w) / base_w > _DRIFT_ENVELOPES["cli_findings_weighted"]
+        )
+        if absolute_jump or env_jump:
+            regressions.append(f"cli_findings_weighted {base_w:.1f} → {cur_w:.1f}")
+        elif base_w > 0 and cur_w < base_w * 0.5:
+            improvements.append(f"cli_findings_weighted {base_w:.1f} → {cur_w:.1f}")
+
+    # cli_citation_density: drop = ungrounded reviews (reviewer regressed).
+    cur_cd = _median(h_cur.get("cli_citation_density"))
+    base_cd = _median(h_base.get("cli_citation_density"))
+    msg = _envelope_check(
+        "cli_citation_density", cur_cd, base_cd,
+        envelope=_DRIFT_ENVELOPES["cli_citation_density"], direction="down",
+    )
+    if msg:
+        regressions.append(msg)
 
     # terminal_score: any drop is a regression.
     cur_t = _median(h_cur.get("terminal_score"))
@@ -1449,9 +1615,17 @@ def format_cell_report(cell: Cell, baseline: Cell | None, compare: CompareResult
     )
     lines.append("")
 
-    lines.append("Headline:")
+    lines.append("Headline — LLM judge (cli_reviewer):")
     lines.append(f"  cli_review_score        {_fmt_range(h.get('cli_review_score'), prec=2)}")
     lines.append(f"    verdict_mix           {_fmt_mix(h.get('cli_review_verdict_mix'))}")
+    lines.append(f"  cli_findings_weighted   {_fmt_range(h.get('cli_findings_weighted'), prec=1)}   (issue×3 + suggestion×2 + nit×1)")
+    lines.append(f"    issue_count           {_fmt_range(h.get('cli_issue_count'))}")
+    lines.append(f"    suggestion_count      {_fmt_range(h.get('cli_suggestion_count'))}")
+    lines.append(f"    nit_count             {_fmt_range(h.get('cli_nit_count'))}")
+    lines.append(f"  cli_citation_density    {_fmt_range(h.get('cli_citation_density'), prec=2)}")
+    lines.append("")
+    lines.append("Headline — orchestrator-side (process, not artifact):")
+    lines.append(f"  agent_discipline_score  {_fmt_range(h.get('agent_discipline_score'), prec=2)}   (exploration + sim_useful + self_verified)")
     lines.append(f"  terminal_score          {_fmt_range(h.get('terminal_score'), prec=2)}")
     lines.append(f"    terminal_mix          {_fmt_mix(h.get('terminal_verdict_mix'))}")
     lines.append(f"  files_changed           {_fmt_range(h.get('files_changed'))}")
