@@ -87,15 +87,17 @@ rust target *args:
     @just docker_image="contremaitre-agent-rust:latest" {{target}} {{args}}
 
 # === Eval canary ==============================================================
-# v0 regression canary. See golden_cases/README.md.
+# v0 regression canary. Real opencode mode against pinned target+SHA. See
+# golden_cases/README.md.
 
 # Run every golden case n=3 and compare to its baseline. Exits non-zero on any
-# regression. Manual trigger — invoke after a prompt edit or before merging a
-# risky change. Fake actor by default; takes ~30s total.
+# regression. Manual trigger — invoke after a prompt edit OR a model swap
+# (never both, per EVAL_ROADMAP §5). One case × n=3 takes ~45min on opencode.
 eval n="3":
     uv run contremaitre eval all --n {{n}}
 
-# Fast iteration on one case (default: case_01_happy_path).
-eval-quick case="case_01_happy_path" n="3":
+# Single-case run + compare. Default: the sqlite-utils canary.
+#   just eval-one case_01_sqlite_utils_8f0c06e 3
+eval-one case n="3":
     uv run contremaitre eval run {{case}} --n {{n}}
     uv run contremaitre eval compare {{case}} --n {{n}}

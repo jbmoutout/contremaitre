@@ -135,6 +135,20 @@ See [docs/control-plane.md](docs/control-plane.md) for the implementation map.
 
 The check runs in a sidecar container that mounts the same worktree + lockhash-keyed deps volume the agent used, with a 600s timeout per command. The deps volume sits at `/app/{node_modules,.venv,.cargo-cache,.go-mod-cache}` (per-ecosystem); runtime env vars (`VIRTUAL_ENV`, `CARGO_HOME`, `GOPATH`) are auto-injected so ecosystem tools find it without per-target setup. Repeat the flag to gate on more than one command.
 
+## Eval canary (v0, regression detection)
+
+Pinned `(target_url, base_sha)` cases under [`golden_cases/`](golden_cases/) run the **real opencode actor** with real prompts, real models, and the codex cli_reviewer. Each case runs n=3 times; the cell summary (verdict-key score, terminal mix, LoC + files-changed, review rounds, cost, wall time, cross-family agreement) is compared against a per-case `baseline.json`. Manual trigger.
+
+```bash
+python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --n 3
+python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e
+python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e
+```
+
+A canary cycle on sqlite-utils with the deepseek-v4-flash-free models takes ~3 × ~15min on opencode. `eval compare` exits non-zero on any headline-panel regression (drop ≥ 0.30 on `cli_review_score`, terminal-mix worsened, format-compliance dropped, etc.). `eval promote` refuses to baseline a dirty tree or a cell where any cli_review failed to parse. Two-variable guard fires when both contremaitre's `system_digest` and the case's `input_digest` differ from baseline (don't bump prompts AND models in one go — [EVAL_ROADMAP §5](EVAL_ROADMAP.md)). See [`golden_cases/README.md`](golden_cases/README.md) to add a case. L2/L3 LLM judges remain `PENDING` per [EVAL_ROADMAP §6](EVAL_ROADMAP.md).
+
+Fake-actor scaffolds under [`smoke_cases/`](smoke_cases/) are integration tests of the state machine, not evals. They are not picked up by `contremaitre eval`.
+
 ## Smoke run (fake actor, no docker, no spend)
 
 Useful for verifying the install + state machine without launching containers:

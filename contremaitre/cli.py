@@ -321,6 +321,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index_p.set_defaults(func=_index_cmd)
 
+    eval_p = sub.add_parser("eval", help="v0 regression canary (see golden_cases/)")
+    eval_sub = eval_p.add_subparsers(dest="eval_command", required=True)
+
+    eval_runs_root_kwargs = dict(
+        type=Path,
+        default=Path(".contremaitre/runs"),
+        help="Runs root (default: .contremaitre/runs)",
+    )
+
+    eval_run = eval_sub.add_parser("run", help="Run one case n times (real opencode mode)")
+    eval_run.add_argument("case_id")
+    eval_run.add_argument("--n", type=int, default=3)
+    eval_run.add_argument("--runs-root", **eval_runs_root_kwargs)
+    eval_run.set_defaults(func=_eval_run_cmd)
+
+    eval_check = eval_sub.add_parser("check", help="Validate one run dir against its case")
+    eval_check.add_argument("run_dir", type=Path)
+    eval_check.set_defaults(func=_eval_check_cmd)
+
+    eval_compare = eval_sub.add_parser("compare", help="Aggregate latest n runs and compare to baseline")
+    eval_compare.add_argument("case_id")
+    eval_compare.add_argument("--n", type=int, default=3)
+    eval_compare.add_argument("--runs-root", **eval_runs_root_kwargs)
+    eval_compare.set_defaults(func=_eval_compare_cmd)
+
+    eval_promote = eval_sub.add_parser("promote", help="Snapshot the latest n-run cell as the case baseline")
+    eval_promote.add_argument("case_id")
+    eval_promote.add_argument("--n", type=int, default=3)
+    eval_promote.add_argument("--runs-root", **eval_runs_root_kwargs)
+    eval_promote.set_defaults(func=_eval_promote_cmd)
+
+    eval_all = eval_sub.add_parser("all", help="Run every case n times and compare to baselines")
+    eval_all.add_argument("--n", type=int, default=3)
+    eval_all.add_argument("--runs-root", **eval_runs_root_kwargs)
+    eval_all.set_defaults(func=_eval_all_cmd)
+
+    eval_show = eval_sub.add_parser("show", help="Pretty-print the scorecard for a case (no side effects)")
+    eval_show.add_argument("case_id")
+    eval_show.add_argument("--n", type=int, default=3)
+    eval_show.add_argument("--runs-root", **eval_runs_root_kwargs)
+    eval_show.set_defaults(func=_eval_show_cmd)
+
     return parser
 
 
@@ -334,7 +376,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
         return 1
     cache_path = (args.repo_cache or _default_cache_path(source_url)).resolve()
     try:
-        _ensure_local_clone(cache_path=cache_path, source_url=source_url)
+        _ensure_local_clone(cache_path=cache_path, source_url=source_url, base=args.base)
     except subprocess.CalledProcessError as exc:
         print(f"contremaitre: git clone failed: {exc.stderr or exc}", file=sys.stderr)
         return 1
@@ -396,17 +438,47 @@ def _slug_from_url(source_url: str) -> str:
     return safe or "contremaitre-target"
 
 
-def _ensure_local_clone(*, cache_path: Path, source_url: str) -> None:
-    """Clone `source_url` into `cache_path` if not already there.
+def _ensure_local_clone(*, cache_path: Path, source_url: str, base: str | None = None) -> None:
+    """Clone `source_url` into `cache_path` if not already there, then refresh.
 
-    Idempotent: if `cache_path/.git/` exists, leave it alone — the
-    orchestrator's `git fetch origin <base>` (in `_create_worktree`)
-    handles freshness on every run. If `cache_path` exists but is not a
-    git repo, raise so the operator can choose the resolution; we never
-    silently overwrite an unknown directory.
+    Fresh clone path: `git clone source_url cache_path`. Cache-exists path:
+    `git fetch origin <base> --prune` so refs created on the remote since
+    the cache was cloned are visible to preflight (which runs *before*
+    `_create_worktree`'s own fetch, so the cache must be up-to-date by
+    then). A separate `git fetch origin <base>` still happens inside
+    `_create_worktree` as defense-in-depth against local-ref tampering.
+
+    The refresh is best-effort: if the user is offline or the remote is
+    momentarily unreachable, the stale cache keeps working. The orchestrator
+    will fail later if the base ref genuinely doesn't exist.
+
+    If `cache_path` exists but is not a git repo, raise so the operator can
+    choose the resolution; we never silently overwrite an unknown directory.
     """
 
     if (cache_path / ".git").exists():
+        if base:
+            try:
+                subprocess.run(
+                    ["git", "-C", str(cache_path), "fetch", "--prune", "origin", base],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.CalledProcessError as exc:
+                print(
+                    f"contremaitre: cache refresh of origin/{base} failed "
+                    f"(rc={exc.returncode}); continuing with stale cache. "
+                    f"{exc.stderr.strip()}",
+                    file=sys.stderr,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(
+                    f"contremaitre: cache refresh of origin/{base} failed: {exc}; "
+                    "continuing with stale cache",
+                    file=sys.stderr,
+                )
         return
     if cache_path.exists():
         raise RuntimeError(
@@ -1478,7 +1550,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     repo_cache_raw = _extract_flag_value(forwarded, "--repo-cache", "")
     cache_path = Path(repo_cache_raw).resolve() if repo_cache_raw else _default_cache_path(source_url)
     try:
-        _ensure_local_clone(cache_path=cache_path, source_url=source_url)
+        _ensure_local_clone(cache_path=cache_path, source_url=source_url, base=base)
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"contremaitre: {exc}", file=sys.stderr)
         return 1
@@ -1594,6 +1666,73 @@ def _index_cmd(args: argparse.Namespace) -> int:
         opener = "open" if sys.platform == "darwin" else "xdg-open"
         subprocess.run([opener, str(out)], check=False)
     return 0
+
+
+def _eval_project_root() -> Path:
+    return _PACKAGE_DIR.parent
+
+
+def _eval_run_cmd(args: argparse.Namespace) -> int:
+    from .eval import cmd_run
+
+    return cmd_run(
+        project_root=_eval_project_root(),
+        case_id=args.case_id,
+        n=args.n,
+        runs_root=args.runs_root.resolve(),
+    )
+
+
+def _eval_check_cmd(args: argparse.Namespace) -> int:
+    from .eval import cmd_check
+
+    return cmd_check(
+        project_root=_eval_project_root(),
+        run_dir=args.run_dir.resolve(),
+    )
+
+
+def _eval_compare_cmd(args: argparse.Namespace) -> int:
+    from .eval import cmd_compare
+
+    return cmd_compare(
+        project_root=_eval_project_root(),
+        case_id=args.case_id,
+        runs_root=args.runs_root.resolve(),
+        n=args.n,
+    )
+
+
+def _eval_promote_cmd(args: argparse.Namespace) -> int:
+    from .eval import cmd_promote
+
+    return cmd_promote(
+        project_root=_eval_project_root(),
+        case_id=args.case_id,
+        runs_root=args.runs_root.resolve(),
+        n=args.n,
+    )
+
+
+def _eval_all_cmd(args: argparse.Namespace) -> int:
+    from .eval import cmd_all
+
+    return cmd_all(
+        project_root=_eval_project_root(),
+        runs_root=args.runs_root.resolve(),
+        n=args.n,
+    )
+
+
+def _eval_show_cmd(args: argparse.Namespace) -> int:
+    from .eval import cmd_show
+
+    return cmd_show(
+        project_root=_eval_project_root(),
+        case_id=args.case_id,
+        runs_root=args.runs_root.resolve(),
+        n=args.n,
+    )
 
 
 _VARIANT_DEFAULT_TAGS: dict[str, str] = {

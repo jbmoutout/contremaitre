@@ -97,10 +97,17 @@ def _check_repo(config: RunConfig) -> PreflightCheck:
     proc = _run(["git", "-C", str(config.repo), "rev-parse", "--is-inside-work-tree"])
     if proc.returncode != 0 or proc.stdout.strip() != "true":
         return _fail("repo", "repo is not a git worktree", _proc_details(proc))
-    base = _run(["git", "-C", str(config.repo), "rev-parse", "--verify", config.base])
+    # Only the remote-tracking ref is authoritative. The clone cache is a
+    # performance hop for git objects; local branches (`refs/heads/<base>`)
+    # are never used by the orchestrator — `_create_worktree` creates the
+    # worktree from `origin/<base>` precisely to avoid trusting local refs.
+    # `_ensure_local_clone` runs `git fetch origin <base>` on every run, so
+    # `origin/<base>` reflects the remote as of this run's start.
+    remote_ref = f"origin/{config.base}"
+    base = _run(["git", "-C", str(config.repo), "rev-parse", "--verify", remote_ref])
     if base.returncode != 0:
-        return _fail("repo_base", f"base ref not found: {config.base}", _proc_details(base))
-    return _pass("repo", "repo and base ref are available", {"repo": str(config.repo), "base": config.base})
+        return _fail("repo_base", f"base ref not found on origin: {remote_ref}", _proc_details(base))
+    return _pass("repo", "repo and base ref are available", {"repo": str(config.repo), "base": remote_ref})
 
 
 def _check_opencode_config(config: RunConfig) -> PreflightCheck:

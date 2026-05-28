@@ -1,0 +1,23 @@
+# Case 02 — SIM malformed-verdict retry
+#
+# Fake SIM emits non-JSON on attempt 1, then a valid APPROVED verdict on
+# attempt 2. Exercises the orchestrator's malformed-verdict retry path and
+# confirms the run still terminates cleanly with a Draft PR.
+#
+# Canary signal: if the retry path regresses (e.g. terminal verdict becomes
+# NO_PR_NEEDS_HUMAN on first malformed output instead of retrying), this
+# case's terminal verdict drops out of `allowed_terminals` and `eval
+# compare` flags a regression.
+
+id = "case_02_malformed_retry"
+description = "Fake SIM malformed on attempt 1, approves on attempt 2; terminal still READY_FOR_DRAFT_PR."
+
+[actor]
+mode = "fake"
+agent_scenario = "normal"
+sim_scenario = "malformed_then_approved"
+
+[expected]
+allowed_terminals = ["READY_FOR_DRAFT_PR"]
+must_pass_gates = ["diff_scan", "diff_hash_matched", "clean_worktree", "draft_only"]
+review_rounds_max = 1

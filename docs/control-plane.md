@@ -16,7 +16,7 @@ INIT  →  WORK  →  REVIEW  →  APPROVED   (PR opened)
 - **REVIEW** is a single-shot SIM call against `/review/SETTLED_DESIGN.md` and `/review/diff.patch` (read-only mounts). The SIM emits a strict JSON verdict.
 - **Revision** is not a separate state. A `CHANGES_REQUESTED` verdict clears the marker file, sends each reviewer's `summary` and the merged `required_changes` bullets to the agent's WORK session (same opencode session, resumed via `--session`), and re-enters WORK. Other verdict fields (`verdict`, `confidence`, `checks_performed`) are dropped — they're audit-only and live in `review_cycles.jsonl`.
 - **APPROVED** runs hard gates (diff-scan, diff-hash match, clean worktree), executable checks, then the publisher.
-- **cli_review** (optional, post-publish) — when `--cli-reviewer codex|claude` is set, the orchestrator invokes a locally-installed CLI (claude/codex) on the operator's interactive subscription AFTER the Draft PR is opened. The CLI pulls the PR via `gh`, produces a verdict-led markdown review (line 1: `🟢 LOOKS_GOOD` / `🟠 NEEDS_ATTENTION` / `🔴 MUST_FIX` + one-sentence justification; body uses Conventional Comments labels), and the orchestrator posts it as a single PR comment. Runs on the host (not in a container), uses the operator's OAuth credentials, so it dodges the API quota that SIM + extra-gatekeeper burn. Failures don't block the terminal — the PR is already published.
+- **cli_review** (optional, post-publish) — when `--cli-reviewer codex|claude` is set, the orchestrator invokes a locally-installed CLI (claude/codex) on the operator's interactive subscription AFTER the Draft PR is opened. The CLI pulls the PR via `gh`, produces a verdict-led markdown review (line 1: `LOOKS_GOOD` /  `NEEDS_ATTENTION` / `MUST_FIX` + one-sentence justification; body uses Conventional Comments labels), and the orchestrator posts it as a single PR comment. Runs on the host (not in a container), uses the operator's OAuth credentials, so it dodges the API quota that SIM + extra-gatekeeper burn. Failures don't block the terminal — the PR is already published.
 
 The multi-turn loop is self-contained; Contremaitre does not import any external orchestration substrate at runtime.
 
@@ -86,6 +86,8 @@ INIT
 - `fixture.py` — local fixture repo creation for smoke tests.
 - `events.py` — single source of truth for guardrail-event name strings (writer + structural-reader side). TUI classifies by substring pattern, not import.
 - `viewer/` — builds `viewer.html` (single-file HTML over the run dir's JSONL artifacts) from the orchestrator's `finally` so it lands on success and failure paths.
+- `manifest.py` — provenance manifest for a run. Builds `run_config.json` at orchestrator start: model IDs, image, target, base + base SHA, contremaitre git SHA / dirty flag, prompt-file hashes, `skills-lock.json` hash, docker image digest, dockerfile-sha256 label, python + contremaitre versions. Every helper tolerates missing tools (no `git`, no `docker`) and returns `None` rather than raising; the manifest is best-effort forensics, not a hard gate. `manifest_digest()` hashes the fields that define "the system under test" so the canary can decide whether two runs are comparable.
+- `eval.py` — v0 regression canary. Reads `golden_cases/<id>/case.toml` (pinned `target_url` + `base` + `expected_base_sha` + `[models]`), runs each case n times by subprocess-invoking `contremaitre run --actor opencode --publish-mode gh --cli-reviewer codex ...` so the production launch sequence (clone-cache, preflight, image-rebuild check, opencode-config synthesis, publisher) is canaried as-is. Extracts a two-layer scorecard from artifacts the orchestrator already writes: **headline** (`cli_review_score` LG=1/NA=0.5/MF=0, `terminal_score`, `files_changed`, `loc_net_delta`, `review_rounds`, `cost_usd`, `wall_seconds`, `cross_family_agreement_rate`) drives pass/fail; **diagnostic** (format-compliance, discipline, review-depth, cli_review breakdown, diff-detail, efficiency) is informational. Aggregates n samples into a cell (median + min/max for numeric, rate for boolean, mix for categorical), compares against `golden_cases/<id>/baseline.json` per [EVAL_ROADMAP §5](../EVAL_ROADMAP.md) envelopes. Two-variable guard fires when both `system_digest` (contremaitre + prompts + image + skills) and `input_digest` (target + base + cli_reviewer) drift from baseline. `eval promote` refuses on dirty tree, `n<3`, missed cli_review parse, or any non-`ok` contributing run. Smoke scaffolds under `smoke_cases/` are not picked up — fake-mode integration testing is a separate concern from emergent-behavior evals. L2/L3 LLM judges stay `PENDING` per [EVAL_ROADMAP §6](../EVAL_ROADMAP.md).
 - `tui.py` — read-only Textual TUI tailing JSONL artifacts. Footer: 7-dot phase trail (Init → Exploring → Grilling → Implementing → Reviewing → cli_review → Done) + current phase label with sub-info (exchange/turn counts, per-reviewer verdicts, tool-named CLI review status) + conditional warning tokens (`↻N`, `tests ✗`, `extra:disagreed`, `↶ R<N> changes_req` after a CHANGES_REQUESTED loop-back) + elapsed/cost + TerminalVerdict badge (`PR PUSHED #N` / `NO_PR · …` / `FAILED · infra`). Per-reviewer status glyphs (`Review ✓✓`, `Extra Review ✓✓`, `CODEX Review ✓/!/✗`) stay visible through cli_review and done — the CLI review glyph reflects the agent's verdict key parsed from line 1 of the review (MUST_FIX → ✗, NEEDS_ATTENTION → !, LOOKS_GOOD → ✓), not the subprocess exit code. Exploring → Grilling fires on EITHER `architecture-review.html` being written OR the SIM joining the conversation (whichever first) — the OR fallback handles agents that skip the cards file. Second row shows plain (cmd+clickable) URLs to the PR and viewer at terminal state — not OSC 8, since Apple Terminal doesn't support that. Animated Braille spinner with `active` / `thinking` / `idle` states per pane; per-turn separator in each pane log; elapsed clock + last-write age freeze at terminal state. Layout: AGENT and SIM panes (with EXTRA REVIEWER stacked under SIM, lazy-shown on its first actor-start event) occupy the main 2-column row; a full-width cli_review pane (also lazy-shown, on the `cli_review_started` event) appears below them when post-publish review runs, then the orchestrator-activity strip. Yellow active-border anchors on the cli_review pane for the whole post-publish phase regardless of stdout chunk timing. `Ctrl+C` drains the orchestrator subprocess off a worker thread so the TUI keeps ticking and shutdown events (`sigterm_emergency_write`, `worktree_removed`) render live.
 
 ## Host-owned boundaries
@@ -96,6 +98,8 @@ The agent and SIM never hold:
 - a GitHub token. The orchestrator runs `gh pr create --draft`.
 
 The opencode containers see only `OPENROUTER_API_KEY` when it is set (provider-side bounded; preflight verifies the limit exists, otherwise warns) and proxy variables supplied through CLI flags. When the key is absent, runs default to free OpenCode Zen models served by OpenCode and the container's `OPENROUTER_API_KEY` is simply not exported. Ambient environment is never inherited.
+
+`contremaitre eval promote` is a host-side operation: it reads run dirs the orchestrator wrote and writes `golden_cases/<id>/baseline.json` inside the contremaitre project tree. It never touches a container or a target repo. The dirty-tree guard refuses to write when `contremaitre_git_dirty=true` so a baseline always reflects a committed system state.
 
 Read-only enforcement is belt-and-suspenders:
 
@@ -108,6 +112,7 @@ Read-only enforcement is belt-and-suspenders:
 Live opencode runs execute preflight before worktree creation. The report is persisted to `eval/preflight_report.json`. `contremaitre doctor` runs the same checks without starting a run.
 
 Blocks:
+
 - missing target repo / base ref;
 - missing Docker daemon or target image;
 - opencode binary failures inside the image;
@@ -116,9 +121,11 @@ Blocks:
 - missing, unlimited, over-cap, or unverified OpenRouter key.
 
 Warns (does not block):
+
 - OpenRouter key limit excludes BYOK usage (acceptable for non-BYOK models).
 
 Still operational, not solved purely in code:
+
 - Provider-side OpenRouter spend limits must be set in OpenRouter.
 - Domain-restricted egress requires `--docker-network` or proxy flags.
 - Real opencode images/configs are environment-specific and must be verified on the target machine.
@@ -156,8 +163,11 @@ Every run writes:
 - `eval/flow_use.json`
 - `eval/cost_report.json`
 - `eval/preflight_report.json`
+- `run_config.json` (provenance manifest; see `manifest.py`). Contains model IDs / image / target / base ref, plus `base_sha`, `contremaitre_git_sha`, `contremaitre_git_dirty`, `docker_image_digest`, `dockerfile_sha256`, `skills_lock_sha256`, `prompt_hashes`, `python_version`, `contremaitre_version`. Additive; readers use `.get()` style access.
+- `eval/canary.json` (only when the run was driven by `contremaitre eval run`; per-run check report — see `eval.py`).
+- `golden_cases/<case_id>/baseline.json` (out-of-run, in the project tree) — written only by `contremaitre eval promote`; the n-sample cell summary that future runs are compared against.
 
-These are product artifacts. The eval-style `score.json` / weighted composite shapes some readers may expect are intentionally absent — Contremaitre uses a gate-first verdict (`READY_FOR_DRAFT_PR` / `NO_PR_*` / `FAILED_INFRA`) with an explanatory scorecard, not a single score.
+These are product artifacts. The eval-style `score.json` / weighted composite shapes some readers may expect are intentionally absent — Contremaitre uses a gate-first verdict (`READY_FOR_DRAFT_PR` / `NO_PR_`* / `FAILED_INFRA`) with an explanatory scorecard, not a single score.
 
 ## Lifecycle / cleanup
 
@@ -170,7 +180,7 @@ Per opencode-mode run, the orchestrator owns these external artifacts beyond the
 - **Local clone cache** at `~/.cache/contremaitre/<host>-<owner>-<repo>/` — auto-managed; cloned lazily on first run from `--upstream` (or `--fork`). **Kept** across runs by design. Subsequent runs reuse it and `git fetch origin <base>` for freshness. `--repo-cache` overrides the path.
 - **opencode state dirs** `opencode-{agent,sim,review}-state/` inside the run dir — kept on purpose: `_recover_text_from_sqlite` reads them when opencode silent-stalls, and they're the source of truth for forensic recovery. Not auto-pruned.
 
-If a parent is SIGKILL'd, the worktree + label-tagged containers can survive. `contremaitre cleanup` scans `docker ps -a --filter label=contremaitre.run-id` for containers whose run-dir is gone, sweeps stale `/tmp/contremaitre-*` worktrees, and prunes dangling docker images. Pass `--deps` to also remove the lockhash-keyed deps volumes, `--repos` to nuke the local clone cache (next run will full re-clone). `contremaitre image build` runs `docker image prune -f` after a successful build so rebuilds with the same tag don't accumulate `<none>:<none>` orphans.
+If a parent is SIGKILL'd, the worktree + label-tagged containers can survive. `contremaitre cleanup` scans `docker ps -a --filter label=contremaitre.run-id` for containers whose run-dir is gone, sweeps stale `/tmp/contremaitre-`* worktrees, and prunes dangling docker images. Pass `--deps` to also remove the lockhash-keyed deps volumes, `--repos` to nuke the local clone cache (next run will full re-clone). `contremaitre image build` runs `docker image prune -f` after a successful build so rebuilds with the same tag don't accumulate `<none>:<none>` orphans.
 
 ## Terminal signal
 
@@ -178,4 +188,4 @@ If a parent is SIGKILL'd, the worktree + label-tagged containers can survive. `c
 
 `.contremaitre/SETTLED_DESIGN.md` is also a Contremaitre scaffold (the skill doesn't prescribe it). It is the design handoff artifact the review pass reads (from a pre-staged copy at `/review/SETTLED_DESIGN.md` in the REVIEW container), and the source of the host's commit title + body and the PR title + body.
 
-`.contremaitre/*` is **excluded from the committed diff** via a pathspec exclude at `git add` time (`git add -- . ':(exclude).contremaitre'`). The files stay in the worktree across WORK rounds (so the WORK-phase SIM keeps reading SETTLED via `/app:ro` even after CHANGES_REQUESTED loops back), but never enter the published commit or PR — the SETTLED content is already carried by the commit body and PR description, so duplicating it in the target repo's history would just be noise. The clean-worktree hard gate filters `.contremaitre/*` accordingly via `_only_contremaitre_changes`.
+`.contremaitre/*` is **excluded from the committed diff** via a pathspec exclude at `git add` time (`git add -- . ':(exclude).contremaitre'`). The files stay in the worktree across WORK rounds (so the WORK-phase SIM keeps reading SETTLED via `/app:ro` even after CHANGES_REQUESTED loops back), but never enter the published commit or PR — the SETTLED content is already carried by the commit body and PR description, so duplicating it in the target repo's history would just be noise. The clean-worktree hard gate filters `.contremaitre/`* accordingly via `_only_contremaitre_changes`.

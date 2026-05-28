@@ -1768,11 +1768,7 @@ if _TEXTUAL_AVAILABLE:
             # pattern as `_update_cli_review_log` — file-age alone would
             # leave the pane hidden during the model's spin-up window.
             guardrails = _read_jsonl(self.paths["guardrail_events"])
-            if any(
-                g.get("event") == "opencode_actor_start"
-                and g.get("reviewer_id") == "extra"
-                for g in guardrails
-            ):
+            if any(g.get("event") == "opencode_actor_start" and g.get("reviewer_id") == "extra" for g in guardrails):
                 pane = self.query_one("#extra-reviewer-pane")
                 if pane.has_class("hidden"):
                     pane.set_class(False, "hidden")
@@ -2057,16 +2053,8 @@ if _TEXTUAL_AVAILABLE:
             # ----- Pane titles + active highlight -----
             agent_pane = self.query_one("#agent-pane")
             sim_pane = self.query_one("#sim-pane")
-            sim_starts = [
-                e
-                for e in guardrails
-                if e.get("event") == "opencode_actor_start"
-                and e.get("role") in ("sim", "review")
-                and e.get("reviewer_id") != "extra"
-            ]
-            sim_label = "REVIEWER" if (sim_starts and sim_starts[-1].get("role") == "review") else "SIM"
-            agent_pane.border_title = f"AGENT ({_short_model(self.agent_model)})"
-            sim_pane.border_title = f"{sim_label} ({_short_model(self.sim_model)})"
+            agent_pane.border_title = f"CODING AGENT ({_short_model(self.agent_model)})"
+            sim_pane.border_title = f"SIM ({_short_model(self.sim_model)})"
             active = None if terminal else self._determine_active()
             # During the cli_review phase, the post-publish reviewer owns
             # the highlight even before its first stdout chunk lands.
@@ -2080,10 +2068,7 @@ if _TEXTUAL_AVAILABLE:
             # just shifted. 3 ticks ≈ 600ms at the default 5Hz refresh,
             # long enough to register without looking glitchy. Sentinel
             # init suppresses the wink on the very first render.
-            if (
-                self._prev_active is not _UNSET_ACTIVE
-                and active != self._prev_active
-            ):
+            if self._prev_active is not _UNSET_ACTIVE and active != self._prev_active:
                 self._wink_ticks_remaining = 3
             self._prev_active = active
             agent_pane.set_class(active == "agent", "active")
@@ -2155,12 +2140,8 @@ if _TEXTUAL_AVAILABLE:
                 # off and the operator couldn't tell at a glance which pane
                 # was the focus. Use the phase signals instead: on between
                 # cli_review_started and cli_review_completed/failed.
-                cli_phase_live = cli_review_started and not (
-                    cli_review_completed or cli_review_failed
-                )
-                cli_pane.set_class(
-                    cli_phase_live or active == "cli_review", "active"
-                )
+                cli_phase_live = cli_review_started and not (cli_review_completed or cli_review_failed)
+                cli_pane.set_class(cli_phase_live or active == "cli_review", "active")
 
             # ----- Activity panel title -----
             if terminal and self._frozen_gr_age is not None:
@@ -2305,9 +2286,8 @@ if _TEXTUAL_AVAILABLE:
                     extra_review_statuses=extra_review_statuses,
                     extra_enabled=extra_enabled,
                     cli_review_status=cli_review_status,
-                    cli_review_tool=self._cli_review_tool or (
-                        self.cli_reviewer if self.cli_reviewer in ("codex", "claude") else ""
-                    ),
+                    cli_review_tool=self._cli_review_tool
+                    or (self.cli_reviewer if self.cli_reviewer in ("codex", "claude") else ""),
                     cli_review_verdict=cli_review_verdict,
                     quota_failure=quota_failure,
                 )

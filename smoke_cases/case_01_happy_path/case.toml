@@ -1,0 +1,22 @@
+# Case 01 — happy path
+#
+# Smallest possible run: fake agent writes SETTLED + implementation +
+# IMPLEMENTATION_COMPLETE in one turn, fake SIM approves on round 1, hard
+# gates pass, orchestrator publishes a Draft PR (stub publisher in fake mode).
+#
+# This case is the canary for the *baseline* orchestrator path. If this
+# breaks, something fundamental moved (state machine, hard gates, manifest
+# writer, terminal-verdict shape).
+
+id = "case_01_happy_path"
+description = "Fake agent + approving SIM, single round, draft PR published."
+
+[actor]
+mode = "fake"
+agent_scenario = "normal"
+sim_scenario = "approved"
+
+[expected]
+allowed_terminals = ["READY_FOR_DRAFT_PR"]
+must_pass_gates = ["diff_scan", "diff_hash_matched", "clean_worktree", "draft_only"]
+review_rounds_max = 1

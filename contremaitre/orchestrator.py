@@ -45,6 +45,7 @@ from .extract import extract_run_artifacts
 from .viewer import build_viewer
 from .git_utils import GitRepo
 from .jsonlog import append_jsonl, write_json
+from .manifest import build_manifest
 from .models import (
     ActorMode,
     ParsedVerdict,
@@ -905,21 +906,14 @@ class Orchestrator:
         self.paths.eval_dir.mkdir(parents=True, exist_ok=True)
         self.paths.initial_prompt.write_text(prompts.INITIAL_PROMPT, encoding="utf-8")
         self.paths.transcript.write_text(f"# Contremaitre transcript - {self.run_id}\n", encoding="utf-8")
-        # Static config snapshot — survives stats.json (which only lands
-        # at terminal) and `tui attach` reads it for header / context.
-        # Stored raw (URLs not pre-shortened) so downstream readers can
-        # pick their own display normalisation.
+        # Provenance manifest. Records models, image, target, base, and the
+        # version of the system under test (contremaitre SHA + prompt /
+        # skills-lock / dockerfile hashes). Downstream readers (`tui attach`,
+        # `viewer/index.py`, the eval canary) all read this file; new fields
+        # are additive so existing readers stay compatible.
         write_json(
             self.paths.run_dir / "run_config.json",
-            {
-                "agent_model": self.config.agent_model,
-                "sim_model": self.config.sim_model,
-                "extra_reviewer_model": self.config.extra_reviewer_model,
-                "cli_reviewer": self.config.cli_reviewer,
-                "docker_image": self.config.docker_image,
-                "target_url": self.config.upstream or self.config.fork or str(self.config.repo),
-                "base": self.config.base,
-            },
+            build_manifest(self.config),
         )
 
     def _create_worktree(self, repo: GitRepo, branch: str) -> None:

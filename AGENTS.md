@@ -22,7 +22,8 @@ dependency group (`uv sync --group dev`). The TUI requires `textual`
 - **Docker / opencode launch** — `actors.py` (`OpencodeActorRunner.build_docker_command`).
 - **Hard gates** — `evaluator.py` + `diffscan.py` + `verdicts.py`. Strict by design.
 - **Live UI** — `tui.py`. Reads JSONL artifacts; never writes.
-- **CLI subcommands** — `cli.py` (`run`, `doctor`, `fixture`, `image`, `tui`, `cleanup`).
+- **CLI subcommands** — `cli.py` (`run`, `doctor`, `fixture`, `image`, `tui`, `cleanup`, `eval`).
+- **Eval canary** — `eval.py` (cases under `golden_cases/`) + `manifest.py` (run provenance).
 
 ## Conventions
 
@@ -34,6 +35,20 @@ dependency group (`uv sync --group dev`). The TUI requires `textual`
 - **No backwards-compat layers.** Pre-1.0. Change the shape, update callers, update tests. No deprecation shims.
 - **Fix what you find.** If you spot a bug, broken test, or stale doc while doing something else, fix it in the same change. Don't punt with "not related to my edit."
 - **Run observations go in `LEARNINGS.md`** (gitignored). When a live run surfaces something non-obvious about agent/SIM behavior, the skill, or the orchestrator — append a dated entry. **Facts only**: turn-by-turn what happened, what the skill prescribed, what the prompt said. No interpretation, no fix proposals, no "this means…". Interpretation lives in the conversation that produced the fix; the notepad is forensic.
+
+## Eval canary
+
+`golden_cases/` holds **real opencode-mode** evals against pinned `(target_url, base_sha)` inputs with real prompts + codex cli_reviewer. n=3 per case. Run before merging anything that touches prompts, models, the cli_reviewer prompt, or the orchestrator's review/publish flow:
+
+```bash
+python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --n 3
+python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e
+python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e   # snapshot cell as baseline
+```
+
+`promote` refuses on a dirty contremaitre tree, on `n<3`, or if any cli_review failed to parse — commit first. The two-variable guard (EVAL_ROADMAP §5) warns when both contremaitre code and the case-pinned tuple drift in one cycle. Historical `.contremaitre/runs/` from before this canary landed are NOT valid baselines (artifact shapes have drifted across commits); only freshly-generated runs on the current commit count. See `golden_cases/README.md` for the scorecard panels + how to add a case.
+
+`smoke_cases/` holds the fake-actor integration scaffolds (state-machine canary, not eval). They are not picked up by `contremaitre eval`.
 
 ## Dependency policy
 

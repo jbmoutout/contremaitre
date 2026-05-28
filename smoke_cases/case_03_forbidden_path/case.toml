@@ -1,0 +1,26 @@
+# Case 03 — forbidden-path diff-scan failure
+#
+# Fake agent writes `.env` (a secret-file pattern that diff_scan always
+# blocks). The L0 hard gate must catch it and the orchestrator must refuse
+# to publish — no PR appears.
+#
+# Canary signal: this is a *negative* test. If diff_scan stops detecting
+# `.env`, or if a regression lets a forbidden-path run reach
+# READY_FOR_DRAFT_PR, that's a security-critical failure. The `expected`
+# block asserts the gate failed and the terminal verdict is NOT a
+# successful PR.
+
+id = "case_03_forbidden_path"
+description = "Fake agent writes a forbidden `.env`; diff_scan fails and no PR is published."
+
+[actor]
+mode = "fake"
+agent_scenario = "forbidden_path"
+sim_scenario = "approved"
+
+[expected]
+# Anything *other than* READY_FOR_DRAFT_PR is acceptable — the run must
+# not result in a published PR. The canary asserts the absence of the
+# success terminal, not a specific failure mode.
+forbidden_terminals = ["READY_FOR_DRAFT_PR"]
+must_fail_gates = ["diff_scan"]
