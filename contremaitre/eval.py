@@ -1453,7 +1453,7 @@ def cmd_check(*, project_root: Path, run_dir: Path) -> int:
     return 0 if report.ok else 1
 
 
-def cmd_compare(*, project_root: Path, case_id: str, runs_root: Path, n: int) -> int:
+def cmd_compare(*, project_root: Path, case_id: str, runs_root: Path, n: int, as_json: bool = False) -> int:
     case_dir = case_dir_for(project_root, case_id)
     case = load_case(case_dir)
     run_dirs = latest_n_runs_for_case(runs_root, case_id, n)
@@ -1465,38 +1465,35 @@ def cmd_compare(*, project_root: Path, case_id: str, runs_root: Path, n: int) ->
     baseline = load_baseline(case_dir)
     result = compare_cell(cell, baseline)
 
-    print(
-        json.dumps(
-            {
-                "cell": cell.to_dict(),
-                "compare": result.to_dict(),
-            },
-            indent=2,
-            sort_keys=True,
+    if as_json:
+        # JSON output for scripting / piping into jq. The pretty format
+        # (default) shows the same data plus the regression/drift summary.
+        print(
+            json.dumps(
+                {
+                    "cell": cell.to_dict(),
+                    "compare": result.to_dict(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
         )
-    )
+    else:
+        print(format_cell_report(cell, baseline, result))
 
+    if result.two_variable_warning:
+        print(f"contremaitre eval: WARNING — {result.two_variable_warning}", file=sys.stderr)
     if not result.has_baseline:
         print(f"contremaitre eval: no baseline for case={case_id}; run `eval promote` to create one.", file=sys.stderr)
         return 0
-    if result.two_variable_warning:
-        print(f"contremaitre eval: WARNING — {result.two_variable_warning}", file=sys.stderr)
     if result.is_regression:
         print(f"contremaitre eval: REGRESSION ({len(result.regressions)} item(s))", file=sys.stderr)
-        for r in result.regressions:
-            print(f"  - {r}", file=sys.stderr)
         return 1
-    if result.drifts:
-        print(f"contremaitre eval: drift warning ({len(result.drifts)} item(s))", file=sys.stderr)
-        for d in result.drifts:
-            print(f"  - {d}", file=sys.stderr)
     if result.improvements:
         print(
             f"contremaitre eval: improvement candidate ({len(result.improvements)} item(s)); consider `eval promote`.",
             file=sys.stderr,
         )
-        for i in result.improvements:
-            print(f"  + {i}", file=sys.stderr)
     return 0
 
 

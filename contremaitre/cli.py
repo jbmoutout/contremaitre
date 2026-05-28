@@ -344,6 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_compare.add_argument("case_id")
     eval_compare.add_argument("--n", type=int, default=3)
     eval_compare.add_argument("--runs-root", **eval_runs_root_kwargs)
+    eval_compare.add_argument("--json", action="store_true", help="Raw JSON output (default: pretty scorecard)")
     eval_compare.set_defaults(func=_eval_compare_cmd)
 
     eval_promote = eval_sub.add_parser("promote", help="Snapshot the latest n-run cell as the case baseline")
@@ -1700,6 +1701,7 @@ def _eval_compare_cmd(args: argparse.Namespace) -> int:
         case_id=args.case_id,
         runs_root=args.runs_root.resolve(),
         n=args.n,
+        as_json=args.json,
     )
 
 
