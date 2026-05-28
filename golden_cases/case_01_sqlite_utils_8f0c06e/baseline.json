@@ -112,6 +112,31 @@
     }
   },
   "headline": {
+    "agent_discipline_score": {
+      "max": 0.5,
+      "median": 0.5,
+      "min": 0.16666666666666666
+    },
+    "cli_citation_density": {
+      "max": 2.0,
+      "median": 2.0,
+      "min": 2.0
+    },
+    "cli_findings_weighted": {
+      "max": 3,
+      "median": 1.5,
+      "min": 0
+    },
+    "cli_issue_count": {
+      "max": 1,
+      "median": 0.5,
+      "min": 0
+    },
+    "cli_nit_count": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0
+    },
     "cli_review_score": {
       "max": 1.0,
       "median": 0.5,
@@ -120,6 +145,11 @@
     "cli_review_verdict_mix": {
       "LOOKS_GOOD": 1,
       "MUST_FIX": 1
+    },
+    "cli_suggestion_count": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0
     },
     "cost_usd": {
       "max": 0.0,
