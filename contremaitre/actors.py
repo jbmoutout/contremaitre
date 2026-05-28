@@ -309,6 +309,7 @@ class OpencodeActorRunner:
             timeout_seconds=timeout_seconds,
             role=role,
             baseline_text_count=pre_text_count,
+            state_dir=state_dir,
         )
         if fast_fail_reason is not None:
             append_jsonl(
@@ -518,15 +519,22 @@ def _run_detached_container(
     timeout_seconds: int,
     role: str,
     baseline_text_count: int = 0,
+    state_dir: Path | None = None,
 ) -> tuple[int, str, str | None]:
     """Start the detached container, stream its logs, wait for exit.
 
     Returns `(returncode, stderr, fast_fail_reason)`. `fast_fail_reason` is
     non-None when the container was killed early because a known
-    non-retryable error landed in `stdout_path` (currently:
-    `FreeUsageLimitError` from OpenCode Zen's free tier — opencode keeps
-    retrying internally, so without this we'd burn the full
-    `timeout_seconds` for an error that won't resolve).
+    non-retryable error was detected. Two sources are scanned:
+
+    - `stdout_path` (the raw event stream opencode writes to its stdout) —
+      catches errors that opencode chose to surface to the caller.
+    - `state_dir/log/*.log` (opencode's internal log) — catches errors
+      opencode classifies as `isRetryable: true` and silently retries
+      internally without ever surfacing them to stdout. The free-tier
+      `FreeUsageLimitError` falls into this bucket: opencode will keep
+      hammering the API until the docker timeout fires, but the retry
+      can't change the outcome (per-day/per-hour user quota).
 
     On timeout (real wall-clock timeout, not fast-fail): docker stop the
     container, then raise. Same surface the previous Popen-based runner
@@ -577,7 +585,7 @@ def _run_detached_container(
                             wait_proc.kill()
                         raise ActorError(f"{role} opencode timed out after {timeout_seconds}s")
                     fast_fail_reason = _detect_provider_quota_exhausted(
-                        stdout_path, baseline_text_count
+                        stdout_path, baseline_text_count, state_dir=state_dir
                     )
                     if fast_fail_reason is not None:
                         subprocess.run(
@@ -610,34 +618,81 @@ def _run_detached_container(
 _QUOTA_ERROR_MARKERS = ("FreeUsageLimitError",)
 
 
-def _detect_provider_quota_exhausted(path: Path, baseline_text_count: int) -> str | None:
-    """Scan error events that arrived this turn for free-tier quota markers.
+def _detect_provider_quota_exhausted(
+    path: Path, baseline_text_count: int, *, state_dir: Path | None = None
+) -> str | None:
+    """Detect free-tier quota markers in two places per call.
 
-    A single occurrence is enough to fail fast: `FreeUsageLimitError` is a
-    user-quota signal (per-day/per-hour), not a transient burst — opencode
-    marks it retryable and will keep hammering until the docker timeout,
-    but the retry can't change the outcome. Returns a short tag suitable
-    for logging, or None when no quota marker is present yet.
+    1. `path` (raw_export.jsonl) — error events opencode surfaced to stdout.
+       Gated by `baseline_text_count` so a recovered transient burst from
+       an earlier turn doesn't count: if a real text reply landed after
+       baseline, prior errors are stale.
+
+    2. `state_dir/log/*.log` (opencode's internal log; the latest file by
+       mtime is this turn's). Catches errors opencode marks `isRetryable`
+       and silently retries — `FreeUsageLimitError` is the canonical case
+       (per-day/per-hour user quota; retry can't change the outcome but
+       opencode hammers until the docker timeout fires).
+
+    Returns a short tag suitable for logging, or None.
     """
 
-    if not path.exists():
+    # Layer 1 — surfaced errors in the JSONL stream.
+    if path.exists():
+        events = _read_events(path)
+        seen_text = 0
+        for event in events:
+            if event.get("type") == "text":
+                seen_text += 1
+                if seen_text > baseline_text_count:
+                    # A real text reply landed — anything before it is stale.
+                    return None
+            if event.get("type") != "error":
+                continue
+            if seen_text < baseline_text_count:
+                continue
+            serialized = json.dumps(event, sort_keys=True)
+            for marker in _QUOTA_ERROR_MARKERS:
+                if marker in serialized:
+                    return marker
+
+    # Layer 2 — silent retries in opencode's internal log.
+    if state_dir is not None:
+        marker = _scan_opencode_log_for_marker(state_dir)
+        if marker is not None:
+            return marker
+
+    return None
+
+
+def _scan_opencode_log_for_marker(state_dir: Path) -> str | None:
+    """Scan the latest opencode log file for any quota marker.
+
+    Each opencode container invocation creates a new log file at
+    `state_dir/log/<ISO-timestamp>.log`. We pick the newest by mtime so a
+    recovered earlier turn's log doesn't generate a false positive.
+    """
+
+    log_dir = state_dir / "log"
+    if not log_dir.exists():
         return None
-    events = _read_events(path)
-    seen_text = 0
-    for event in events:
-        if event.get("type") == "text":
-            seen_text += 1
-            if seen_text > baseline_text_count:
-                # A real text reply landed — anything before it is stale.
-                return None
-        if event.get("type") != "error":
-            continue
-        if seen_text < baseline_text_count:
-            continue
-        serialized = json.dumps(event, sort_keys=True)
-        for marker in _QUOTA_ERROR_MARKERS:
-            if marker in serialized:
-                return marker
+    try:
+        candidates = [p for p in log_dir.iterdir() if p.is_file()]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    try:
+        latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return None
+    try:
+        text = latest.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for marker in _QUOTA_ERROR_MARKERS:
+        if marker in text:
+            return marker
     return None
 
 
