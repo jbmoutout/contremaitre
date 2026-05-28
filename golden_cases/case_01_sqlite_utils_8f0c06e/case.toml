@@ -1,36 +1,21 @@
 # Case 01 — sqlite-utils @ 8f0c06e
 #
-# Real opencode-mode eval. Contremaitre clones jbmoutout/sqlite-utils, branches
-# the worktree from `eval/case-1` (pinned at 8f0c06e1889513ed0f01cb57783ddf07c442d4be),
-# runs the agent through improve-codebase-architecture, and publishes a Draft PR
-# back to `eval/case-1`. The codex cli_reviewer then judges the PR.
+# Task: contremaitre runs improve-codebase-architecture against
+# jbmoutout/sqlite-utils branched from eval/case-1 (pinned at
+# 8f0c06e1889513ed0f01cb57783ddf07c442d4be), and publishes a Draft PR
+# back to that branch. The cli_reviewer then judges the PR.
 #
 # Why this target: well-known small Python lib (~5K LoC), clean architecture
 # with real seams (CLI / db wrappers / plugins), pytest test suite, public on
-# GitHub. Operationally meaningful — the verdict key reflects whether the
-# agent did something a frontier reviewer would actually approve.
+# GitHub.
 #
-# Why no [expected] envelopes: the baseline run defines the envelopes via
-# `eval promote`. v0 measures drift against that, not against hand-rolled
-# expectations.
+# Model + reviewer configuration lives in configs/<config_name>.toml. This
+# file pins only the task. Each config produces an independent cell + baseline
+# under baselines/<config_name>.json.
 
 id = "case_01_sqlite_utils_8f0c06e"
-description = "sqlite-utils @ 8f0c06e — open-ended improve-codebase-architecture run, codex review."
+description = "sqlite-utils @ 8f0c06e — open-ended improve-codebase-architecture run."
 
 target_url = "git@github.com:jbmoutout/sqlite-utils.git"
 base = "eval/case-1"
 expected_base_sha = "8f0c06e1889513ed0f01cb57783ddf07c442d4be"
-
-# Real Draft PRs are required for the codex cli_reviewer to fire
-# (orchestrator.py:735 gates `_run_cli_review` on `outcome.url`). Drafts land
-# against `eval/case-1` so they don't notify reviewers of the original repo.
-publish_mode = "gh"
-
-[models]
-agent_model = "opencode/deepseek-v4-flash-free"
-sim_model = "opencode/deepseek-v4-flash-free"
-cli_reviewer = "codex"
-# extra_reviewer_model deferred — bias mitigation comes from cross-reviewer
-# rotation (codex ↔ claude) per EVAL_ROADMAP §5, but v0 ships one reviewer to
-# keep the cell shape simple. Add a second case with cli_reviewer = "claude"
-# once the codex baseline is stable.

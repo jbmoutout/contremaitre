@@ -141,41 +141,49 @@ Pinned `(target_url, base_sha)` cases under [`golden_cases/`](golden_cases/) run
 
 ### Workflow
 
-**1. Make a single-variable change.** Edit ONE of: a prompt under `contremaitre/prompts/*.md`, the agent model, the SIM model, the cli_reviewer prompt, the docker image, or `skills-lock.json`. Never both prompts AND models in one cycle — [EVAL_ROADMAP §5](EVAL_ROADMAP.md). The two-variable guard will warn if you do.
+A case pins the *task* (target_url + base_sha + intent). A config pins the *system being evaluated* (agent/SIM/reviewer models, publish_mode). Each case has one or more configs; each config has its own baseline. The default config name is `default`.
 
-**2. Run the case n=3** (~45min on opencode-free):
+**1. Make a single-variable change.** Edit ONE of: a prompt under `contremaitre/prompts/*.md`, OR a model in `golden_cases/<case_id>/configs/<config>.toml`, OR the cli_reviewer prompt, OR the docker image, OR `skills-lock.json`. Never both prompts AND models in one cycle — [EVAL_ROADMAP §5](EVAL_ROADMAP.md).
 
-```bash
-python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --n 3
-```
-
-Watches the run live in stderr: turn counter per role, host commit, review verdict per round, hard gates, PR open, codex review verdict. TTY users see a spinner with `(Xs since last event)` between events.
-
-**3. Inspect the new cell.** No side effects — purely reads from disk:
+**2. Run the (case, config) pair n=3** (~45min on opencode-free):
 
 ```bash
-python3 -m contremaitre eval show case_01_sqlite_utils_8f0c06e
+python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --config default --n 3
 ```
 
-Prints the **headline** (7 panels that drive pass/fail) + **diagnostic** (format compliance, discipline, review depth, cli_review breakdown, diff detail, efficiency). If a baseline exists, also lists regressions / drifts / improvements.
+Live-tails turn counter per role, host commit, review verdict per round, hard gates, PR open, codex review verdict. TTY users see a spinner with `(Xs since last event)` between events.
 
-**4. Compare against the current baseline.** Exits non-zero on any regression:
+**3. Inspect the new cell.** No side effects:
 
 ```bash
-python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e
+python3 -m contremaitre eval show case_01_sqlite_utils_8f0c06e --config default
 ```
 
-Regression rules: `cli_review_score` median drops ≥ 0.30, new bad terminal appears, `READY_FOR_DRAFT_PR` count drops, format-compliance rates drop, or `cross_family_agreement_rate` drops ≥ 0.30. Drift envelopes (informational, exit 0): `cost ± 20%`, `wall ± 30%`, `files / loc / rounds ± 50%`.
+**4. Compare against the (case, config) baseline.** Exits non-zero on any regression:
 
-**5. If it's an improvement, snapshot as the new baseline.** Refuses if the contremaitre tree is dirty, if any contributing run had a parse failure, or if not all 3 runs reached a healthy terminal — commit first:
+```bash
+python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e --config default
+```
+
+Regression rules: `cli_review_score` median drops ≥ 0.30, `agent_discipline_score` drops ≥ 0.20, `cli_findings_weighted` rises ≥ 3 absolute or ≥ 50%, format-compliance rates drop, or `cross_family_agreement_rate` drops ≥ 0.30. Drift envelopes (informational): `cost ± 20%`, `wall ± 30%`, `files / loc / rounds ± 50%`.
+
+**5. If improvement, snapshot as the new baseline.** Refuses if the contremaitre tree is dirty, if any contributing run had a parse failure, or if not all 3 runs reached a healthy terminal — commit first:
 
 ```bash
 git commit -am "your single-variable change"
-python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e
-git add golden_cases/<case_id>/baseline.json && git commit -m "eval: re-baseline after ..."
+python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e --config default
+git add golden_cases/<case_id>/baselines/<config>.json && git commit -m "eval: re-baseline after ..."
 ```
 
-The baseline is now the new reference. Future `eval compare` runs diff against it.
+### Testing alternative configurations
+
+To test the same task with a different model combination (e.g. cross-family SIM), add a new config file rather than editing `default.toml` — the original baseline stays intact for cross-config comparison:
+
+```bash
+# Edit golden_cases/case_01_sqlite_utils_8f0c06e/configs/qwen_sim.toml first
+python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --config qwen_sim --n 3
+python3 -m contremaitre eval show case_01_sqlite_utils_8f0c06e --config qwen_sim
+```
 
 ---
 

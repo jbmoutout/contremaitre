@@ -330,36 +330,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Runs root (default: .contremaitre/runs)",
     )
 
-    eval_run = eval_sub.add_parser("run", help="Run one case n times (real opencode mode)")
+    eval_config_kwargs = dict(default="default", help="Config name under golden_cases/<case_id>/configs/ (default: default)")
+
+    eval_run = eval_sub.add_parser("run", help="Run one case n times with the named config")
     eval_run.add_argument("case_id")
+    eval_run.add_argument("--config", **eval_config_kwargs)
     eval_run.add_argument("--n", type=int, default=3)
     eval_run.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_run.set_defaults(func=_eval_run_cmd)
 
-    eval_check = eval_sub.add_parser("check", help="Validate one run dir against its case")
+    eval_check = eval_sub.add_parser("check", help="Validate one run dir against its (case, config)")
     eval_check.add_argument("run_dir", type=Path)
     eval_check.set_defaults(func=_eval_check_cmd)
 
-    eval_compare = eval_sub.add_parser("compare", help="Aggregate latest n runs and compare to baseline")
+    eval_compare = eval_sub.add_parser("compare", help="Aggregate latest n runs and compare to (case, config) baseline")
     eval_compare.add_argument("case_id")
+    eval_compare.add_argument("--config", **eval_config_kwargs)
     eval_compare.add_argument("--n", type=int, default=3)
     eval_compare.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_compare.add_argument("--json", action="store_true", help="Raw JSON output (default: pretty scorecard)")
     eval_compare.set_defaults(func=_eval_compare_cmd)
 
-    eval_promote = eval_sub.add_parser("promote", help="Snapshot the latest n-run cell as the case baseline")
+    eval_promote = eval_sub.add_parser("promote", help="Snapshot the latest n-run cell as the (case, config) baseline")
     eval_promote.add_argument("case_id")
+    eval_promote.add_argument("--config", **eval_config_kwargs)
     eval_promote.add_argument("--n", type=int, default=3)
     eval_promote.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_promote.set_defaults(func=_eval_promote_cmd)
 
-    eval_all = eval_sub.add_parser("all", help="Run every case n times and compare to baselines")
+    eval_all = eval_sub.add_parser("all", help="Run every case × the named config and compare to baselines")
+    eval_all.add_argument("--config", **eval_config_kwargs)
     eval_all.add_argument("--n", type=int, default=3)
     eval_all.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_all.set_defaults(func=_eval_all_cmd)
 
-    eval_show = eval_sub.add_parser("show", help="Pretty-print the scorecard for a case (no side effects)")
+    eval_show = eval_sub.add_parser("show", help="Pretty-print the scorecard for a (case, config) (no side effects)")
     eval_show.add_argument("case_id")
+    eval_show.add_argument("--config", **eval_config_kwargs)
     eval_show.add_argument("--n", type=int, default=3)
     eval_show.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_show.set_defaults(func=_eval_show_cmd)
@@ -1679,6 +1686,7 @@ def _eval_run_cmd(args: argparse.Namespace) -> int:
     return cmd_run(
         project_root=_eval_project_root(),
         case_id=args.case_id,
+        config_name=args.config,
         n=args.n,
         runs_root=args.runs_root.resolve(),
     )
@@ -1699,6 +1707,7 @@ def _eval_compare_cmd(args: argparse.Namespace) -> int:
     return cmd_compare(
         project_root=_eval_project_root(),
         case_id=args.case_id,
+        config_name=args.config,
         runs_root=args.runs_root.resolve(),
         n=args.n,
         as_json=args.json,
@@ -1711,6 +1720,7 @@ def _eval_promote_cmd(args: argparse.Namespace) -> int:
     return cmd_promote(
         project_root=_eval_project_root(),
         case_id=args.case_id,
+        config_name=args.config,
         runs_root=args.runs_root.resolve(),
         n=args.n,
     )
@@ -1721,6 +1731,7 @@ def _eval_all_cmd(args: argparse.Namespace) -> int:
 
     return cmd_all(
         project_root=_eval_project_root(),
+        config_name=args.config,
         runs_root=args.runs_root.resolve(),
         n=args.n,
     )
@@ -1732,6 +1743,7 @@ def _eval_show_cmd(args: argparse.Namespace) -> int:
     return cmd_show(
         project_root=_eval_project_root(),
         case_id=args.case_id,
+        config_name=args.config,
         runs_root=args.runs_root.resolve(),
         n=args.n,
     )

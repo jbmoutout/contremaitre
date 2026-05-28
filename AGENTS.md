@@ -38,15 +38,17 @@ dependency group (`uv sync --group dev`). The TUI requires `textual`
 
 ## Eval canary
 
-`golden_cases/` holds **real opencode-mode** evals against pinned `(target_url, base_sha)` inputs with real prompts + codex cli_reviewer. n=3 per case. Run before merging anything that touches prompts, models, the cli_reviewer prompt, or the orchestrator's review/publish flow:
+`golden_cases/<case_id>/` holds **real opencode-mode** evals. Each case pins a *task* (target_url + base_sha + intent) in `case.toml`; one or more *configurations* (agent/SIM/reviewer combos) live under `configs/<name>.toml` and produce independent baselines under `baselines/<name>.json`. n=3 per (case, config). Run before merging anything that touches prompts, models, the cli_reviewer prompt, or the orchestrator's review/publish flow:
 
 ```bash
-python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --n 3
-python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e
-python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e   # snapshot cell as baseline
+python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --config default --n 3
+python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e --config default
+python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e --config default
 ```
 
-`promote` refuses on a dirty contremaitre tree, on `n<3`, or if any cli_review failed to parse — commit first. The two-variable guard (EVAL_ROADMAP §5) warns when both contremaitre code and the case-pinned tuple drift in one cycle. Historical `.contremaitre/runs/` from before this canary landed are NOT valid baselines (artifact shapes have drifted across commits); only freshly-generated runs on the current commit count. See `golden_cases/README.md` for the scorecard panels + how to add a case.
+To test the same task with a different model combo, add a sibling config (e.g. `configs/qwen_sim.toml`) rather than editing `default.toml` — each config has its own baseline. `promote` refuses on a dirty contremaitre tree, on `n<3`, or if any cli_review failed to parse — commit first. The two-variable guard (EVAL_ROADMAP §5) warns when both contremaitre code and the case-pinned tuple drift in one cycle.
+
+When you change anything that moves `system_digest` (prompts, image, contremaitre code, models), append an entry to `docs/eval_systems.md` with the **Intent / Outcome / Learning** triple. The journal is the methodology doc — generalizable principles emerge from specific experiments, so they're recorded next to the experiment that produced them. Per-run notes (forensic, no interpretation) go in `LEARNINGS.md` (gitignored).
 
 `smoke_cases/` holds the fake-actor integration scaffolds (state-machine canary, not eval). They are not picked up by `contremaitre eval`.
 

@@ -1,0 +1,18 @@
+# qwen_sim config — cross-family SIM via OpenRouter
+#
+# Same agent and reviewer as default; SIM swapped from deepseek (same-family
+# as agent) to Qwen 3.6+ via OpenRouter (cross-family).
+#
+# Tests two hypotheses default's post-prompt regression analysis surfaced:
+#   1. Same-family agent ↔ SIM bias — default has agent=deepseek and
+#      SIM=deepseek; a different-family SIM should grill more independently.
+#   2. SIM model strength — deepseek-v4-flash-free is small; the SIM role's
+#      discipline may exceed its capability. Qwen 3.6-plus is meaningfully
+#      more capable.
+
+publish_mode = "gh"
+
+[models]
+agent_model = "opencode/deepseek-v4-flash-free"
+sim_model = "openrouter/qwen/qwen3.6-plus"
+cli_reviewer = "codex"

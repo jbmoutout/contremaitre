@@ -1,0 +1,20 @@
+# default config — same-family deepseek SIM (v0 reference)
+#
+# Original baseline configuration: agent and SIM both on opencode-zen's free
+# deepseek-v4-flash, codex as cli_reviewer. Same-family agent ↔ SIM is the
+# bias scenario per EVAL_ROADMAP §5 — kept here as the reference cell so
+# alternative configs (cross-family Qwen SIM, claude reviewer, etc.) have a
+# stable point to diff against.
+
+# Real Draft PRs are required for the codex cli_reviewer to fire
+# (orchestrator.py:735 gates `_run_cli_review` on `outcome.url`). Drafts land
+# against `eval/case-1` so they don't notify reviewers of the original repo.
+publish_mode = "gh"
+
+[models]
+agent_model = "opencode/deepseek-v4-flash-free"
+sim_model = "opencode/deepseek-v4-flash-free"
+cli_reviewer = "codex"
+# extra_reviewer_model deferred — bias mitigation via cross-family SIM
+# (qwen_sim.toml) and future claude_reviewer.toml configs, not via the
+# extra-reviewer machinery.

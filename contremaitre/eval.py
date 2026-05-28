@@ -51,7 +51,6 @@ from .manifest import manifest_digest
 
 GOLDEN_CASES_DIRNAME = "golden_cases"
 CANARY_FILENAME = "canary.json"
-BASELINE_FILENAME = "baseline.json"
 MIN_BASELINE_N = 3
 
 # Drift envelopes per EVAL_ROADMAP.md §5. Width is per-metric — loose for noisy
@@ -74,47 +73,88 @@ _DRIFT_ENVELOPES = {
 
 
 # ---------------------------------------------------------------------------
-# Case loading
+# Case + Config loading
 # ---------------------------------------------------------------------------
+#
+# Task and configuration are decoupled. A *case* pins the input
+# (target_url + base_sha + intent); a *config* pins the system being
+# evaluated against that input (agent/SIM/reviewer models, prompts,
+# publish_mode). One case can have many configs; cells and baselines are
+# keyed by (case_id, config_name) so model swaps don't destroy the task
+# trail and cross-config comparison is a first-class operation.
+#
+# Layout:
+#   golden_cases/<case_id>/
+#     case.toml                  # task fields only
+#     configs/<config_name>.toml # one per (agent, sim, reviewer) combo
+#     baselines/<config_name>.json
+#
+# Default config is just `<case_dir>/configs/default.toml`; if the operator
+# doesn't specify --config, this is what runs.
 
 
-@dataclass(frozen=True)
-class CaseModels:
-    agent_model: str
-    sim_model: str
-    cli_reviewer: str  # "codex" | "claude" | "none"
-    extra_reviewer_model: str | None = None
+DEFAULT_CONFIG_NAME = "default"
 
 
 @dataclass(frozen=True)
 class CaseDef:
+    """The task being evaluated against — immutable input pinning."""
+
     case_id: str
     description: str
     target_url: str
     base: str  # the ref name (e.g. "eval/case-1")
     expected_base_sha: str | None
-    models: CaseModels
+
+
+@dataclass(frozen=True)
+class ConfigDef:
+    """The system being evaluated — what we swap to test hypotheses."""
+
+    name: str
+    agent_model: str
+    sim_model: str
+    cli_reviewer: str  # "codex" | "claude" | "none"
+    extra_reviewer_model: str | None = None
     publish_mode: str = "gh"  # "gh" required for cli_reviewer to fire
 
 
 def load_case(case_dir: Path) -> CaseDef:
     case_toml = case_dir / "case.toml"
     raw = tomllib.loads(case_toml.read_text(encoding="utf-8"))
-    models = raw.get("models", {})
     return CaseDef(
         case_id=raw["id"],
         description=raw.get("description", ""),
         target_url=raw["target_url"],
         base=raw["base"],
         expected_base_sha=raw.get("expected_base_sha"),
-        models=CaseModels(
-            agent_model=models["agent_model"],
-            sim_model=models["sim_model"],
-            cli_reviewer=models.get("cli_reviewer", "codex"),
-            extra_reviewer_model=models.get("extra_reviewer_model"),
-        ),
+    )
+
+
+def load_config(case_dir: Path, config_name: str) -> ConfigDef:
+    config_path = case_dir / "configs" / f"{config_name}.toml"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"config {config_name!r} not found at {config_path}; "
+            f"available: {[p.stem for p in (case_dir / 'configs').glob('*.toml')] if (case_dir / 'configs').exists() else []}"
+        )
+    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    models = raw.get("models", {})
+    return ConfigDef(
+        name=config_name,
+        agent_model=models["agent_model"],
+        sim_model=models["sim_model"],
+        cli_reviewer=models.get("cli_reviewer", "codex"),
+        extra_reviewer_model=models.get("extra_reviewer_model"),
         publish_mode=raw.get("publish_mode", "gh"),
     )
+
+
+def list_configs(case_dir: Path) -> list[str]:
+    configs_dir = case_dir / "configs"
+    if not configs_dir.exists():
+        return []
+    return sorted(p.stem for p in configs_dir.glob("*.toml"))
 
 
 def list_cases(project_root: Path) -> list[Path]:
@@ -153,21 +193,22 @@ def _gh_token() -> str | None:
     return proc.stdout.strip() or None
 
 
-def run_case(case: CaseDef, *, runs_root: Path, rep_index: int = 1) -> Path:
-    """Launch one opencode run for the case. Returns the produced run dir.
+def run_case(case: CaseDef, config: ConfigDef, *, runs_root: Path, rep_index: int = 1) -> Path:
+    """Launch one opencode run for the (case, config) pair. Returns the run dir.
 
     Shells out to `python -m contremaitre run` so the entire production launch
     sequence (clone-cache, preflight, image-rebuild check, opencode-config
     synthesis, publisher) runs exactly as in a normal user invocation. The
     canary's job is to canary the production path, not a parallel one.
 
-    While the subprocess runs, this function polls `guardrail_events.jsonl`
-    in the new run dir and emits short status lines (one per phase
-    transition) to stderr — the operator sees progress without the full
-    log spam of the orchestrator's own stdout.
+    Run slug includes both case_id and config_name so cells from different
+    configs of the same case don't aggregate together silently. While the
+    subprocess runs, this function polls `guardrail_events.jsonl` in the
+    new run dir and emits short status lines (one per phase transition)
+    to stderr.
     """
 
-    slug = f"eval-{case.case_id}-{rep_index:02d}"
+    slug = f"eval-{case.case_id}-{config.name}-{rep_index:02d}"
     cmd = [
         sys.executable,
         "-m",
@@ -182,18 +223,18 @@ def run_case(case: CaseDef, *, runs_root: Path, rep_index: int = 1) -> Path:
         "--run-slug",
         slug,
         "--agent-model",
-        case.models.agent_model,
+        config.agent_model,
         "--sim-model",
-        case.models.sim_model,
+        config.sim_model,
         "--cli-reviewer",
-        case.models.cli_reviewer,
+        config.cli_reviewer,
         "--publish-mode",
-        case.publish_mode,
+        config.publish_mode,
         "--yes",
         "--allow-open-egress",
     ]
-    if case.models.extra_reviewer_model:
-        cmd += ["--extra-reviewer-model", case.models.extra_reviewer_model]
+    if config.extra_reviewer_model:
+        cmd += ["--extra-reviewer-model", config.extra_reviewer_model]
 
     env = dict(os.environ)
     token = _gh_token()
@@ -768,21 +809,23 @@ class CanaryReport:
         }
 
 
-def _input_digest(case: CaseDef, base_sha: str | None) -> str:
-    """Hash that identifies the *input* to the case.
+def _input_digest(case: CaseDef, config: ConfigDef, base_sha: str | None) -> str:
+    """Hash that identifies the *input + judge choice* for the cell.
 
-    Two runs of the same case share an input_digest iff they ran against the
-    same target+SHA. If the case author bumps `expected_base_sha`, runs from
-    before that bump are not aggregatable into the new cell.
+    Two runs share an input_digest iff they ran against the same target+SHA
+    AND used the same cli_reviewer (the judge choice — different judge =
+    different measurement, not different system). If the case author bumps
+    `expected_base_sha`, runs from before that bump are not aggregatable
+    into the new cell.
     """
 
     import hashlib
 
-    parts = [case.target_url, case.base, base_sha or "", case.models.cli_reviewer]
+    parts = [case.target_url, case.base, base_sha or "", config.cli_reviewer]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
-def check_run(case: CaseDef, run_dir: Path) -> CanaryReport:
+def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
     missing: list[str] = [rel for rel in _REQUIRED_ARTIFACTS if not (run_dir / rel).exists()]
 
     run_config = _read_json_safe(run_dir / "run_config.json") or {}
@@ -800,7 +843,7 @@ def check_run(case: CaseDef, run_dir: Path) -> CanaryReport:
             return v["value"]
         return v
 
-    cli = _parse_cli_review(run_dir, case.models.cli_reviewer)
+    cli = _parse_cli_review(run_dir, config.cli_reviewer)
     diff = _diff_stats(run_dir)
     depth = _review_depth(run_dir)
 
@@ -888,7 +931,7 @@ def check_run(case: CaseDef, run_dir: Path) -> CanaryReport:
 
     base_sha = run_config.get("base_sha")
     system_digest = manifest_digest(run_config) if run_config else ""
-    input_digest = _input_digest(case, base_sha)
+    input_digest = _input_digest(case, config, base_sha)
 
     # `ok` distinguishes "system behaved correctly" from "system broke". A
     # NO_PR_NEEDS_HUMAN or NO_PR_CHANGES_REQUESTED run is a *valid eval
@@ -1103,14 +1146,20 @@ def cell_from_dict(d: dict[str, Any]) -> Cell:
 # ---------------------------------------------------------------------------
 
 
-def latest_n_runs_for_case(runs_root: Path, case_id: str, n: int) -> list[Path]:
-    """Most recent n eval runs for a case, newest last."""
+def latest_n_runs_for_case(runs_root: Path, case_id: str, config_name: str, n: int) -> list[Path]:
+    """Most recent n eval runs for a (case, config) pair, newest last.
+
+    Slug format: `<timestamp>-eval-<case_id>-<config>-<rep>`. Both
+    case_id and config_name must be underscore-only (no dashes) so the
+    dash-separated parse is unambiguous.
+    """
 
     if not runs_root.exists():
         return []
-    needle = f"-eval-{case_id}-"
+
+    pattern = re.compile(rf"-eval-{re.escape(case_id)}-{re.escape(config_name)}-\d+$")
     candidates = sorted(
-        (p for p in runs_root.iterdir() if p.is_dir() and needle in p.name),
+        (p for p in runs_root.iterdir() if p.is_dir() and pattern.search(p.name)),
         key=lambda p: p.name,
     )
     return candidates[-n:] if len(candidates) >= n else candidates
@@ -1342,10 +1391,15 @@ class PromoteError(RuntimeError):
     pass
 
 
-def promote_baseline(case_dir: Path, cell: Cell) -> Path:
-    """Snapshot a cell as the case baseline.
+def _baseline_path(case_dir: Path, config_name: str) -> Path:
+    return case_dir / "baselines" / f"{config_name}.json"
 
-    Refuses to promote when:
+
+def promote_baseline(case_dir: Path, config_name: str, cell: Cell) -> Path:
+    """Snapshot a cell as the (case, config) baseline.
+
+    Writes to `<case_dir>/baselines/<config_name>.json` so each config
+    has its own pinned reference. Refuses to promote when:
     - n < MIN_BASELINE_N (single sample below floor).
     - Any contributing run had a dirty contremaitre tree.
     - Any contributing run had `cli_review_parse_ok=false` — a baseline
@@ -1374,13 +1428,14 @@ def promote_baseline(case_dir: Path, cell: Cell) -> Path:
             "normalize to the bug."
         )
 
-    out = case_dir / BASELINE_FILENAME
+    out = _baseline_path(case_dir, config_name)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(cell.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return out
 
 
-def load_baseline(case_dir: Path) -> Cell | None:
-    path = case_dir / BASELINE_FILENAME
+def load_baseline(case_dir: Path, config_name: str) -> Cell | None:
+    path = _baseline_path(case_dir, config_name)
     if not path.exists():
         return None
     return cell_from_dict(json.loads(path.read_text(encoding="utf-8")))
@@ -1391,16 +1446,21 @@ def load_baseline(case_dir: Path) -> Cell | None:
 # ---------------------------------------------------------------------------
 
 
-def cmd_run(*, project_root: Path, case_id: str, n: int, runs_root: Path) -> int:
-    case = load_case(case_dir_for(project_root, case_id))
-    print(f"contremaitre eval: running case={case.case_id} n={n}", file=sys.stderr)
+def cmd_run(*, project_root: Path, case_id: str, config_name: str, n: int, runs_root: Path) -> int:
+    case_dir = case_dir_for(project_root, case_id)
+    case = load_case(case_dir)
+    config = load_config(case_dir, config_name)
+    print(
+        f"contremaitre eval: running case={case.case_id} config={config_name} n={n}",
+        file=sys.stderr,
+    )
     for i in range(n):
         try:
-            run_dir = run_case(case, runs_root=runs_root, rep_index=i + 1)
+            run_dir = run_case(case, config, runs_root=runs_root, rep_index=i + 1)
         except RuntimeError as exc:
             print(f"  [{i+1}/{n}] FAILED to launch: {exc}", file=sys.stderr)
             return 1
-        report = check_run(case, run_dir)
+        report = check_run(case, config, run_dir)
         write_canary_report(report, run_dir)
         status = "OK" if report.ok else "FAIL"
         h = report.headline
@@ -1425,49 +1485,70 @@ def cmd_run(*, project_root: Path, case_id: str, n: int, runs_root: Path) -> int
             )
             print(
                 f"  Options: (a) wait for the quota reset, "
-                f"(b) edit golden_cases/{case_id}/case.toml to switch to a "
-                f"paid model, (c) re-run later with `eval run {case_id} --n {remaining}` "
-                f"if a few completed runs are usable for ad-hoc inspection.",
+                f"(b) edit golden_cases/{case_id}/configs/{config_name}.toml to switch to a "
+                f"paid model, (c) re-run later with `eval run {case_id} --config {config_name} --n {remaining}`.",
                 file=sys.stderr,
             )
             return 1
     return 0
 
 
-def cmd_check(*, project_root: Path, run_dir: Path) -> int:
-    # case_id is encoded in the run-dir name (`<ts>-eval-<case_id>-<rep>`).
-    parts = run_dir.name.split("-eval-", 1)
+def _infer_case_and_config(run_dir_name: str, project_root: Path) -> tuple[str, str] | None:
+    """Recover (case_id, config_name) from a run dir name.
+
+    Slug: `<ts>-eval-<case_id>-<config>-<NN>` → returns (case_id, config).
+    Disambiguates by matching against known case dirs (longest case_id
+    prefix wins) since both case_id and config_name can contain underscores.
+    """
+
+    parts = run_dir_name.split("-eval-", 1)
     if len(parts) != 2:
-        print(f"contremaitre eval: cannot infer case from run dir name {run_dir.name}", file=sys.stderr)
-        return 2
+        return None
     tail = parts[1]
-    if len(tail) >= 3 and tail[-3] == "-" and tail[-2:].isdigit():
-        case_id = tail[:-3]
-    else:
-        case_id = tail
-    case = load_case(case_dir_for(project_root, case_id))
-    report = check_run(case, run_dir)
+    if not (len(tail) >= 3 and tail[-3] == "-" and tail[-2:].isdigit()):
+        return None
+    tail_no_rep = tail[:-3]
+    for case_dir in list_cases(project_root):
+        cid = case_dir.name
+        if tail_no_rep.startswith(cid + "-"):
+            config = tail_no_rep[len(cid) + 1:]
+            return cid, config
+    return None
+
+
+def cmd_check(*, project_root: Path, run_dir: Path) -> int:
+    inferred = _infer_case_and_config(run_dir.name, project_root)
+    if inferred is None:
+        print(f"contremaitre eval: cannot infer (case, config) from run dir name {run_dir.name}", file=sys.stderr)
+        return 2
+    case_id, config_name = inferred
+    case_dir = case_dir_for(project_root, case_id)
+    case = load_case(case_dir)
+    config = load_config(case_dir, config_name)
+    report = check_run(case, config, run_dir)
     out = write_canary_report(report, run_dir)
     print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     print(f"contremaitre eval: wrote {out}", file=sys.stderr)
     return 0 if report.ok else 1
 
 
-def cmd_compare(*, project_root: Path, case_id: str, runs_root: Path, n: int, as_json: bool = False) -> int:
+def cmd_compare(*, project_root: Path, case_id: str, config_name: str, runs_root: Path, n: int, as_json: bool = False) -> int:
     case_dir = case_dir_for(project_root, case_id)
     case = load_case(case_dir)
-    run_dirs = latest_n_runs_for_case(runs_root, case_id, n)
+    config = load_config(case_dir, config_name)
+    run_dirs = latest_n_runs_for_case(runs_root, case_id, config_name, n)
     if len(run_dirs) < n:
-        print(f"contremaitre eval: only {len(run_dirs)} runs for case={case_id} (need {n})", file=sys.stderr)
+        print(
+            f"contremaitre eval: only {len(run_dirs)} runs for case={case_id} config={config_name} (need {n})",
+            file=sys.stderr,
+        )
         return 2
-    reports = [check_run(case, rd) for rd in run_dirs]
+    reports = [check_run(case, config, rd) for rd in run_dirs]
     cell = aggregate_cell(reports)
-    baseline = load_baseline(case_dir)
+    baseline = load_baseline(case_dir, config_name)
     result = compare_cell(cell, baseline)
 
     if as_json:
-        # JSON output for scripting / piping into jq. The pretty format
-        # (default) shows the same data plus the regression/drift summary.
         print(
             json.dumps(
                 {
@@ -1479,12 +1560,16 @@ def cmd_compare(*, project_root: Path, case_id: str, runs_root: Path, n: int, as
             )
         )
     else:
-        print(format_cell_report(cell, baseline, result))
+        print(format_cell_report(cell, baseline, result, config_name=config_name))
 
     if result.two_variable_warning:
         print(f"contremaitre eval: WARNING — {result.two_variable_warning}", file=sys.stderr)
     if not result.has_baseline:
-        print(f"contremaitre eval: no baseline for case={case_id}; run `eval promote` to create one.", file=sys.stderr)
+        print(
+            f"contremaitre eval: no baseline for case={case_id} config={config_name}; "
+            f"run `eval promote {case_id} --config {config_name}` to create one.",
+            file=sys.stderr,
+        )
         return 0
     if result.is_regression:
         print(f"contremaitre eval: REGRESSION ({len(result.regressions)} item(s))", file=sys.stderr)
@@ -1497,17 +1582,21 @@ def cmd_compare(*, project_root: Path, case_id: str, runs_root: Path, n: int, as
     return 0
 
 
-def cmd_promote(*, project_root: Path, case_id: str, runs_root: Path, n: int) -> int:
+def cmd_promote(*, project_root: Path, case_id: str, config_name: str, runs_root: Path, n: int) -> int:
     case_dir = case_dir_for(project_root, case_id)
     case = load_case(case_dir)
-    run_dirs = latest_n_runs_for_case(runs_root, case_id, n)
+    config = load_config(case_dir, config_name)
+    run_dirs = latest_n_runs_for_case(runs_root, case_id, config_name, n)
     if len(run_dirs) < n:
-        print(f"contremaitre eval: only {len(run_dirs)} runs for case={case_id} (need {n})", file=sys.stderr)
+        print(
+            f"contremaitre eval: only {len(run_dirs)} runs for case={case_id} config={config_name} (need {n})",
+            file=sys.stderr,
+        )
         return 2
-    reports = [check_run(case, rd) for rd in run_dirs]
+    reports = [check_run(case, config, rd) for rd in run_dirs]
     cell = aggregate_cell(reports)
     try:
-        out = promote_baseline(case_dir, cell)
+        out = promote_baseline(case_dir, config_name, cell)
     except PromoteError as exc:
         print(f"contremaitre eval: {exc}", file=sys.stderr)
         return 1
@@ -1515,7 +1604,14 @@ def cmd_promote(*, project_root: Path, case_id: str, runs_root: Path, n: int) ->
     return 0
 
 
-def cmd_all(*, project_root: Path, runs_root: Path, n: int) -> int:
+def cmd_all(*, project_root: Path, config_name: str, runs_root: Path, n: int) -> int:
+    """Run every case × the named config. Each case must have a matching config file.
+
+    `eval all` is a per-config sweep: one config across many tasks. Different
+    configs of the same case are tested via separate `eval all --config X`
+    invocations.
+    """
+
     cases = list_cases(project_root)
     if not cases:
         print(f"contremaitre eval: no cases under {project_root / GOLDEN_CASES_DIRNAME}", file=sys.stderr)
@@ -1523,26 +1619,31 @@ def cmd_all(*, project_root: Path, runs_root: Path, n: int) -> int:
     any_regression = False
     for case_dir in cases:
         case = load_case(case_dir)
+        if not (case_dir / "configs" / f"{config_name}.toml").exists():
+            print(
+                f"contremaitre eval: skipping case={case.case_id} — no config "
+                f"named {config_name!r} (available: {list_configs(case_dir)})",
+                file=sys.stderr,
+            )
+            continue
         rc_run = cmd_run(
             project_root=project_root,
             case_id=case.case_id,
+            config_name=config_name,
             n=n,
             runs_root=runs_root,
         )
         if rc_run != 0:
-            # Run-stage failure (launch error or quota exhaustion). The batch
-            # can't produce a meaningful comparison for this case, and quota
-            # exhaustion on case N means case N+1 would hit the same limit.
-            # Fail fast instead of grinding on.
             print(
                 f"contremaitre eval: stopping `eval all` after case={case.case_id} "
-                f"failed at run-stage (rc={rc_run})",
+                f"config={config_name} failed at run-stage (rc={rc_run})",
                 file=sys.stderr,
             )
             return 1
         rc_cmp = cmd_compare(
             project_root=project_root,
             case_id=case.case_id,
+            config_name=config_name,
             runs_root=runs_root,
             n=n,
         )
@@ -1597,14 +1698,15 @@ def _short(digest: str | None) -> str:
     return digest[:12]
 
 
-def format_cell_report(cell: Cell, baseline: Cell | None, compare: CompareResult) -> str:
+def format_cell_report(cell: Cell, baseline: Cell | None, compare: CompareResult, *, config_name: str | None = None) -> str:
     """Compact human-readable scorecard. ~40 lines."""
 
     h = cell.headline
     d = cell.diagnostic
     lines: list[str] = []
 
-    lines.append(f"Case: {cell.case_id}   n={cell.n}")
+    config_label = f"   config={config_name}" if config_name else ""
+    lines.append(f"Case: {cell.case_id}{config_label}   n={cell.n}")
     lines.append(
         f"  system_digest: {_short(cell.system_digests[0] if cell.system_digests else None)}"
         f"   input_digest: {_short(cell.input_digests[0] if cell.input_digests else None)}"
@@ -1700,22 +1802,26 @@ def format_cell_report(cell: Cell, baseline: Cell | None, compare: CompareResult
     return "\n".join(lines)
 
 
-def cmd_show(*, project_root: Path, case_id: str, runs_root: Path, n: int) -> int:
+def cmd_show(*, project_root: Path, case_id: str, config_name: str, runs_root: Path, n: int) -> int:
     case_dir = case_dir_for(project_root, case_id)
     case = load_case(case_dir)
-    run_dirs = latest_n_runs_for_case(runs_root, case_id, n)
+    config = load_config(case_dir, config_name)
+    run_dirs = latest_n_runs_for_case(runs_root, case_id, config_name, n)
     if not run_dirs:
-        print(f"contremaitre eval: no runs found for case={case_id}", file=sys.stderr)
+        print(
+            f"contremaitre eval: no runs found for case={case_id} config={config_name}",
+            file=sys.stderr,
+        )
         return 2
     if len(run_dirs) < n:
         print(
-            f"contremaitre eval: only {len(run_dirs)} runs for case={case_id} "
+            f"contremaitre eval: only {len(run_dirs)} runs for case={case_id} config={config_name} "
             f"(asked for n={n}); rendering what we have",
             file=sys.stderr,
         )
-    reports = [check_run(case, rd) for rd in run_dirs]
+    reports = [check_run(case, config, rd) for rd in run_dirs]
     cell = aggregate_cell(reports)
-    baseline = load_baseline(case_dir)
+    baseline = load_baseline(case_dir, config_name)
     compare = compare_cell(cell, baseline)
-    print(format_cell_report(cell, baseline, compare))
+    print(format_cell_report(cell, baseline, compare, config_name=config_name))
     return 0
