@@ -166,12 +166,22 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
     """Hash of the fields that define "the system under test".
 
     Used by the canary to decide whether two runs are comparable: same
-    digest → same code/prompts/skills/image → results can be aggregated
-    into one cell. Different digest → different system → fresh baseline.
+    digest → same code/prompts/skills/image/models → results can be
+    aggregated into one cell. Different digest → different system → fresh
+    baseline (or treat the comparison as an experimental delta).
 
-    Deliberately excludes `agent_model` / `sim_model` (those are *parameters*
-    of the eval, not the system under test) and target-side fields like
-    `base_sha` / `target_url` (those change per case, not per system).
+    Includes the model identifiers — `agent_model`, `sim_model`, and
+    `extra_reviewer_model`. These ARE part of the system under test: a
+    Qwen SIM and a deepseek SIM are different systems being evaluated,
+    not different inputs to the same system. The canary's two-variable
+    guard relies on this to catch "you bumped both prompt and model in
+    one cycle" attribution-breaking changes.
+
+    `cli_reviewer` lives in `input_digest` instead (in eval.py) — it's
+    treated as the judge choice, not the SUT.
+
+    Target-side fields (`base_sha`, `target_url`) stay out; those vary
+    per case, not per system.
     """
 
     parts = [
@@ -179,6 +189,9 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
         manifest.get("contremaitre_git_dirty"),
         manifest.get("dockerfile_sha256") or "",
         manifest.get("skills_lock_sha256") or "",
+        manifest.get("agent_model") or "",
+        manifest.get("sim_model") or "",
+        manifest.get("extra_reviewer_model") or "",
     ]
     for name, digest in sorted((manifest.get("prompt_hashes") or {}).items()):
         parts.append(f"{name}:{digest}")
