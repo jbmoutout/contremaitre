@@ -1,0 +1,171 @@
+{
+  "all_runs_ok": true,
+  "any_run_dirty": false,
+  "base_shas": [
+    "8f0c06e1889513ed0f01cb57783ddf07c442d4be",
+    "8f0c06e1889513ed0f01cb57783ddf07c442d4be",
+    "8f0c06e1889513ed0f01cb57783ddf07c442d4be"
+  ],
+  "case_id": "case_01_sqlite_utils_8f0c06e",
+  "diagnostic": {
+    "cli_review_breakdown": {
+      "citation_count": {
+        "max": 2,
+        "median": 1.0,
+        "min": 0
+      },
+      "finding_count": {
+        "max": 1,
+        "median": 0.5,
+        "min": 0
+      }
+    },
+    "diff_detail": {
+      "loc_added": {
+        "max": 218,
+        "median": 218,
+        "min": 188
+      },
+      "loc_deleted": {
+        "max": 228,
+        "median": 193,
+        "min": 25
+      }
+    },
+    "discipline": {
+      "context_pollution_events": {
+        "max": 26,
+        "median": 17,
+        "min": 17
+      },
+      "exploration_convergence_mix": {
+        "mixed": 3
+      },
+      "runtime_install_required_rate": 1.0,
+      "self_verified_rate": 0.6666666666666666,
+      "settled_before_code_rate": 1.0,
+      "sim_useful_call_ratio": {
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0
+      },
+      "time_to_settled_design_seconds": {
+        "max": 218.9,
+        "median": 200.6,
+        "min": 198.5
+      },
+      "tokens_to_settled_design": {
+        "max": 1311484,
+        "median": 1141909,
+        "min": 1053077
+      }
+    },
+    "efficiency": {
+      "agent_tool_call_count": {
+        "max": 72,
+        "median": 59,
+        "min": 58
+      },
+      "sim_tool_call_count": {
+        "max": 81,
+        "median": 40,
+        "min": 18
+      },
+      "turns": {
+        "max": 11,
+        "median": 8,
+        "min": 8
+      }
+    },
+    "format_compliance": {
+      "cli_review_parse_ok_rate": 1.0,
+      "hard_gates_passed_rate": 0.6666666666666666,
+      "implementation_complete_written_rate": 1.0,
+      "sim_verdicts_parse_ok_rate": 1.0
+    },
+    "review_depth": {
+      "extra_reviewer_confidence": {
+        "max": null,
+        "median": null,
+        "min": null
+      },
+      "process_reliability": {
+        "max": 1.0,
+        "median": 1.0,
+        "min": 0.5
+      },
+      "sim_review_confidence": {
+        "max": 1.0,
+        "median": 0.95,
+        "min": 0.82
+      },
+      "total_checks_performed": {
+        "max": 23,
+        "median": 11,
+        "min": 8
+      },
+      "total_required_changes": {
+        "max": 3,
+        "median": 3,
+        "min": 0
+      }
+    }
+  },
+  "headline": {
+    "cli_review_score": {
+      "max": 1.0,
+      "median": 0.5,
+      "min": 0.0
+    },
+    "cli_review_verdict_mix": {
+      "LOOKS_GOOD": 1,
+      "MUST_FIX": 1
+    },
+    "cost_usd": {
+      "max": 0.0,
+      "median": 0.0,
+      "min": 0.0
+    },
+    "cross_family_agreement_rate": null,
+    "files_changed": {
+      "max": 7,
+      "median": 3,
+      "min": 1
+    },
+    "loc_net_delta": {
+      "max": 163,
+      "median": 25,
+      "min": -10
+    },
+    "review_rounds": {
+      "max": 2,
+      "median": 1,
+      "min": 1
+    },
+    "terminal_score": {
+      "max": 1.0,
+      "median": 1.0,
+      "min": 0.0
+    },
+    "terminal_verdict_mix": {
+      "NO_PR_NEEDS_HUMAN": 1,
+      "READY_FOR_DRAFT_PR": 2
+    },
+    "wall_seconds": {
+      "max": 1034.805,
+      "median": 580.536,
+      "min": 485.049
+    }
+  },
+  "input_digests": [
+    "35f7f35339bcd42eb2ede3eabc47934743d3a94aff8afbdf393db8488fd10b60",
+    "35f7f35339bcd42eb2ede3eabc47934743d3a94aff8afbdf393db8488fd10b60",
+    "35f7f35339bcd42eb2ede3eabc47934743d3a94aff8afbdf393db8488fd10b60"
+  ],
+  "n": 3,
+  "system_digests": [
+    "bf4c5bb78ff76de57e6350cb27a0e061d0c0b610d818564bb51f13168b06de38",
+    "bf4c5bb78ff76de57e6350cb27a0e061d0c0b610d818564bb51f13168b06de38",
+    "bf4c5bb78ff76de57e6350cb27a0e061d0c0b610d818564bb51f13168b06de38"
+  ]
+}
