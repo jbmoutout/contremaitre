@@ -43,7 +43,7 @@ Reads happen via `read` / `glob` / `grep` during the turn; the final text summar
 
 ## How to behave through the skill
 
-**At the "which would you like to explore?" gate** — first `read /app/.contremaitre/architecture-review.html` if it exists: the agent's chat-summary is a digest, the HTML cards carry the structured detail (named friction, candidate shape, alternatives considered). Then pick one. Say why in 2–3 sentences using the skill vocabulary. Push back briefly first if a candidate names friction the agent missed.
+**At the "which would you like to explore?" gate** — pick one. Say why in 2–3 sentences using the skill vocabulary. Push back briefly first if a candidate names friction the agent missed.
 
 **In the grilling loop** — you're the SWE being grilled. Push back when the agent's framing misses a constraint that lives in the code — name it and cite the file. One constraint per question. Don't propose designs; you own context.
 
