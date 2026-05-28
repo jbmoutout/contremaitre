@@ -37,6 +37,12 @@ class TerminalVerdict(str, Enum):
     NO_PR_CHANGES_REQUESTED = "NO_PR_CHANGES_REQUESTED"
     NO_PR_NEEDS_HUMAN = "NO_PR_NEEDS_HUMAN"
     FAILED_INFRA = "FAILED_INFRA"
+    # Distinct from FAILED_INFRA: the run reached the provider's free-tier
+    # quota (e.g. opencode-zen `FreeUsageLimitError`). Not an infra problem
+    # the operator can fix locally — wait for the per-day/per-hour reset or
+    # switch to a paid model. Eval canary aborts the n=3 batch on this
+    # verdict since the remaining runs would hit the same limit.
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
 
 
 class ActorMode(str, Enum):

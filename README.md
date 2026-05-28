@@ -139,13 +139,47 @@ The check runs in a sidecar container that mounts the same worktree + lockhash-k
 
 Pinned `(target_url, base_sha)` cases under [`golden_cases/`](golden_cases/) run the **real opencode actor** with real prompts, real models, and the codex cli_reviewer. Each case runs n=3 times; the cell summary (verdict-key score, terminal mix, LoC + files-changed, review rounds, cost, wall time, cross-family agreement) is compared against a per-case `baseline.json`. Manual trigger.
 
+### Workflow
+
+**1. Make a single-variable change.** Edit ONE of: a prompt under `contremaitre/prompts/*.md`, the agent model, the SIM model, the cli_reviewer prompt, the docker image, or `skills-lock.json`. Never both prompts AND models in one cycle — [EVAL_ROADMAP §5](EVAL_ROADMAP.md). The two-variable guard will warn if you do.
+
+**2. Run the case n=3** (~45min on opencode-free):
+
 ```bash
 python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --n 3
-python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e
-python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e
 ```
 
-A canary cycle on sqlite-utils with the deepseek-v4-flash-free models takes ~3 × ~15min on opencode. `eval compare` exits non-zero on any headline-panel regression (drop ≥ 0.30 on `cli_review_score`, terminal-mix worsened, format-compliance dropped, etc.). `eval promote` refuses to baseline a dirty tree or a cell where any cli_review failed to parse. Two-variable guard fires when both contremaitre's `system_digest` and the case's `input_digest` differ from baseline (don't bump prompts AND models in one go — [EVAL_ROADMAP §5](EVAL_ROADMAP.md)). See [`golden_cases/README.md`](golden_cases/README.md) to add a case. L2/L3 LLM judges remain `PENDING` per [EVAL_ROADMAP §6](EVAL_ROADMAP.md).
+Watches the run live in stderr: turn counter per role, host commit, review verdict per round, hard gates, PR open, codex review verdict. TTY users see a spinner with `(Xs since last event)` between events.
+
+**3. Inspect the new cell.** No side effects — purely reads from disk:
+
+```bash
+python3 -m contremaitre eval show case_01_sqlite_utils_8f0c06e
+```
+
+Prints the **headline** (7 panels that drive pass/fail) + **diagnostic** (format compliance, discipline, review depth, cli_review breakdown, diff detail, efficiency). If a baseline exists, also lists regressions / drifts / improvements.
+
+**4. Compare against the current baseline.** Exits non-zero on any regression:
+
+```bash
+python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e
+```
+
+Regression rules: `cli_review_score` median drops ≥ 0.30, new bad terminal appears, `READY_FOR_DRAFT_PR` count drops, format-compliance rates drop, or `cross_family_agreement_rate` drops ≥ 0.30. Drift envelopes (informational, exit 0): `cost ± 20%`, `wall ± 30%`, `files / loc / rounds ± 50%`.
+
+**5. If it's an improvement, snapshot as the new baseline.** Refuses if the contremaitre tree is dirty, if any contributing run had a parse failure, or if not all 3 runs reached a healthy terminal — commit first:
+
+```bash
+git commit -am "your single-variable change"
+python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e
+git add golden_cases/<case_id>/baseline.json && git commit -m "eval: re-baseline after ..."
+```
+
+The baseline is now the new reference. Future `eval compare` runs diff against it.
+
+---
+
+`eval promote` is intentionally strict: a baseline captured against a dirty tree or a flaky reviewer would silently normalize regressions away. See [`golden_cases/README.md`](golden_cases/README.md) to add a case. L2/L3 LLM judges remain `PENDING` per [EVAL_ROADMAP §6](EVAL_ROADMAP.md).
 
 Fake-actor scaffolds under [`smoke_cases/`](smoke_cases/) are integration tests of the state machine, not evals. They are not picked up by `contremaitre eval`.
 

@@ -1245,6 +1245,26 @@ def cmd_run(*, project_root: Path, case_id: str, n: int, runs_root: Path) -> int
             f"dir={run_dir}",
             file=sys.stderr,
         )
+        # Abort the batch on provider quota — the remaining runs would hit
+        # the same per-day/per-hour limit. Per EVAL_ROADMAP §5, surface a
+        # clear actionable error instead of grinding through n-1 wasted
+        # iterations.
+        if h.get("terminal_verdict") == "QUOTA_EXHAUSTED":
+            remaining = n - i - 1
+            print(
+                f"\ncontremaitre eval: ABORTED after {i + 1}/{n} runs — "
+                f"provider quota exhausted. The remaining {remaining} run(s) "
+                f"would hit the same limit on the same model.",
+                file=sys.stderr,
+            )
+            print(
+                f"  Options: (a) wait for the quota reset, "
+                f"(b) edit golden_cases/{case_id}/case.toml to switch to a "
+                f"paid model, (c) re-run later with `eval run {case_id} --n {remaining}` "
+                f"if a few completed runs are usable for ad-hoc inspection.",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 
@@ -1347,8 +1367,16 @@ def cmd_all(*, project_root: Path, runs_root: Path, n: int) -> int:
             runs_root=runs_root,
         )
         if rc_run != 0:
-            any_regression = True
-            continue
+            # Run-stage failure (launch error or quota exhaustion). The batch
+            # can't produce a meaningful comparison for this case, and quota
+            # exhaustion on case N means case N+1 would hit the same limit.
+            # Fail fast instead of grinding on.
+            print(
+                f"contremaitre eval: stopping `eval all` after case={case.case_id} "
+                f"failed at run-stage (rc={rc_run})",
+                file=sys.stderr,
+            )
+            return 1
         rc_cmp = cmd_compare(
             project_root=project_root,
             case_id=case.case_id,

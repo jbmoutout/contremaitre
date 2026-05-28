@@ -166,22 +166,33 @@ class Orchestrator:
         except Exception as exc:
             failure_kind = getattr(exc, "kind", None) if isinstance(exc, ActorError) else None
             self._emit(events.INFRA_FAILURE, error=repr(exc), kind=failure_kind)
+            # Provider free-tier quota (opencode-zen `FreeUsageLimitError`) is
+            # categorically not "infra" — the operator can't fix Docker /
+            # network / etc. to make it work; they have to wait for the quota
+            # reset or switch to a paid model. Distinct verdict so downstream
+            # readers (TUI, eval canary) can act on it.
+            if failure_kind == events.PROVIDER_QUOTA_EXHAUSTED:
+                verdict = TerminalVerdict.QUOTA_EXHAUSTED
+                reason_prefix = "QUOTA_EXHAUSTED"
+            else:
+                verdict = TerminalVerdict.FAILED_INFRA
+                reason_prefix = "FAILED_INFRA"
             record_publication(
                 self.paths,
                 PublishOutcome(
                     kind=PublishOutcomeKind.NO_PR,
                     base=self.config.base,
                     publish_mode=self.config.publish_mode,
-                    reason=f"FAILED_INFRA: {exc}",
+                    reason=f"{reason_prefix}: {exc}",
                     branch=branch,
                     dry_run=True,
                 ),
             )
-            self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, str(exc))
+            self._write_final_stats(State.FAILED, verdict, str(exc))
             return RunResult(
                 run_id=self.run_id,
                 terminal_state=State.FAILED,
-                verdict=TerminalVerdict.FAILED_INFRA,
+                verdict=verdict,
                 run_dir=self.paths.run_dir,
                 worktree=self.paths.worktree,
                 pr_created=False,
