@@ -1,0 +1,24 @@
+# sonnet_agent config — stronger cross-family AGENT, cheap deepseek SIM
+#
+# Same target + reviewer as default; agent swapped from
+# `opencode/deepseek-v4-flash-free` to `openrouter/anthropic/claude-sonnet-4.6`.
+# SIM stays on deepseek-free (the cheap same-family-with-prior-baseline option).
+#
+# Tests the agent-capacity hypothesis surfaced by sys 74744be6 (the qwen_sim
+# cell). That cell saw process metrics decline + LLM judge regress despite
+# the SIM doing more work — one plausible explanation was "the agent is the
+# bottleneck, not the SIM." This config isolates that variable: if outcomes
+# recover with a stronger agent and a weak SIM, agent capacity was indeed
+# the limit; if they don't, something else (prompt structure, dynamic
+# between roles, ...) is driving the failures.
+#
+# Cost note: claude-sonnet-4.6 via OpenRouter is paid (~$1–3 per run on
+# this case). Hits the OpenRouter daily-limit cap quickly; n=3 may not
+# always complete in one budget window.
+
+publish_mode = "gh"
+
+[models]
+agent_model = "openrouter/anthropic/claude-sonnet-4.6"
+sim_model = "opencode/deepseek-v4-flash-free"
+cli_reviewer = "codex"

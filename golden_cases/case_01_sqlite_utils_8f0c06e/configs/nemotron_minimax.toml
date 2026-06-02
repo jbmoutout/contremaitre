@@ -1,0 +1,27 @@
+# nemotron_minimax config — strongest free agent + strongest cross-family free SIM
+#
+# Tests the agent-capacity hypothesis (sys 0b1fb838 hint) and the cross-family
+# requirement (sys 74744be6 / 8ff09360 framing) simultaneously, staying within
+# OpenCode Zen free tier:
+#   - agent = nemotron-3-super-free (NVIDIA): strongest published agentic
+#     benchmark in the free menu (85.6% PinchBench on agent loops).
+#   - sim = minimax-m3-free (MiniMax, MSA architecture): strongest published
+#     code-understanding score (59% SWE-Bench Pro), different family from
+#     Nemotron (NVIDIA), 1M context window for long multi-round sessions.
+#
+# Multi-variable change vs default (both agent AND sim swapped) — attribution
+# is loose. If outcomes finally move on this case, the *combination* worked;
+# isolating which axis contributed needs a follow-up split into single-variable
+# cells (`nemotron_agent.toml`, `minimax_sim.toml`).
+#
+# IMPORTANT (2026-06-02): the first 2 runs under this config name
+# (20260602-223503 / 230514) ran with sim_model = nemotron (same-family,
+# wrong). Those runs are preserved for autopsy but their data does NOT
+# describe the nemotron+minimax pair this file now defines.
+
+publish_mode = "gh"
+
+[models]
+agent_model = "opencode/nemotron-3-super-free"
+sim_model = "opencode/minimax-m3-free"
+cli_reviewer = "codex"

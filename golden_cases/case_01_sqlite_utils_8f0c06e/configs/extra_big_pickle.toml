@@ -1,0 +1,22 @@
+# extra_big_pickle config — default + cross-family extra reviewer
+#
+# Same as `default` (deepseek agent, deepseek SIM, codex cli_reviewer)
+# but adds an `extra_reviewer_model` running alongside the primary SIM
+# each review round. The extra reviewer is `opencode/big-pickle` — a
+# different family from deepseek (the agent + primary SIM) and from
+# codex (the post-publish cli_reviewer).
+#
+# Tests whether a second cross-family review pass in the agent ↔ SIM
+# channel changes outcomes vs the same-family-only default. Distinct
+# from the qwen_sim config (which REPLACED the primary SIM): here both
+# SIMs run in parallel; their agreement (or disagreement) on each round
+# is captured in `cross_family_agreement_rate` and per-reviewer fields
+# in `pr_eval.json`. EVAL_ROADMAP §5 framing.
+
+publish_mode = "gh"
+
+[models]
+agent_model = "opencode/deepseek-v4-flash-free"
+sim_model = "opencode/deepseek-v4-flash-free"
+cli_reviewer = "codex"
+extra_reviewer_model = "opencode/big-pickle"
