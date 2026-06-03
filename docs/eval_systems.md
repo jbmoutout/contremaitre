@@ -106,6 +106,8 @@ Two observations the data does support unambiguously:
 
 **Required next step before drawing conclusions**: A/A control (second n=3 with same config). The cell B A/A of sys 8ff09360 turned out essential for separating signal from sampling; same here. (Already in progress.)
 
+> **Correction (2026-06-03, see sys `063aee1a` Learning 1)**: the `total_required_changes median 2 vs 3` and downstream "more deliberative SIM asks fewer changes" framing should be taken at face value (counts are real), but any attempt to read the broader picture through `sim_useful_call_ratio` is invalid — that metric is structurally 0.0 for every SIM, qwen included. The `total_required_changes`, `total_checks_performed`, `review_rounds` numbers in the table above are NOT affected by the bug.
+
 - contremaitre @ `a1c4a96`
 - `sim_tooled_persona.md`: original (post-revert, same as sys 27666e87)
 - agent: `opencode/deepseek-v4-flash-free`
@@ -235,11 +237,13 @@ Cell mix (after the eval-rerun parser fix in commit `08a44f5`): READY+LG×1, REA
 
 Diagnostic: `sim_useful_call_ratio = 0.0` in BOTH successful runs despite the nemotron-SIM making 19 (run 02) and 33 (run 03) tool calls. Run 02 approved a −96 LOC refactor on round 1 with 0 required_changes; run 03 went 3 rounds and asked for 2 required_changes total. `process_reliability = 1.0`, `sim_review_confidence = 0.95` in both.
 
+> **Correction (2026-06-03, see sys `063aee1a` Learning 1)**: the `sim_useful_call_ratio=0.0` reading does NOT support a rubber-stamp interpretation. That metric returns 0.0 for every SIM ever run on case_01 (deepseek, qwen, nemotron) because [flow_use.py:570-576](../contremaitre/flow_use.py#L570-L576) requires a verbatim ≥20-char grep-output line in the verdict text, while SIMs paraphrase. Strike the "vacuous review" framing from Learning 2 below — the metric was reading noise. Learning 1 (text-emit instability) and Learning 3 (FAILED_INFRA source taxonomy) stand.
+
 **Learning** (three of them):
 
 1. **Nemotron's "doesn't reliably emit text" trait is symmetric across roles.** The autopsy above established it as a yield failure when nemotron is the agent. As the SIM it surfaces differently: run 01 was a fatal silent stall the sqlite-recovery couldn't salvage, run 03 needed 5 in-run sqlite-recoveries to extract text from opencode's internal session storage. Free-tier infra reliability is the binding constraint, not capability. Two of three runs survived only because the sqlite-recovery path exists.
 
-2. **Cross-family swap didn't degrade outcomes vs baseline — but `sim_useful_call_ratio=0.0` in both completed runs.** Unlike sys 74744be6 (qwen_sim: scope explosion, MF×2 + NA×1, all process metrics down), the nemotron-SIM cell looks shape-identical to baseline. The risk: the SIM may be rubber-stamping rather than reviewing. The discipline scorer credited 0 of the SIM's 19/33 calls as useful — combined with run 02's instant approval of a major refactor, "non-biased cross-family review" and "vacuous review that happens to coincide with baseline" are observationally similar at n=3. An A/A is required before claiming cross-family success on free-tier.
+2. **Cross-family swap didn't degrade outcomes vs baseline.** ~~`sim_useful_call_ratio=0.0` in both completed runs.~~ The cell looks shape-identical to baseline (LG×1 + MF×1 + 1 unreviewable). Whether that's "non-biased cross-family review" or sampling noise at n=2 is open; an A/A would help. (The original "rubber-stamp risk" caveat is retracted — see Correction above.)
 
 3. **`FAILED_INFRA` covers three distinct failure sources on this cell alone** — yield discipline (autopsy above), SIM stall (run 01 here), codex 400 (run 03 here, recovered via operator rerun). Same terminal verdict, different fixes. `stats.json.reason` discriminates; the headline does not.
 
@@ -256,7 +260,7 @@ Cells:
 - `case_01_sqlite_utils_8f0c06e / nemotron_sim` — first cell
   - 20260602-235843 (FAILED_INFRA — SIM stall) / 20260603-002636 (READY, LG) / 20260603-004729 (READY, MF; codex rerun required)
 
-## sys (pending) — 2026-06-03 — actor-side CI formatter/lint gate
+## sys 063aee1a — 2026-06-03 — actor-side CI formatter/lint gate
 
 **Intent**: patch the actor prompt (`initial_prompt.md`) to discover and run the project's CI formatter/lint gates against changed files before writing `IMPLEMENTATION_COMPLETE`. Hypothesis grounded in a retrospective audit of every case_01 MUST_FIX verdict to date: a non-trivial share are *purely* mechanical (Black-not-clean, flake8 F401/E402) rather than judgement-level. Discovery-driven prompt (no hardcoded tool names) keeps the change project-agnostic — generalizes to any repo whose CI runs a formatter/linter.
 
@@ -270,20 +274,49 @@ Cells:
 
 Headline split: **4/16 should flip, 3/16 should get cleaner, 9/16 should stay (and should).**
 
-**Outcome**: pending — awaiting re-runs on case_01 / `nemotron_sim` and `extra_big_pickle` with the patched prompt.
+**Outcome** (n=3 on `nemotron_sim`):
 
-**Learning** (pre-outcome — to be confirmed or revised by the re-run):
-1. Headline-only MUST_FIX/LOOKS_GOOD verdicts hide whether the blocker is *mechanical* (formatter-fixable, agent's responsibility) or *judgement* (real bug, what we want the reviewer for). On case_01 this collapses a 4-vs-9 distinction; ~25% of all-time MUST_FIX on this case were dominated by lint noise. Counterpoint+complement to sys 8ff09360's "mine the issue density" finding — that learned to *score* the verdict more finely; this learns to *classify the verdict's cause*.
-2. CI formatter/lint hygiene is a generic actor responsibility, not a per-project habit. Pushing it onto the actor prompt (intent-based, discovery-driven, scoped to changed files) is project-agnostic by construction and avoids the sim/sim_review becoming a janitor for mechanical failures.
+| Run | Terminal | wall_s | turns | rounds | files | LOC net | codex | findings (weighted, issues) | failure |
+|---|---|---|---|---|---|---|---|---|---|
+| [-01](../.contremaitre/runs/20260603-044948-eval-case_01_sqlite_utils_8f0c06e-nemotron_sim-01) | READY | 1721 | 8 | 1 | 3 | +98 | **NEEDS_ATTENTION** | 4w / **0 issues** / 2 suggestions | clean |
+| [-02](../.contremaitre/runs/20260603-051832-eval-case_01_sqlite_utils_8f0c06e-nemotron_sim-02) | FAILED_INFRA | 1067 | 2 | 0 | n/a | n/a | not invoked | n/a | nemotron-SIM 900s timeout |
+| [-03](../.contremaitre/runs/20260603-053622-eval-case_01_sqlite_utils_8f0c06e-nemotron_sim-03) | READY | 1631 | 8 | 1 | 4 | −6 | **LOOKS_GOOD** | 0 | clean |
 
-- contremaitre @ post-`a89f81e` (initial_prompt.md formatter/lint gate patch — sha pending)
-- `initial_prompt.md`: `b75ecbe0` (adds discover+run CI formatter/lint gates pre-`IMPLEMENTATION_COMPLETE`, check-only or scoped to changed files, install dev tooling if missing)
-- agent / sim: TBD per re-run cell
+Vs the prior `nemotron_sim` cell (sys 347f21a0) — same agent + SIM + reviewer, only `initial_prompt.md` changed (`527caa18` → `a0be7117`):
+
+| Panel | Prior (347f21a0) | New (063aee1a) | Δ |
+|---|---|---|---|
+| terminal mix | FAILED×1 + READY×2 | FAILED×1 + READY×2 | same |
+| cli_review verdict mix | LG×1 + MF×1 | LG×1 + **NA×1** | **MF → NA** |
+| `cli_issue_count` total across cell | 1 | **0** | dropped to zero |
+| `total_required_changes` across cell | 0 + 2 | 0 + 0 | tighter |
+| `review_rounds` per successful run | 1, 3 | 1, 1 | faster convergence |
+| `agent_discipline_score` per successful run | 0.5, 0.0 | 0.5, 0.5 | stable (per-run, not median) |
+
+The MF→NA shift matches the pre-fix audit prediction for the formatter-pure category: run 03 of the prior cell was a `black`-only MF (one of the 4 "expected to flip"). After the gate, no `issue` labels remain; only `suggestion`/`nit`.
+
+**Learning** (three of them):
+
+1. **A scorecard metric was reading noise as signal across the whole journal.** The spot-check that prompted this entry confirmed `sim_useful_call_ratio = 0.0` in **every** SIM run on case_01 to date — 4 deepseek-SIM, 3 qwen-SIM, 6 nemotron-SIM. The matcher in [flow_use.py:570-576](../contremaitre/flow_use.py#L570-L576) requires a verbatim ≥20-char grep-output line inside the SIM's `summary` + `checks_performed` text, but SIMs are prompted to write *paraphrased* bullet descriptions (e.g. `"grep _compile_code sqlite_utils/utils.py (no output, confirming removal)"`), not paste raw output. The metric is structurally 0.0; the `agent_discipline_score` composite has been treating that as a load-bearing third (alongside `settled_before_code` and `self_verified`). Corrections were added to sys 347f21a0 and 74744be6 — no past claim in this journal that hung on this metric is safe.
+
+2. **The CI-gate prompt edit landed its predicted MF→NA shift, but the signal is one axis, not three.** `cli_review_score`, `cli_issue_count`, and "hard-gates pass rate" all moved favorably in the same direction. That looks like three confirmations; it isn't. The intervention removes the formatter-MF class from codex's input population; all three panels are downstream of that same effect. Reporting them as independent corroborating axes is double-counting. The DUMP.md correlation-audit framing (independent metric families) becomes load-bearing for any future regression-confirmation claim.
+
+3. **Nemotron-SIM ~33% infra-failure rate holds across cells.** Cell A (sys 347f21a0): 1/3 fatal SIM stall. Cell B (here): 1/3 SIM 900s timeout. Same root cause (nemotron's text-emit instability), different surfacing. With deepseek-as-agent + codex-as-reviewer held constant, the nemotron-SIM is the one reliability cost in this configuration — independent of any review-quality measurement (which the corrected metric tells us nothing about anyway).
+
+**Observation worth a follow-up, not yet a Learning**: in cell B run -03, the nemotron-SIM listed 9 `grep …` entries in `checks_performed` but actually executed only 2 grep calls — aspirational verdict prose. Run -01 was 15-listed / 15-executed (clean). A "listed_checks vs executed_tool_calls" metric would catch this; `sim_useful_call_ratio` was never going to. Worth coding before the next nemotron cell.
+
+- contremaitre @ `382ef87`
+- `initial_prompt.md`: `a0be7117` (adds discover+run CI formatter/lint gates pre-`IMPLEMENTATION_COMPLETE`, check-only or scoped to changed files, install dev tooling if missing)
+- agent: `opencode/deepseek-v4-flash-free`
+- sim: `opencode/nemotron-3-super-free`
 - cli_reviewer: codex
+- `system_digest`: `063aee1a…`
 
 Cells:
-- `case_01_sqlite_utils_8f0c06e / nemotron_sim` — re-run; targets the 03 run that hit Black on the rerun — pending
-- `case_01_sqlite_utils_8f0c06e / extra_big_pickle` — re-run; targets the 02/03 runs that hit flake8/Black — pending
+- `case_01_sqlite_utils_8f0c06e / nemotron_sim` — first cell on the patched prompt
+  - 20260603-044948 (READY, NA) / 20260603-051832 (FAILED_INFRA — SIM timeout) / 20260603-053622 (READY, LG)
+
+Pending: re-run on `case_01 / extra_big_pickle` (targets the 2/3 MFs that were flake8+Black) to test the gate's effect on a more lint-heavy MF population.
 
 ---
 
