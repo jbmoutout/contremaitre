@@ -318,6 +318,55 @@ Cells:
 
 Pending: re-run on `case_01 / extra_big_pickle` (targets the 2/3 MFs that were flake8+Black) to test the gate's effect on a more lint-heavy MF population.
 
+## sys (metrology) — 2026-06-03 — fix `sim_useful_call_ratio` + demote correlated headline metrics
+
+**Intent**: act on sys `063aee1a` Learning 1 (the `sim_useful_call_ratio` matcher was structurally zero-pinned across every SIM ever run on case_01) and Learning 2 (correlated headline metrics were being treated as independent corroboration). Both are metrology fixes — no new agent runs; 22 existing `ok=true` canaries on case_01 regenerated in place.
+
+**Outcome**:
+
+PR 1 (commit `c494c2c`) — `_grep_cited_in` → `_grep_args_cited_in` in [flow_use.py:570](../contremaitre/flow_use.py#L570). New matcher tests pattern + path/include/glob args against verdict prose; falls back to the longest literal fragment between regex metachars (so `_compile_\w+` credits a verdict saying `_compile_`). Validated against 22 `ok=true` runs after regenerating `flow_use.json` + `canary.json`:
+
+| metric | before | after |
+|---|---|---|
+| `sim_useful_call_ratio` | 0.0 in 22/22 runs (1 distinct value) | 0.17–1.00, 19 distinct, mean 0.66 |
+| `agent_discipline_score` | 4 distinct values (0.0–0.5) | 19 distinct values (0.121–0.833) |
+| `terminal_score` / `hard_gates_passed` / `process_reliability` | constant 1.0 (survivor bias from `ok=true` filter) | binary — `default-01` correctly has 0 |
+
+`agent_discipline_score` envelope check temporarily disabled at [eval.py:1271](../contremaitre/eval.py#L1271) — composite semantics changed; pre-fix baselines aren't comparable; restorable in one line once a baseline is regenerated.
+
+PR 2 (commit `ad574c2`) — `cli_findings_weighted`, `review_rounds`, `cli_citation_density` removed from `_DRIFT_ENVELOPES` in [eval.py:58](../contremaitre/eval.py#L58). All three still computed and recorded; just no longer raise REGRESSIONS / drifts.
+
+`eval show case_01_sqlite_utils_8f0c06e --config default --n 3` against the current (pre-fix) baseline:
+
+| | before PR 2 | after PR 2 |
+|---|---|---|
+| REGRESSIONS | 3 (cli_review_score 0.5→0, cli_findings_weighted 1.5→6, cli_citation_density 2→1) | 1 (cli_review_score 0.5→0) |
+| drifts | 2 (loc_net_delta, wall_seconds) | 2 (same) |
+| improvements | 1 (agent_discipline_score 0.50→0.62) | 1 (same) |
+
+The remaining cli_review_score 0.5 → 0.0 IS a real cli_reviewer drift between the baseline trio (20260528-0xxxx) and the latest trio (20260528-15xxxx, the sys `3dfcbc3a` A/A cell). Not papered over — `default` baseline was NOT promoted.
+
+**Learning** (five, ordered by future-blast-radius):
+
+1. **`flow_use.json` is read stale by `check_run`.** Changing a flow_use metric definition requires a two-step regeneration: (a) re-run `compute_flow_use` over each run dir to rewrite `flow_use.json`, then (b) `eval check` to refresh `canary.json`. `evaluator.write_json(paths.flow_use_report, ...)` only fires on live runs; [eval.py:845](../contremaitre/eval.py#L845) `check_run` reads the file from disk and does not recompute. The first pass of `eval check` after PR 1 silently kept zero values until the explicit `compute_flow_use` regeneration. Either `check_run` should recompute, or there should be an explicit `eval reflow <run_dir>` command — otherwise the next flow_use heuristic change repeats this trap.
+
+2. **The `ok=true` filter was hiding real signal via survivor bias.** Three metrics that A4's first-pass analysis flagged "zero-variance, drop from the gate" — `terminal_score`, `hard_gates_passed`, `process_reliability` — all gained binary variance after regeneration because [default-01](../.contremaitre/runs/20260528-015544-eval-case_01_sqlite_utils_8f0c06e-default-01) flipped `ok=false` → `ok=true`. That run has `terminal_score=0`, `NO_PR_NEEDS_HUMAN` (agent gave up after 1 SIM round, 3 required_changes unaddressed, hard-gates fail). It's the load-bearing data point for task-survival measurement. **Audit lesson: any "drop this metric, it has no variance" recommendation must be re-checked against the *unfiltered* run set before being committed to gate logic.**
+
+3. **The `ok` flag conflates two failure modes.** Of the 6 current `ok=false` runs: 4 are FAILED_INFRA (no analyzable artifacts), 1 is QUOTA_EXHAUSTED (no analyzable artifacts), and [extra_big_pickle-02](../.contremaitre/runs/20260529-215353-eval-case_01_sqlite_utils_8f0c06e-extra_big_pickle-02) is `contremaitre_git_dirty: true` with FULL artifacts populated (READY_FOR_DRAFT_PR, cli_review_score=0/MUST_FIX, `sim_useful_call_ratio=0.818`). That last case is a usable data point being thrown away by the `ok` filter. Splitting `ok` into `ok_infra` (data present?) and `ok_hermetic` (analysis valid for cli comparisons?) reclaims it — small refactor; natural fit for DUMP.md A5.
+
+4. **`contremaitre_git_dirty` is reassessed at `eval check` time, not snapshot at run start.** That's *why* default-01 flipped on regeneration: it originally ran against a dirty contremaitre tree, but `eval check` re-records the dirty flag from the CURRENT working tree, which is clean. The flag is "is contremaitre dirty NOW?" not "was it dirty WHEN this run ran?" — a separate provenance bug; natural fit for DUMP.md A7.
+
+5. **The sys `063aee1a` Learning 2 framing held under load.** "Three correlated panels moving = one signal, not three confirmations" was correct: removing two correlated metrics from the headline gate collapsed 3 REGRESSIONS to 1 on a real cli_reviewer drift event, without losing the underlying signal. Future regression-confirmation claims must be at the family level (per the A4 correlation audit), not the raw-metric level.
+
+**Cells**: none new (no agent runs performed). 22 existing `ok=true` canary.json files across [case_01_sqlite_utils_8f0c06e](../golden_cases/case_01_sqlite_utils_8f0c06e) regenerated in place. `default` baseline NOT promoted — the surfaced cli_review_score drift is real signal worth investigating, not absorbing into a fresh baseline.
+
+- contremaitre @ `ad574c2`
+- `flow_use.py`: `c494c2c` (matcher rewrite + 4 new unit tests); `eval.py`: `ad574c2` (headline demotions)
+- prompts / agent / sim / cli_reviewer: unchanged
+- A4 correlation report: `/tmp/contremaitre_metric_independence_report.md`
+
+Pending: investigate the cli_review_score 0.5 → 0.0 drift between sys `27666e87` and sys `3dfcbc3a` default cells (A/A control claims the prompt change caused it; the drift now reads as one panel, not three) before considering any baseline promotion.
+
 ---
 
 ### Entry template (copy + fill)
