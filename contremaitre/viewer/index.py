@@ -95,17 +95,63 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "pr_branch": (pr or {}).get("branch") if isinstance(pr, dict) else None,
         "cli_review_tool": cli_review[0] if cli_review else None,
         "cli_review_verdict": cli_review[1] if cli_review else None,
+        "cli_review_blocker": cli_review[2] if cli_review else None,
     }
 
 
-def _read_cli_review_summary(run_dir: Path) -> tuple[str, str | None] | None:
-    """`(tool, verdict_key)` derived from `<tool>_review.md` on disk.
+_MECHANICAL_TOKENS = (
+    "black",
+    "flake8",
+    "mypy",
+    "format",  # "Black-formatted", "formatting check"
+    "unused",  # F401 phrasing
+    "f401",
+    "e402",
+    "e501",
+)
+
+
+def _classify_blocker(text: str) -> str | None:
+    """Classify a MUST_FIX review's blocker as mechanical/semantic/mixed.
+
+    Scans the `**issue:**` bullets emitted by the cli_reviewer prompt.
+    A bullet is "mechanical" if its body mentions a CI-mechanical token
+    (Black, flake8, mypy, etc.) — those failures are formatter/lint
+    discoverable and addressed by the actor's pre-IMPLEMENTATION_COMPLETE
+    gate (see initial_prompt.md). A bullet is "semantic" otherwise.
+
+    Returns `"mechanical"` (all bullets mechanical), `"semantic"` (none
+    mechanical), `"mixed"` (both kinds present), or `None` when no
+    `**issue:**` bullets exist to classify.
+    """
+
+    mech = sem = 0
+    for raw in text.splitlines():
+        line = raw.lower()
+        if "**issue:**" not in line:
+            continue
+        if any(tok in line for tok in _MECHANICAL_TOKENS):
+            mech += 1
+        else:
+            sem += 1
+    if mech == 0 and sem == 0:
+        return None
+    if mech and not sem:
+        return "mechanical"
+    if sem and not mech:
+        return "semantic"
+    return "mixed"
+
+
+def _read_cli_review_summary(run_dir: Path) -> tuple[str, str | None, str | None] | None:
+    """`(tool, verdict_key, blocker_class)` derived from `<tool>_review.md`.
 
     Skips the I/O round-trip into guardrails — the posted markdown file
     name carries the tool, and the agent's verdict key (MUST_FIX /
     NEEDS_ATTENTION / LOOKS_GOOD) lives on line 1 per the prompt spec.
-    Returns `None` when no cli_review.md is present (run didn't enable
-    the feature).
+    `blocker_class` is `_classify_blocker`'s read of the issue bullets,
+    or `None` for non-MUST_FIX verdicts (where the classification is
+    not actionable). Returns `None` when no cli_review.md is present.
     """
 
     for tool in ("codex", "claude"):
@@ -115,7 +161,7 @@ def _read_cli_review_summary(run_dir: Path) -> tuple[str, str | None] | None:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return (tool, None)
+            return (tool, None, None)
         # Verdict key is on line 1 after the H3 header the orchestrator
         # prepends. Scan a handful of non-blank lines for the first match.
         verdict: str | None = None
@@ -126,7 +172,8 @@ def _read_cli_review_summary(run_dir: Path) -> tuple[str, str | None] | None:
                     break
             if verdict:
                 break
-        return (tool, verdict)
+        blocker = _classify_blocker(text) if verdict == "MUST_FIX" else None
+        return (tool, verdict, blocker)
     return None
 
 
@@ -463,9 +510,19 @@ def _render_row(r: dict[str, Any]) -> str:
         # LOOKS_GOOD) — keeps the house style consistent with the other
         # tier dots on the page.
         cli_tier = _cli_review_tier(r["cli_review_verdict"])
+        # For MUST_FIX rows only, surface whether the blocker is mechanical
+        # (formatter/lint — actor's pre-publish gate should catch) vs
+        # judgement (real bug — what we want the reviewer for). Lets the
+        # index reveal the 4-vs-9-vs-mixed split at a glance.
+        blocker_suffix = ""
+        blocker = r["cli_review_blocker"]
+        if blocker:
+            label = {"mechanical": "format", "mixed": "lint+bug", "semantic": "bug"}[blocker]
+            blocker_suffix = f' <span style="color:var(--text-muted)">({label})</span>'
         models_bits.append(
             f'<span class="sim-dot {cli_tier}"></span>'
             f'<span style="color:var(--accent)">{_escape(r["cli_review_tool"])} review</span>'
+            f"{blocker_suffix}"
         )
     models_line = " · ".join(models_bits) if models_bits else '<span class="no-eval">no model recorded</span>'
 

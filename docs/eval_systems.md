@@ -187,24 +187,66 @@ Cells:
   - **2026-06-02 clean cell (canonical)**: 20260602-203011 / 210302 / 211332
   - 2026-05-29 incomplete: 20260529-211108 (both reviewers, AGREED) / 215353 (extra timed out → SIM-only) / 223245 (QUOTA_EXHAUSTED, 12s)
 
-## sys (pending) — 2026-06-02 — TWO RUNS PENDING AUTOPSY
+## sys (autopsy) — 2026-06-02 — nemotron-as-agent fails yield discipline
 
-**Status**: 2 runs exist on disk with config slug `nemotron_minimax` BUT the config file at the time of execution had `sim_model = opencode/nemotron-3-super-free` (same family as agent — wrong). The runs are preserved for forensic autopsy post-compaction; their data describes a same-family nemotron×nemotron×codex setup, NOT the cross-family nemotron+minimax pair the config file now defines.
+**Status**: 2 runs exist on disk under config slug `nemotron_minimax` but the config at the time of execution was same-family (agent=sim=`opencode/nemotron-3-super-free`). The config has since been corrected to cross-family (agent=nemotron, sim=`opencode/minimax-m3-free`); these 2 runs do NOT describe that pair. Both runs are FAILED_INFRA and contribute no SIM-channel data — autopsy below addresses the actual finding, which is about the agent.
 
-Do not aggregate these runs as a `nemotron_minimax` cell. Either:
-- treat them as a one-off "nemotron same-family" cell (rename slug to match? not trivially possible without filesystem move)
-- discard after autopsy and re-run n=3 against the corrected config
+**Outcome**:
 
-**Autopsy questions worth answering**:
-1. Did Nemotron-as-agent produce different output shape (size, focus, diff style) than deepseek-as-agent at the same task?
-2. How did the same-family Nemotron SIM grill? More demanding than deepseek-SIM? Same blind spots?
-3. What did codex flag?
+| Run | Terminal | Turns | Wall | SIM rounds | codex |
+|---|---|---|---|---|---|
+| 20260602-223503-...-01 | FAILED_INFRA (1800s wall) | 1 | 1809s | 0 | not invoked |
+| 20260602-230514-...-02 | FAILED_INFRA (killed at +3min) | 1 | n/a | 0 | not invoked |
 
-**Preserved runs**:
-- 20260602-223503-eval-case_01_sqlite_utils_8f0c06e-nemotron_minimax-01 (agent=nemotron, sim=nemotron)
-- 20260602-230514-eval-case_01_sqlite_utils_8f0c06e-nemotron_minimax-02 (agent=nemotron, sim=nemotron)
+Run 01 made 57 tool calls inside a single `agent_turn()` that never returned. Run 02 was manually killed shortly after start. The SIM and cli_reviewer were never invoked in either run.
 
-After autopsy: discard runs (they don't match the config name's current semantics) and re-run `eval run case_01_sqlite_utils_8f0c06e --config nemotron_minimax --n 3` against the corrected nemotron+minimax-m3-free pair.
+For contrast, deepseek-as-agent on the same case ([default-01](.contremaitre/runs/20260528-015544-eval-case_01_sqlite_utils_8f0c06e-default-01)) yielded after 87s for the first SIM turn, then alternated agent↔SIM for 7 turns before writing IMPLEMENTATION_COMPLETE — total wall 485s.
+
+**Learning** (two of them):
+
+1. **The WORK loop assumes the agent yields its turn between Explore and Grill.** [orchestrator.py:347-376](../contremaitre/orchestrator.py#L347-L376) drives `agent_turn → sim_turn → agent_turn → ...` and can only invoke the SIM after `actor.agent_turn(message)` returns. The `/improve-codebase-architecture` skill is structured to yield naturally — Step 2 says "After the file is written, ask the user: 'Which of these would you like to explore?'" Deepseek follows that yield point; Nemotron treats the skill as a single end-to-end task and proceeds straight through to implementation without ever asking the user (= SIM). No model-capacity bump fixes this — it's a structural mismatch with the control plane.
+
+2. **"Agent timed out" can mean two very different things.** sys 0b1fb838's Sonnet FAILED_INFRA was a *SIM stall* mid-review at round 3; the agent had yielded several times by then. This autopsy's nemotron FAILED_INFRA was a *single never-yielding agent turn*. Both surface as `FAILED_INFRA` + wall-clock timeout, but they imply different fixes (SIM retry policy vs. agent yield discipline). The `reason` string in `stats.json` (`"agent opencode timed out after 1800s"` vs. `"SIM stalled..."`) is the disambiguator; `terminal_verdict` alone isn't enough.
+
+**Implications for the cross-family nemotron+minimax cell**: with this agent, the minimax SIM would never get a chance to speak. Either swap roles (minimax as agent, nemotron as SIM) or drop nemotron from the agent slot for this case.
+
+- contremaitre @ `a1c4a96` (tree dirty during these runs)
+- `sim_tooled_persona.md`: original
+- agent / sim: `opencode/nemotron-3-super-free` / `opencode/nemotron-3-super-free` (config later corrected to nemotron + minimax-m3-free; these runs predate that fix)
+- cli_reviewer: codex (not invoked)
+
+Cells:
+- `case_01_sqlite_utils_8f0c06e / nemotron_minimax` — DO NOT AGGREGATE as nemotron_minimax cell
+  - 20260602-223503 / 230514 (preserved; flag as `nemotron_same_family` if ever promoted to a real cell)
+
+## sys (pending) — 2026-06-03 — actor-side CI formatter/lint gate
+
+**Intent**: patch the actor prompt (`initial_prompt.md`) to discover and run the project's CI formatter/lint gates against changed files before writing `IMPLEMENTATION_COMPLETE`. Hypothesis grounded in a retrospective audit of every case_01 MUST_FIX verdict to date: a non-trivial share are *purely* mechanical (Black-not-clean, flake8 F401/E402) rather than judgement-level. Discovery-driven prompt (no hardcoded tool names) keeps the change project-agnostic — generalizes to any repo whose CI runs a formatter/linter.
+
+**Pre-fix audit** (16 case_01 MUST_FIX runs across sys 27666e87, 8ff09360, 3dfcbc3a, d0c4c42c — classified by the *kind* of blocker called out in `codex_review.md`):
+
+| Class | Count | Runs |
+|---|---|---|
+| Pure formatter/lint — verdict expected to flip MF → LG | 4 | [154527-default-01](../.contremaitre/runs/20260528-154527-eval-case_01_sqlite_utils_8f0c06e-default-01) (flake8 F401), [210302-extra_big_pickle-02](../.contremaitre/runs/20260602-210302-eval-case_01_sqlite_utils_8f0c06e-extra_big_pickle-02) (flake8 E402+F401), [211332-extra_big_pickle-03](../.contremaitre/runs/20260602-211332-eval-case_01_sqlite_utils_8f0c06e-extra_big_pickle-03) (black), [004729-nemotron_sim-03 rerun](../.contremaitre/runs/20260603-004729-eval-case_01_sqlite_utils_8f0c06e-nemotron_sim-03) (black) |
+| Mixed — lint noise on top of a semantic bug, verdict stays MF but findings shrink | 3 | [133607-default-01](../.contremaitre/runs/20260528-133607-eval-case_01_sqlite_utils_8f0c06e-default-01) (F401 + FutureWarning leak), [162505-default-02](../.contremaitre/runs/20260528-162505-eval-case_01_sqlite_utils_8f0c06e-default-02) (F401 + CSV dialect drop), [165524-default-03](../.contremaitre/runs/20260528-165524-eval-case_01_sqlite_utils_8f0c06e-default-03) (F401 + plugins never loaded) |
+| Pure semantic / API / contract — verdict stays MF (reviewer doing real work) | 9 | 20260528-001559, 022111-default-03, 140811-default-02, 154612-qwen_sim-01, 170214-qwen_sim-02, 181555-qwen_sim-01, 211108-extra_big_pickle-01, 215353-extra_big_pickle-02, 203011-extra_big_pickle-01 |
+
+Headline split: **4/16 should flip, 3/16 should get cleaner, 9/16 should stay (and should).**
+
+**Outcome**: pending — awaiting re-runs on case_01 / `nemotron_sim` and `extra_big_pickle` with the patched prompt.
+
+**Learning** (pre-outcome — to be confirmed or revised by the re-run):
+1. Headline-only MUST_FIX/LOOKS_GOOD verdicts hide whether the blocker is *mechanical* (formatter-fixable, agent's responsibility) or *judgement* (real bug, what we want the reviewer for). On case_01 this collapses a 4-vs-9 distinction; ~25% of all-time MUST_FIX on this case were dominated by lint noise. Counterpoint+complement to sys 8ff09360's "mine the issue density" finding — that learned to *score* the verdict more finely; this learns to *classify the verdict's cause*.
+2. CI formatter/lint hygiene is a generic actor responsibility, not a per-project habit. Pushing it onto the actor prompt (intent-based, discovery-driven, scoped to changed files) is project-agnostic by construction and avoids the sim/sim_review becoming a janitor for mechanical failures.
+
+- contremaitre @ post-`a89f81e` (initial_prompt.md formatter/lint gate patch — sha pending)
+- `initial_prompt.md`: `b75ecbe0` (adds discover+run CI formatter/lint gates pre-`IMPLEMENTATION_COMPLETE`, check-only or scoped to changed files, install dev tooling if missing)
+- agent / sim: TBD per re-run cell
+- cli_reviewer: codex
+
+Cells:
+- `case_01_sqlite_utils_8f0c06e / nemotron_sim` — re-run; targets the 03 run that hit Black on the rerun — pending
+- `case_01_sqlite_utils_8f0c06e / extra_big_pickle` — re-run; targets the 02/03 runs that hit flake8/Black — pending
 
 ---
 

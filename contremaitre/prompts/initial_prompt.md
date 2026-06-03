@@ -6,4 +6,9 @@ Run the `/improve-codebase-architecture` skill end-to-end against this repositor
 
 **Write `.contremaitre/SETTLED_DESIGN.md` before implementing.** Capture the seam, what sits behind it, the PR sequence, and any load-bearing constraints from grilling. The review pass diffs the implementation against this file.
 
-**Write `.contremaitre/IMPLEMENTATION_COMPLETE` last, with a one-line summary.** This is the terminal signal — the host hands off to review when it appears. Before writing it, run the repository's test suite and verify it passes. Do not write this file if tests are failing or were skipped.
+**Write `.contremaitre/IMPLEMENTATION_COMPLETE` last, with a one-line summary.** This is the terminal signal — the host hands off to review when it appears. Before writing it, run both:
+
+  1. **The repository's test suite** — verify it passes.
+  2. **The formatter/lint gates the project's CI enforces** — discover them by reading `.github/workflows/`, `.pre-commit-config.yaml`, `Makefile`, the tool sections of `pyproject.toml` / `package.json`, or contributing docs. If the gate tooling isn't installed in this environment, install it the way the project declares (dev dep group, extras, devDependencies). Run each gate **in check-only mode, or scoped to the files you touched** — never mass-reformat or auto-fix across the worktree, as that pollutes the diff with unrelated changes.
+
+Do not write `IMPLEMENTATION_COMPLETE` if tests fail, are skipped, or any gate reports violations against your changes.
