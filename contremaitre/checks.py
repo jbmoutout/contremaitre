@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import events
-from .jsonlog import append_jsonl
+from .artifacts import append_jsonl
 from .models import ActorMode, RunConfig, RunPaths
 
 

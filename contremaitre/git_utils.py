@@ -13,7 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .jsonlog import append_jsonl
+from .artifacts import append_jsonl
 
 
 class GitError(RuntimeError):

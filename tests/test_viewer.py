@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 from contremaitre.fixture import init_fixture
-from contremaitre.jsonlog import write_json
+from contremaitre.artifacts import write_json
 from contremaitre.models import Caps, RunConfig
 from contremaitre.orchestrator import run
 from contremaitre.paths import build_run_paths, new_run_id

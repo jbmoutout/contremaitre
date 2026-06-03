@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import events
-from .jsonlog import append_jsonl, append_text_event, append_transcript, read_jsonl
+from .artifacts import append_jsonl, append_text_event, append_transcript, read_jsonl
 from .models import ActorMode, RunConfig, RunPaths
 
 
