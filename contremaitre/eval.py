@@ -66,6 +66,10 @@ _DRIFT_ENVELOPES = {
     "cross_family_agreement": 0.30,
     # Continuous panels added in the post-v0 refinement: tighter envelopes
     # since they don't have the 3-state coarseness of cli_review_score.
+    # agent_discipline_score: currently unused — gate is temporarily disabled
+    # in _compare_to_baseline because the sim_useful_call_ratio input was
+    # zero-pinned by a stale matcher and pre-fix baselines are not comparable.
+    # Restore the envelope_check call-site when baselines are regenerated.
     "agent_discipline_score": 0.20,
     "cli_findings_weighted": 0.50,  # severity-weighted finding count; rise = regression
     "cli_citation_density": 0.30,  # drop = ungrounded reviews
@@ -1271,15 +1275,13 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
     # agent_discipline_score: continuous composite (exploration_convergence +
     # sim_useful_call_ratio + self_verified). Captures process-quality drift
     # the cli_reviewer cannot see — independent regression signal.
+    # TEMPORARILY DEMOTED to informational-only: the sim_useful_call_ratio
+    # input was zero-pinned by a stale matcher and is now real; existing
+    # baselines for this metric are pre-fix and not comparable. Re-enable
+    # the gate after baselines are regenerated (see DUMP.md A4 rebaseline).
     cur_d = _median(h_cur.get("agent_discipline_score"))
     base_d = _median(h_base.get("agent_discipline_score"))
-    msg = _envelope_check(
-        "agent_discipline_score", cur_d, base_d,
-        envelope=_DRIFT_ENVELOPES["agent_discipline_score"], direction="down",
-    )
-    if msg:
-        regressions.append(msg)
-    elif cur_d is not None and base_d is not None and cur_d > base_d + 0.10:
+    if cur_d is not None and base_d is not None and cur_d > base_d + 0.10:
         improvements.append(f"agent_discipline_score {base_d:.2f} → {cur_d:.2f}")
 
     # cli_findings_weighted: severity-weighted finding count. INCREASE is the

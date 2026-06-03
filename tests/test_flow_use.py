@@ -131,3 +131,59 @@ def test_apply_patch_is_code_edit_for_order_and_self_verification(tmp_path):
 
     assert flow_use["agent"]["settled_write_before_first_code_edit"]["value"] is False
     assert flow_use["agent"]["self_verified"]["value"] is False
+
+
+def _sim_grep_setup(tmp_path: Path, *, greps: list[dict], verdict: str):
+    """Helper: write a SIM raw export with the given grep calls and a
+    review_cycles file with a single SIM cycle whose summary is `verdict`."""
+    paths = _paths(tmp_path)
+    events = [
+        _tool_event(tool="grep", timestamp=1_000 + i, input_=inp, output="ignored")
+        for i, inp in enumerate(greps)
+    ]
+    _write_jsonl(paths.sim_raw_export, events)
+    _write_jsonl(
+        paths.review_cycles,
+        [{"reviewer": "sim", "summary": verdict, "checks_performed": []}],
+    )
+    return paths
+
+
+def test_sim_useful_call_ratio_counts_pattern_mentions_not_output(tmp_path):
+    paths = _sim_grep_setup(
+        tmp_path,
+        greps=[{"pattern": "_compile_code"}, {"pattern": "render_html"}],
+        verdict="reviewed _compile_code path, looks fine",
+    )
+    flow_use = compute_flow_use(paths)
+    assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 0.5
+
+
+def test_sim_useful_call_ratio_falls_back_through_regex_metachars(tmp_path):
+    paths = _sim_grep_setup(
+        tmp_path,
+        greps=[{"pattern": r"_compile_\w+"}],
+        verdict="all _compile_ helpers are covered",
+    )
+    flow_use = compute_flow_use(paths)
+    assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 1.0
+
+
+def test_sim_useful_call_ratio_ignores_short_patterns(tmp_path):
+    paths = _sim_grep_setup(
+        tmp_path,
+        greps=[{"pattern": "id"}],
+        verdict="id appears all over the place",
+    )
+    flow_use = compute_flow_use(paths)
+    assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 0.0
+
+
+def test_sim_useful_call_ratio_credits_path_or_include_args(tmp_path):
+    paths = _sim_grep_setup(
+        tmp_path,
+        greps=[{"pattern": "x", "include": "tests/test_extract.py"}],
+        verdict="checked tests/test_extract.py for coverage",
+    )
+    flow_use = compute_flow_use(paths)
+    assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 1.0

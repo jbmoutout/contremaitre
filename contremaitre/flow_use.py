@@ -329,10 +329,13 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     file_access = _count_file_accesses(tool_calls)
     convergence, breadth, _, _ = _convergence(file_access)
 
-    # sim_useful_call_ratio: fraction of SIM grep outputs cited in verdict text.
-    # Valid for SIM (verdict prose is the deliverable). Broken for agent side.
-    # Match against the SIM's own last verdict only (not the extra reviewer's
-    # or an `unavailable` marker row) so the ratio reflects SIM tool-use → SIM
+    # sim_useful_call_ratio: fraction of SIM grep calls whose ARGS (pattern
+    # or path/include/glob) are referenced in the verdict text. SIMs
+    # paraphrase output but mention the search terms they ran; matching
+    # output verbatim floored the metric at 0 across every observed run.
+    # Valid for SIM only (verdict prose is the deliverable, not for agents).
+    # Match against the SIM's own last verdict (not the extra reviewer's or
+    # an `unavailable` marker row) so the ratio reflects SIM tool-use → SIM
     # verdict alignment.
     sim_useful_ratio: float | None = None
     review_cycles = _read_jsonl(paths.review_cycles)
@@ -345,7 +348,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
         verdict_text = last.get("summary", "") + " ".join(last.get("checks_performed", []))
         grep_calls = [e for e in tool_calls if _tool_name(e) == "grep"]
         if grep_calls:
-            cited = sum(1 for e in grep_calls if _grep_cited_in(e, verdict_text))
+            cited = sum(1 for e in grep_calls if _grep_args_cited_in(e, verdict_text))
             sim_useful_ratio = round(cited / len(grep_calls), 3)
 
     return {
@@ -368,7 +371,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
         "sim_useful_call_ratio": {
             "value": sim_useful_ratio,
             "extraction": "heuristic",
-            "note": "Fraction of SIM grep outputs cited in verdict summary+checks_performed.",
+            "note": "Fraction of SIM grep calls whose args (pattern/path/include/glob) appear in verdict summary+checks_performed.",
         },
     }
 
@@ -567,10 +570,36 @@ def _read_limit(e: dict) -> int:
         return 9999
 
 
-def _grep_cited_in(grep_event: dict, verdict_text: str, min_len: int = 20) -> bool:
-    output = str((grep_event.get("part") or {}).get("state", {}).get("output") or "")
-    for line in output.split("\n"):
-        line = line.strip()
-        if len(line) >= min_len and line in verdict_text:
+_REGEX_METACHARS = re.compile(r"[\\^$.|?*+(){}\[\]]")
+
+
+def _grep_args_cited_in(
+    grep_event: dict,
+    verdict_text: str,
+    *,
+    min_pattern_len: int = 3,
+    min_path_len: int = 4,
+) -> bool:
+    """Did the SIM's verdict reference what this grep call searched for?
+
+    Matches grep ARGUMENTS (pattern + path/include/glob) against verdict
+    prose, not grep output lines. SIMs paraphrase output but reliably
+    mention the search terms they ran. Try the pattern as a literal first;
+    if it contains regex metacharacters, fall back to the longest
+    literal fragment between metachars so that a SIM saying
+    "all `_compile_` helpers" still credits a grep for `_compile_\\w+`.
+    """
+    inp = _inp(grep_event)
+    pat = str(inp.get("pattern") or "")
+    if pat and len(pat) >= min_pattern_len:
+        if pat in verdict_text:
+            return True
+        fragments = _REGEX_METACHARS.split(pat)
+        longest = max(fragments, key=len, default="")
+        if len(longest) >= min_pattern_len and longest != pat and longest in verdict_text:
+            return True
+    for k in ("path", "include", "glob"):
+        v = str(inp.get(k) or "")
+        if v and len(v) >= min_path_len and v in verdict_text:
             return True
     return False
