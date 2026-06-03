@@ -219,6 +219,43 @@ Cells:
 - `case_01_sqlite_utils_8f0c06e / nemotron_minimax` — DO NOT AGGREGATE as nemotron_minimax cell
   - 20260602-223503 / 230514 (preserved; flag as `nemotron_same_family` if ever promoted to a real cell)
 
+## sys 347f21a0 — 2026-06-02 / 2026-06-03
+
+**Intent**: cross-family SIM swap with the proven-to-yield agent. After the autopsy above ruled out nemotron-as-agent on yield-discipline grounds, the cross-family SIM hypothesis (EVAL_ROADMAP §5) gets re-tested here as `nemotron_sim`: deepseek agent + nemotron SIM + codex reviewer, free-tier. Parallel to qwen_sim, different SIM family.
+
+**Outcome** (n=3):
+
+| Run | Terminal | wall_s | turns | rounds | files | LOC net | codex | failure / hiccup |
+|---|---|---|---|---|---|---|---|---|
+| [-01](../.contremaitre/runs/20260602-235843-eval-case_01_sqlite_utils_8f0c06e-nemotron_sim-01) | FAILED_INFRA | 1668 | 6 | 0 | 2 | +120 | not invoked | nemotron-SIM stalled fatally: `"review opencode emitted no text and sqlite recovery found nothing"` |
+| [-02](../.contremaitre/runs/20260603-002636-eval-case_01_sqlite_utils_8f0c06e-nemotron_sim-02) | READY_FOR_DRAFT_PR | 1251 | 6 | 1 | 1 | −96 | **LOOKS_GOOD** | clean |
+| [-03](../.contremaitre/runs/20260603-004729-eval-case_01_sqlite_utils_8f0c06e-nemotron_sim-03) | READY_FOR_DRAFT_PR | 2149 | 13 | 3 | 1 | +52 | **MUST_FIX** (black not clean) | codex 400 on first attempt → operator re-ran codex (`.rerun` artifacts); also 5 sqlite-DB recoveries during the run (3 SIM-side + 2 review-side) |
+
+Cell mix (after the eval-rerun parser fix in commit `08a44f5`): READY+LG×1, READY+MF×1, FAILED_INFRA×1 — verdict shape identical to the default baseline (sys 27666e87: LG×1 + MF×1 + NO_PR×1).
+
+Diagnostic: `sim_useful_call_ratio = 0.0` in BOTH successful runs despite the nemotron-SIM making 19 (run 02) and 33 (run 03) tool calls. Run 02 approved a −96 LOC refactor on round 1 with 0 required_changes; run 03 went 3 rounds and asked for 2 required_changes total. `process_reliability = 1.0`, `sim_review_confidence = 0.95` in both.
+
+**Learning** (three of them):
+
+1. **Nemotron's "doesn't reliably emit text" trait is symmetric across roles.** The autopsy above established it as a yield failure when nemotron is the agent. As the SIM it surfaces differently: run 01 was a fatal silent stall the sqlite-recovery couldn't salvage, run 03 needed 5 in-run sqlite-recoveries to extract text from opencode's internal session storage. Free-tier infra reliability is the binding constraint, not capability. Two of three runs survived only because the sqlite-recovery path exists.
+
+2. **Cross-family swap didn't degrade outcomes vs baseline — but `sim_useful_call_ratio=0.0` in both completed runs.** Unlike sys 74744be6 (qwen_sim: scope explosion, MF×2 + NA×1, all process metrics down), the nemotron-SIM cell looks shape-identical to baseline. The risk: the SIM may be rubber-stamping rather than reviewing. The discipline scorer credited 0 of the SIM's 19/33 calls as useful — combined with run 02's instant approval of a major refactor, "non-biased cross-family review" and "vacuous review that happens to coincide with baseline" are observationally similar at n=3. An A/A is required before claiming cross-family success on free-tier.
+
+3. **`FAILED_INFRA` covers three distinct failure sources on this cell alone** — yield discipline (autopsy above), SIM stall (run 01 here), codex 400 (run 03 here, recovered via operator rerun). Same terminal verdict, different fixes. `stats.json.reason` discriminates; the headline does not.
+
+**Eval-side fix in flight**: commit `08a44f5` makes `_parse_cli_review` prefer `<tool>_review_raw_export.rerun.jsonl` over the failed-first-attempt plain file. Without that, run 03's cli-review panel was silently NULL despite a clean MUST_FIX on disk.
+
+- contremaitre @ `a89f81e` (clean tree per run_config)
+- `sim_tooled_persona.md`: original
+- agent: `opencode/deepseek-v4-flash-free`
+- sim: **`opencode/nemotron-3-super-free`** (cross-family)
+- cli_reviewer: codex
+- `system_digest`: `347f21a0…`
+
+Cells:
+- `case_01_sqlite_utils_8f0c06e / nemotron_sim` — first cell
+  - 20260602-235843 (FAILED_INFRA — SIM stall) / 20260603-002636 (READY, LG) / 20260603-004729 (READY, MF; codex rerun required)
+
 ## sys (pending) — 2026-06-03 — actor-side CI formatter/lint gate
 
 **Intent**: patch the actor prompt (`initial_prompt.md`) to discover and run the project's CI formatter/lint gates against changed files before writing `IMPLEMENTATION_COMPLETE`. Hypothesis grounded in a retrospective audit of every case_01 MUST_FIX verdict to date: a non-trivial share are *purely* mechanical (Black-not-clean, flake8 F401/E402) rather than judgement-level. Discovery-driven prompt (no hardcoded tool names) keeps the change project-agnostic — generalizes to any repo whose CI runs a formatter/linter.
