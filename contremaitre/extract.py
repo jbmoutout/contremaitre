@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .jsonlog import read_jsonl
+from .artifacts import read_jsonl
 from .models import RunPaths
 
 

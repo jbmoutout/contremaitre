@@ -21,7 +21,7 @@ from contremaitre.actors import (
     _recover_text_from_sqlite,
     _record_recovery,
 )
-from contremaitre.costs import estimate_recorded_cost_usd
+from contremaitre.artifacts import estimate_recorded_cost_usd
 from contremaitre.fixture import init_fixture
 from contremaitre.models import Caps, RunConfig, TerminalVerdict
 from contremaitre.orchestrator import run

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .jsonlog import write_json
+from .artifacts import write_json
 from .models import ActorMode, RunConfig, RunPaths
 
 

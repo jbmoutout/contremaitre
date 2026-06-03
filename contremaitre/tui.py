@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .costs import sum_costs_in_events
+from .artifacts import sum_costs_in_events
 from .extract import parse_apply_patch
 
 try:

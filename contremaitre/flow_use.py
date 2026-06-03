@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import Any
 
 from .extract import parse_apply_patch
-from .jsonlog import read_jsonl
+from .artifacts import read_jsonl
 
 
 # ---------------------------------------------------------------------------

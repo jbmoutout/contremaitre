@@ -26,7 +26,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import cli_reviewer
-from .jsonlog import append_jsonl, utc_ts
+from .artifacts import append_jsonl, utc_ts
 
 
 # Duplicated from `cli._slug_from_url` / `cli._default_cache_path` to keep

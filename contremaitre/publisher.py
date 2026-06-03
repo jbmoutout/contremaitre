@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from .jsonlog import append_jsonl, write_json
+from .artifacts import append_jsonl, write_json
 from .models import PublishMode, RunConfig, RunPaths
 
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from contremaitre.jsonlog import read_jsonl
+from contremaitre.artifacts import read_jsonl
 
 
 class JsonLogReadTest(unittest.TestCase):

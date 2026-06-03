@@ -28,7 +28,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .jsonlog import append_jsonl, append_text_event
+from .artifacts import append_jsonl, append_text_event
 
 
 VALID_TOOLS = ("codex", "claude")

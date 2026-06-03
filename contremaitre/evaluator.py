@@ -24,7 +24,7 @@ from typing import Any
 from .checks import CheckResult
 from .diffscan import DiffScanResult
 from .flow_use import compute_flow_use
-from .jsonlog import write_json
+from .artifacts import write_json
 from .models import ParsedVerdict, RunPaths, TerminalVerdict
 
 
