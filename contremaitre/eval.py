@@ -60,19 +60,21 @@ _DRIFT_ENVELOPES = {
     "terminal_score": 0.0,  # any drop is a regression
     "files_changed": 0.50,  # n=3 is noisy; tighten once we have more samples
     "loc_net_delta": 0.50,
-    "review_rounds": 0.50,
     "cost_usd": 0.20,  # per roadmap §2
     "wall_seconds": 0.30,
     "cross_family_agreement": 0.30,
-    # Continuous panels added in the post-v0 refinement: tighter envelopes
-    # since they don't have the 3-state coarseness of cli_review_score.
     # agent_discipline_score: currently unused — gate is temporarily disabled
     # in _compare_to_baseline because the sim_useful_call_ratio input was
     # zero-pinned by a stale matcher and pre-fix baselines are not comparable.
     # Restore the envelope_check call-site when baselines are regenerated.
     "agent_discipline_score": 0.20,
-    "cli_findings_weighted": 0.50,  # severity-weighted finding count; rise = regression
-    "cli_citation_density": 0.30,  # drop = ungrounded reviews
+    # Demoted to diagnostic (still recorded in canary.json, no longer gated)
+    # because each correlates strongly with another headline metric on the
+    # available run corpus, causing "regression on N axes" overcount. See A4
+    # analysis in DUMP.md.
+    #   review_rounds        — r≈+0.73 with wall_seconds, +0.85 with turns
+    #   cli_findings_weighted — r≈-0.63 with cli_review_score
+    #   cli_citation_density  — moderate corr with reviewer family, thin n
 }
 
 
@@ -1284,32 +1286,6 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
     if cur_d is not None and base_d is not None and cur_d > base_d + 0.10:
         improvements.append(f"agent_discipline_score {base_d:.2f} → {cur_d:.2f}")
 
-    # cli_findings_weighted: severity-weighted finding count. INCREASE is the
-    # bad direction (more / more-serious findings per run). Uses absolute
-    # threshold for low-baseline cases (0 → 3 is meaningful even though
-    # the % is infinite); falls back to the envelope for higher baselines.
-    cur_w = _median(h_cur.get("cli_findings_weighted"))
-    base_w = _median(h_base.get("cli_findings_weighted"))
-    if cur_w is not None and base_w is not None:
-        absolute_jump = cur_w - base_w >= 3
-        env_jump = (
-            base_w > 0 and (cur_w - base_w) / base_w > _DRIFT_ENVELOPES["cli_findings_weighted"]
-        )
-        if absolute_jump or env_jump:
-            regressions.append(f"cli_findings_weighted {base_w:.1f} → {cur_w:.1f}")
-        elif base_w > 0 and cur_w < base_w * 0.5:
-            improvements.append(f"cli_findings_weighted {base_w:.1f} → {cur_w:.1f}")
-
-    # cli_citation_density: drop = ungrounded reviews (reviewer regressed).
-    cur_cd = _median(h_cur.get("cli_citation_density"))
-    base_cd = _median(h_base.get("cli_citation_density"))
-    msg = _envelope_check(
-        "cli_citation_density", cur_cd, base_cd,
-        envelope=_DRIFT_ENVELOPES["cli_citation_density"], direction="down",
-    )
-    if msg:
-        regressions.append(msg)
-
     # terminal_score: any drop is a regression.
     cur_t = _median(h_cur.get("terminal_score"))
     base_t = _median(h_base.get("terminal_score"))
@@ -1330,7 +1306,6 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
     for name, env, direction in (
         ("files_changed", _DRIFT_ENVELOPES["files_changed"], "symmetric"),
         ("loc_net_delta", _DRIFT_ENVELOPES["loc_net_delta"], "symmetric"),
-        ("review_rounds", _DRIFT_ENVELOPES["review_rounds"], "symmetric"),
         ("cost_usd", _DRIFT_ENVELOPES["cost_usd"], "symmetric"),
         ("wall_seconds", _DRIFT_ENVELOPES["wall_seconds"], "symmetric"),
     ):
