@@ -535,8 +535,15 @@ def _parse_cli_review(run_dir: Path, cli_reviewer: str) -> dict[str, Any]:
             "parse_ok": None,
         }
 
-    raw = run_dir / f"{cli_reviewer}_review_raw_export.jsonl"
-    posted = run_dir / f"{cli_reviewer}_review.md"
+    # Prefer the `.rerun` artifacts when an operator manually re-ran the
+    # cli_reviewer after a first-attempt failure (e.g. provider 400, stream
+    # truncation). The plain files are kept as-is by the orchestrator, so
+    # without this preference the parser anchors on the broken first attempt
+    # and reports parse_ok=false even when a clean review exists on disk.
+    raw_rerun = run_dir / f"{cli_reviewer}_review_raw_export.rerun.jsonl"
+    posted_rerun = run_dir / f"{cli_reviewer}_review.rerun.md"
+    raw = raw_rerun if raw_rerun.is_file() else run_dir / f"{cli_reviewer}_review_raw_export.jsonl"
+    posted = posted_rerun if posted_rerun.is_file() else run_dir / f"{cli_reviewer}_review.md"
 
     # Distinguish three cases: reviewer didn't run (no PR to review →
     # absent files), reviewer ran but parser failed (file exists, no
