@@ -202,9 +202,10 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     import json as _json
     import re as _re
     from .flow_use import compute_phases
-    from .orchestrator import (
+    from .worktree_metadata import (
         IMPLEMENTATION_COMPLETE_RELPATH,
-        _derive_commit_message,
+        derive_commit_message,
+        read_impl_complete,
     )
 
     def _read_jsonl(p: Path) -> list[dict]:
@@ -223,8 +224,8 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         except (OSError, ValueError):
             return None
 
-    title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
-    # `_derive_commit_message` appends `\n\n---\nRun: <id>\n` for `git log`
+    title, settled_body = derive_commit_message(paths.worktree, paths.run_id)
+    # `derive_commit_message` appends `\n\n---\nRun: <id>\n` for `git log`
     # readability. The PR body has its own footer with run_id + diff hash,
     # so strip the commit-only trailer to avoid a double separator.
     settled_body = _re.sub(r"\n+---\nRun: [^\n]+\n*$", "", settled_body)
@@ -233,7 +234,7 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     # and the SETTLED H1/H2 don't blow up GitHub's rendering.
     settled_body = _re.sub(r"^(#{1,4}) ", r"\1## ", settled_body, flags=_re.MULTILINE)
 
-    impl_complete = _read_impl_complete(paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH)
+    impl_complete = read_impl_complete(paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH)
     pr_eval = _read_json(paths.eval_dir / "pr_eval.json")
 
     review_cycles = _read_jsonl(paths.review_cycles)
@@ -359,20 +360,6 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     return title, "\n".join(parts)
 
 
-def _read_impl_complete(marker_path: Path) -> str:
-    """Return the agent's one-line summary, or "" if the marker is missing.
-
-    The marker is written by the agent as the last step of WORK (per
-    initial_prompt.md). Content is free-form prose; we trim trailing
-    whitespace but otherwise preserve what the agent wrote.
-    """
-
-    if not marker_path.exists():
-        return ""
-    try:
-        return marker_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
 
 
 def _build_scorecard_block(pr_eval: dict | None) -> str:
