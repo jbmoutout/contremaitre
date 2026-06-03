@@ -1,0 +1,14 @@
+# nemotron_sim config — cross-family SIM swap on the deepseek agent
+#
+# Same as `default` (agent=opencode/deepseek-v4-flash-free, cli_reviewer=codex)
+# with the SIM swapped from deepseek to opencode/nemotron-3-super-free. Tests the
+# cross-family agent ↔ SIM hypothesis (EVAL_ROADMAP §5) while staying on the
+# opencode-zen free tier and keeping the proven-to-yield deepseek agent.
+#
+
+publish_mode = "gh"
+
+[models]
+agent_model = "opencode/deepseek-v4-flash-free"
+sim_model = "opencode/nemotron-3-super-free"
+cli_reviewer = "codex"
