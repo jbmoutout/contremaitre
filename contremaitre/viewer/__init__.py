@@ -105,6 +105,7 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     guardrails = _read_jsonl(paths.guardrail_events)
     recoveries = _read_jsonl(paths.recoveries)
     cli_review = _assemble_cli_review(paths, guardrails)
+    cli_review_extras = _assemble_cli_review_extras(paths)
 
     stats = {
         **stats_raw,
@@ -143,6 +144,7 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
         "guardrails": guardrails,
         "recoveries": recoveries,
         "cli_review": cli_review,
+        "cli_review_extras": cli_review_extras,
     }
 
 
@@ -220,6 +222,55 @@ def _assemble_cli_review(
         "markdown": markdown,
         "fail_reason": (failed_evt or {}).get("reason"),
     }
+
+
+def _assemble_cli_review_extras(paths: RunPaths) -> list[dict[str, Any]]:
+    """Collect every `cli_review_extra` rerun under `<run_dir>/extras/`.
+
+    Each extra was produced by `contremaitre.cli_review_extra.run_extra` and
+    lives in `extras/cli_review_<NNN>/` next to a `summary.json` (parseable
+    metadata) and `review.md` (assembled body with the `### reviewed by …`
+    header). Returns one dict per extra in index order, shape mirrors
+    `_assemble_cli_review` plus a `source` label like `extra-001` so the
+    renderer can distinguish them from the orchestrator's original.
+    """
+
+    extras_root = paths.run_dir / "extras"
+    if not extras_root.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for extra_dir in sorted(extras_root.iterdir()):
+        if not extra_dir.is_dir() or not extra_dir.name.startswith("cli_review_"):
+            continue
+        summary_path = extra_dir / "summary.json"
+        review_md_path = extra_dir / "review.md"
+        if not summary_path.is_file():
+            continue
+        summary = _read_json(summary_path, default=None)
+        if not isinstance(summary, dict):
+            continue
+        markdown = ""
+        if review_md_path.is_file():
+            try:
+                markdown = review_md_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                markdown = ""
+        has_review = bool(summary.get("review_chars")) and not summary.get("error")
+        out.append(
+            {
+                "tool": summary.get("tool"),
+                "source": extra_dir.name.replace("cli_review_", "extra-"),
+                "status": "completed" if has_review else "failed",
+                "verdict": summary.get("verdict"),
+                "duration_s": summary.get("duration_s"),
+                "model": summary.get("model"),
+                "url": summary.get("pr_url"),
+                "markdown": markdown,
+                "fail_reason": summary.get("error"),
+                "posted_to_pr": bool(summary.get("posted_to_pr")),
+            }
+        )
+    return out
 
 
 def _event_duration(

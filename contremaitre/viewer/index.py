@@ -70,7 +70,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
     if not base and isinstance(pr, dict):
         base = pr.get("base")
 
-    cli_review = _read_cli_review_summary(run_dir)
+    cli_reviews = _read_cli_reviews(run_dir)
 
     return {
         "run_id": run_dir.name,
@@ -93,9 +93,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "pr_url": (pr or {}).get("url") if isinstance(pr, dict) else None,
         "pr_title": (pr or {}).get("title") if isinstance(pr, dict) else None,
         "pr_branch": (pr or {}).get("branch") if isinstance(pr, dict) else None,
-        "cli_review_tool": cli_review[0] if cli_review else None,
-        "cli_review_verdict": cli_review[1] if cli_review else None,
-        "cli_review_blocker": cli_review[2] if cli_review else None,
+        "cli_reviews": cli_reviews,
     }
 
 
@@ -143,38 +141,77 @@ def _classify_blocker(text: str) -> str | None:
     return "mixed"
 
 
-def _read_cli_review_summary(run_dir: Path) -> tuple[str, str | None, str | None] | None:
-    """`(tool, verdict_key, blocker_class)` derived from `<tool>_review.md`.
+def _read_cli_reviews(run_dir: Path) -> list[dict[str, Any]]:
+    """Every cli_review on disk for `run_dir`, in display order.
 
-    Skips the I/O round-trip into guardrails — the posted markdown file
-    name carries the tool, and the agent's verdict key (MUST_FIX /
-    NEEDS_ATTENTION / LOOKS_GOOD) lives on line 1 per the prompt spec.
-    `blocker_class` is `_classify_blocker`'s read of the issue bullets,
-    or `None` for non-MUST_FIX verdicts (where the classification is
-    not actionable). Returns `None` when no cli_review.md is present.
+    Three provenance shapes are surfaced:
+      - orchestrator-published: `<tool>_review.md` next to the run's other
+        artifacts (the cli_reviewer post-publish step).
+      - extras from `cli_review_extra`: `extras/cli_review_<NNN>/review.md`
+        with sibling `summary.json` carrying the tool name. Source labelled
+        `extra-NNN` so the user can tell N reruns apart in the badge.
+
+    Each entry: `{"tool", "verdict", "blocker", "source"}`. Verdict / blocker
+    come from `_classify_review_md`. The list is ordered original-first then
+    extras by index so the side-by-side badge order matches batch order.
     """
+
+    reviews: list[dict[str, Any]] = []
 
     for tool in ("codex", "claude"):
         path = run_dir / f"{tool}_review.md"
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return (tool, None, None)
-        # Verdict key is on line 1 after the H3 header the orchestrator
-        # prepends. Scan a handful of non-blank lines for the first match.
-        verdict: str | None = None
-        for line in text.splitlines()[:8]:
-            for key in ("MUST_FIX", "NEEDS_ATTENTION", "LOOKS_GOOD"):
-                if key in line:
-                    verdict = key
-                    break
-            if verdict:
+        if path.is_file():
+            reviews.append(_classify_review_md(tool, path, source="orchestrator"))
+
+    extras_root = run_dir / "extras"
+    if extras_root.is_dir():
+        for extra_dir in sorted(extras_root.iterdir()):
+            if not extra_dir.is_dir():
+                continue
+            review_md = extra_dir / "review.md"
+            if not review_md.is_file():
+                continue
+            summary_path = extra_dir / "summary.json"
+            tool = None
+            if summary_path.is_file():
+                summary = _read_json(summary_path, default=None)
+                if isinstance(summary, dict):
+                    tool = summary.get("tool")
+            if not tool:
+                # Fall back to filename guess so a hand-curated extra still
+                # renders. `<tool>_*` is the cli_review_extra naming, but
+                # the review.md itself doesn't carry the tool, so we sniff
+                # the sibling raw export filename.
+                for candidate in ("codex", "claude"):
+                    if (extra_dir / f"{candidate}_review_raw_export.jsonl").exists():
+                        tool = candidate
+                        break
+            if not tool:
+                continue
+            # `cli_review_001` → `extra-001`
+            label = extra_dir.name.replace("cli_review_", "extra-")
+            reviews.append(_classify_review_md(tool, review_md, source=label))
+
+    return reviews
+
+
+def _classify_review_md(tool: str, path: Path, *, source: str) -> dict[str, Any]:
+    """Parse a review.md into the dict shape `_read_cli_reviews` returns."""
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"tool": tool, "verdict": None, "blocker": None, "source": source}
+    verdict: str | None = None
+    for line in text.splitlines()[:8]:
+        for key in ("MUST_FIX", "NEEDS_ATTENTION", "LOOKS_GOOD"):
+            if key in line:
+                verdict = key
                 break
-        blocker = _classify_blocker(text) if verdict == "MUST_FIX" else None
-        return (tool, verdict, blocker)
-    return None
+        if verdict:
+            break
+    blocker = _classify_blocker(text) if verdict == "MUST_FIX" else None
+    return {"tool": tool, "verdict": verdict, "blocker": blocker, "source": source}
 
 
 _SETTLED_MAX_LINES = 3
@@ -505,24 +542,31 @@ def _render_row(r: dict[str, Any]) -> str:
         models_bits.append(f'<span style="color:var(--sim)">sim</span> <code>{_escape(r["sim_model"])}</code>')
     if r["extra_model"]:
         models_bits.append(f'<span style="color:var(--extra)">extra</span> <code>{_escape(r["extra_model"])}</code>')
-    if r["cli_review_tool"]:
-        # Colored sim-dot keyed on the verdict (MUST_FIX/NEEDS_ATTENTION/
-        # LOOKS_GOOD) — keeps the house style consistent with the other
-        # tier dots on the page.
-        cli_tier = _cli_review_tier(r["cli_review_verdict"])
+    # One badge per cli_review on disk (orchestrator + any cli_review_extra
+    # passes). Side-by-side display lets A1's cross-reviewer comparison read
+    # off the index — codex MUST_FIX next to claude NEEDS_ATTENTION etc.
+    for cr in r["cli_reviews"]:
+        cli_tier = _cli_review_tier(cr["verdict"])
         # For MUST_FIX rows only, surface whether the blocker is mechanical
         # (formatter/lint — actor's pre-publish gate should catch) vs
         # judgement (real bug — what we want the reviewer for). Lets the
         # index reveal the 4-vs-9-vs-mixed split at a glance.
-        blocker_suffix = ""
-        blocker = r["cli_review_blocker"]
+        suffix_bits: list[str] = []
+        blocker = cr["blocker"]
         if blocker:
             label = {"mechanical": "format", "mixed": "lint+bug", "semantic": "bug"}[blocker]
-            blocker_suffix = f' <span style="color:var(--text-muted)">({label})</span>'
+            suffix_bits.append(label)
+        if cr["source"] != "orchestrator":
+            suffix_bits.append(cr["source"])
+        suffix = (
+            f' <span style="color:var(--text-muted)">({" · ".join(suffix_bits)})</span>'
+            if suffix_bits
+            else ""
+        )
         models_bits.append(
             f'<span class="sim-dot {cli_tier}"></span>'
-            f'<span style="color:var(--accent)">{_escape(r["cli_review_tool"])} review</span>'
-            f"{blocker_suffix}"
+            f'<span style="color:var(--accent)">{_escape(cr["tool"])} review</span>'
+            f"{suffix}"
         )
     models_line = " · ".join(models_bits) if models_bits else '<span class="no-eval">no model recorded</span>'
 
