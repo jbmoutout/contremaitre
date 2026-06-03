@@ -4,333 +4,120 @@ Deterministic orchestration shell that runs Matt Pocock's [`improve-codebase-arc
 
 The agent and SIM live inside opencode-in-Docker containers. Git, GitHub, diff-scan, and cap enforcement stay host-owned — the agent has no outbound credentials.
 
-## Quickstart — live run to draft PR
+**Status**: v0.1.2 — pre-1.0, expect rough edges.
 
-The main command. Watches the run live in a two-pane TUI (Agent | SIM), opens a draft PR on your fork when SIM approves the diff:
-
-```bash
-GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
-  --actor opencode \
-  --base main \
-  --fork git@github.com:<you>/<target-repo>.git \
-  --publish-mode gh \
-  --allow-open-egress \
-  --max-turns 20 \
-  --max-wall-minutes 45 \
-  --max-cost-usd 5
-```
-
-The target repo is cloned lazily into `~/.cache/contremaitre/<host>-<owner>-<repo>/` on first run (subsequent runs reuse the cache + `git fetch origin <base>` for freshness). You never need a parallel local checkout — only the `--fork` URL.
-
-Before launching, contremaitre walks through pre-flight checks and decisions in this order: an OpenRouter key-status banner, the model picker (free OpenCode Zen models by default — paste any OpenRouter slug when a key is set), a cli-reviewer availability check, a free-tier quota probe, then a decision-free recap (target, branch, models, code-review, caps, network) and `Continue? [Y/n]`. Pass `-y` / `--yes` to skip the prompt (CI / scripts); non-TTY mode collapses the banners to `[info]` log lines so logs explain what was auto-assumed.
-
-Add `--check-cmd "<command>"` (repeatable) if your target has a fast deterministic check worth gating publication on — see [ecosystem examples](#executable-checks-per-ecosystem) below. Without it, publication still requires SIM approval + L0 hard gates (diff scan, diff-hash match, clean worktree).
-
-**Shortcut:** a [`justfile`](justfile) at the repo root wraps the long form. `brew install just`, then:
+## Quickstart
 
 ```bash
-just                                              # list recipes
-just tui-run main git@github.com:<you>/<target>.git
-just deepdeep tui-run main git@github.com:<you>/<target>.git
+just tui-run main git@github.com:<you>/<target-repo>.git
 ```
 
-`deepdeep` is a model preset that pins both `--agent-model` and `--sim-model` to `openrouter/deepseek/deepseek-v4-flash`. Add per-target convenience recipes (e.g. `just my-repo`) and more presets as the workflow grows.
+The TUI shows the agent and SIM working live, side-by-side. When the run finishes successfully, a draft PR opens on your fork.
 
-**One-time setup** (auto-handled on first run):
-- Local clone cache is created on demand under `~/.cache/contremaitre/`.
-- Runtime image `contremaitre-agent:latest` builds itself on first opencode-mode run. ~3 min on a warm host. Auto-rebuilds on subsequent runs when the Dockerfile content changes (image carries a `contremaitre.dockerfile-sha256` label; mismatch triggers a rebuild). Ships with `uv` + `poetry` so Python targets get a working runtime out of the box.
-- TUI requires `textual` — run `uv sync --extra tui` (or `--extra tui --group dev` for the full dev env). Skip if you'd rather watch via JSONL tail.
-- `OPENROUTER_API_KEY` in `.env` (cwd or repo root) — **optional**. Without a key, runs use free [OpenCode Zen](https://opencode.ai/docs/zen/) models served by OpenCode (no auth needed). Set a key to unlock paid OpenRouter models and to paste arbitrary OpenRouter slugs in the picker; preflight verifies the key has a provider-side credit limit (configurable in your OpenRouter dashboard) and warns on unlimited keys. See [`.env.example`](.env.example).
+**Prerequisites**
 
-### What each flag does
+- [`just`](https://github.com/casey/just) — `brew install just`
+- Docker (the runtime image builds itself on first run, ~3 min)
+- [`gh`](https://cli.github.com/) authenticated (`gh auth login`)
+- Python 3.11+, [`uv`](https://docs.astral.sh/uv/) — `uv sync --extra tui` for the TUI; `uv sync --group dev` to run tests
+The interactive launcher confirms with `Continue? [Y/n]` before each run; pass `-y` to skip or `--no-prompt` for full automation. See [docs/control-plane.md#launch-sequence](docs/control-plane.md#launch-sequence) for the exact flow.
 
-| Flag | Meaning | Required? |
-|---|---|---|
-| `--actor opencode` | live mode (vs. `--actor fake` for deterministic smoke) | **yes** |
-| `--base` | branch the worktree is sourced from + PR target | **yes** (typical: `main`) |
-| `--fork` | git URL where the run's branch is pushed; also the default clone source for the cache | **yes** for `--publish-mode gh` |
-| `--upstream` | canonical clone source when `--fork` is your fork of someone else's repo | optional (preferred over `--fork` for cloning when set) |
-| `--repo-cache` | override the auto-derived cache path (default: `~/.cache/contremaitre/<slug>/`) | optional |
-| `--opencode-config` | path to your `opencode.json` (provider + model registry) | **yes** for opencode mode |
-| `--check-cmd` | executable check the post-implementation worktree must pass; repeatable | optional (publication blocked only on a configured-and-failing check) |
-| `--cli-reviewer` | post-publish code review by a locally-installed CLI on your subscription: `auto` / `codex` / `claude` / `both` / `none`. `auto` (default) detects what's installed and prompts on TTY; `both` runs codex and claude sequentially and posts two PR comments. Never blocks the run. | optional (default: `auto`) |
-| `--no-prompt` | skip the model + cli-reviewer pickers entirely; use saved defaults from `.contremaitre/defaults.toml` (or hardcoded fallbacks). Implies `--yes`. | optional |
-| `--publish-mode gh` | open a real draft PR via `gh pr create --draft` | optional (default: `stub` — no PR, just simulates) |
-| `--yes` / `-y` | skip the pre-launch Y/n prompt | optional (auto-skipped in non-TTY) |
-| `--allow-open-egress` | accept unrestricted container egress; alternative is `--docker-network` / proxy flags | required if no proxy is configured |
-| `--max-turns` | per-actor turn budget | optional (default `30`) |
-| `--max-wall-minutes` | wall-clock budget | optional (default `180`) |
-| `--max-cost-usd` | orchestrator cost cap, on top of OpenRouter's daily limit | optional (default `30`) |
+## Models
 
-### Useful defaults you may want to override
+By default the picker offers free [OpenCode Zen](https://opencode.ai/docs/zen/) models served by OpenCode (slugs like `opencode/big-pickle`, `opencode/deepseek-v4-flash-free`) — **no API key required**. The catalog is fetched live at launch.
 
-| Flag | Default | When to change |
-|---|---|---|
-| `--agent-model` | omit to pick interactively at launch (numbered list of [OpenCode Zen](https://opencode.ai/docs/zen/) free models — no auth needed, served by OpenCode); CLI fallback is `openrouter/deepseek/deepseek-v4-flash` | bump to `openrouter/anthropic/claude-opus-4.7` for thornier targets |
-| `--sim-model` | omit to pick (second prompt; defaults to your agent pick) | usually keep matched to agent-model |
-| `--docker-image` | `contremaitre-agent:latest` | only when you've built a custom image |
+To use paid OpenRouter models, set `OPENROUTER_API_KEY` in `.env` and paste any OpenRouter slug at the picker prompt (e.g. `openrouter/anthropic/claude-sonnet-4.6`, `openrouter/qwen/qwen3-coder-plus`). Preflight verifies the key has a provider-side credit limit and warns on unlimited keys. See [`.env.example`](.env.example).
 
-Passing both `--agent-model` and `--sim-model` skips the picker (this is how the `just deepdeep` preset works). The picker is also skipped when stdin isn't a TTY (CI / scripts) or when `--yes` is set.
+Skip the picker entirely with `--no-prompt` (uses [`.contremaitre/defaults.toml`](#saved-picker-defaults)) or pass `--agent-model` / `--sim-model` explicitly.
 
-### Saving picker defaults
+## How it works
 
-Hand-edit `.contremaitre/defaults.toml` (cwd-local; XDG fallback at `$XDG_CONFIG_HOME/contremaitre/defaults.toml`) to seed the launch-screen pickers. The file is gitignored; per-run CLI flags always win. All keys are optional:
+Inside one multi-turn opencode session the agent runs the skill end-to-end:
+
+1. **Explore + propose** — agent reads the codebase, writes `.contremaitre/architecture-review.html` (candidate cards), then asks the SIM which to deepen.
+2. **Grill** — N turns of agent ↔ SIM exchanges. SIM cites constraints from the code (`read` / `glob` / `grep` only); the agent defends or revises.
+3. **Settle** — agent writes `.contremaitre/SETTLED_DESIGN.md` — the design handoff that REVIEW reads.
+4. **Implement** — agent edits files; SIM watches each diff for drift from SETTLED. The project's tests + CI lint/format gate run scoped to changed files.
+5. **Marker** — agent writes `.contremaitre/IMPLEMENTATION_COMPLETE`, ending WORK.
+
+A fresh reviewer container then reads the diff + SETTLED and emits a strict-JSON verdict. `APPROVED` → host hard gates (diff scan, hash match, clean worktree, plus any `--check-cmd`) → `gh pr create --draft`. `CHANGES_REQUESTED` clears the marker and loops back to WORK (up to 3 rounds). If the agent never writes the marker, or any hard gate fails, the run terminates without a PR.
+
+State machine, all five terminal verdicts, and the artifact contract: [docs/control-plane.md](docs/control-plane.md).
+
+## Configuration
+
+### Flags worth knowing
+
+The launcher takes the same flags whether you call `just tui-run …` or `python3 -m contremaitre run …` directly. The most common ones:
+
+- `--base main` *(required)* — branch the worktree is sourced from and the PR target.
+- `--fork git@github.com:<you>/<repo>.git` *(required for real PRs)* — push remote for the run branch.
+- `--upstream …` + `--gh-repo <owner>/<repo>` — when `--fork` is *your* fork and you want the PR opened on the upstream repo.
+- `--agent-model` / `--sim-model` — OpenRouter model slug, or an OpenCode Zen model. Omit to pick interactively.
+- `--cli-reviewer auto|codex|claude|both|none` — after the draft PR opens, run a code review on your host via `claude -p` or `codex exec` and post the result as a PR comment. Uses your Claude Pro/Max or ChatGPT Plus subscription (NOT API). `auto` detects what's installed; `both` runs claude then codex (two comments); `none` skips.
+- `--check-cmd "<command>"` *(repeatable)* — fast deterministic check the post-implementation worktree must pass before publishing (e.g. `"npx tsc --noEmit"`, `"uv run pytest -q"`).
+- `--publish-mode stub|gh` — `stub` (default) is a full dry-run with no `git push` or `gh pr create`; `gh` opens the draft PR.
+- `--max-turns 30` / `--max-wall-minutes 180` / `--max-cost-usd 30` — per-run budgets; the orchestrator aborts cleanly on cap.
+- `--allow-open-egress` — required if you haven't configured `--docker-network` / `--http-proxy` / `--https-proxy`.
+- `-y` / `--yes` — skip the confirmation prompt (CI / scripts). `--no-prompt` also skips the interactive pickers.
+
+Headless mode is the same command minus the TUI prefix:
+
+```bash
+GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre run --base main --fork … --publish-mode gh
+```
+
+The full flag reference lives in [docs/control-plane.md#cli-reference](docs/control-plane.md#cli-reference), or run `python3 -m contremaitre run --help`.
+
+### Saved picker defaults
+
+Hand-edit `.contremaitre/defaults.toml` (cwd-local; XDG fallback at `$XDG_CONFIG_HOME/contremaitre/defaults.toml`) to seed the launch-screen pickers. The file is gitignored; per-run CLI flags always win.
 
 ```toml
 agent_model = "opencode/big-pickle"
 sim_model = "opencode/big-pickle"
-extra_reviewer_model = "opencode/nemotron-3-super-free"  # or "skip" to make Enter skip
-cli_reviewer = "both"   # auto | codex | claude | both | none
+extra_reviewer_model = "opencode/nemotron-3-super-free"  # or "skip" to flip Enter to skip
+cli_reviewer = "both"                                    # auto | codex | claude | both | none
 ```
 
-- Each model's saved value is the picker's Enter default for that role.
-- `extra_reviewer_model = "skip"` flips the extra-reviewer prompt so Enter skips instead of accepting the cross-family suggestion; the suggestion is still numerically pickable.
-- `cli_reviewer = "both" | "codex" | "claude"` prefills the cli-review picker — the picker still runs (so you can override), but Enter accepts the saved value instead of skipping.
-- Pass `--no-prompt` to skip the pickers entirely and use the saved values verbatim.
+`--no-prompt` skips the pickers entirely and uses these values verbatim.
 
-### Cross-fork PR (target is upstream, not your fork)
+### Caveats
 
-Add these flags when your `--fork` is your fork of someone else's repo and you want the PR opened on the upstream:
+- **`--cli-reviewer` is not free.** It calls `claude -p` or `codex exec` on your machine against *your subscription* (Claude Pro/Max, ChatGPT Plus). Each review burns your usage allowance. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are scrubbed from the subprocess env so it can't silently fall through to billed API.
+- **Free models are rate-limited.** OpenCode Zen's free tier is generous but bounded; long runs or many evals eventually hit a daily cap that surfaces as `QUOTA_EXHAUSTED`.
+- **Paid OpenRouter runs cost real money.** A single `n=3` eval cell on `openrouter/anthropic/claude-sonnet-4.6` runs ~$7–10. The default eval config uses free Zen models for a reason.
 
-```bash
-  --upstream git@github.com:<owner>/<target-repo>.git \
-  --gh-repo <owner>/<target-repo>
-```
+## Other commands
 
-### Without the TUI
+- `contremaitre doctor` — preflight check without spawning a run (target/base, Docker, opencode binary, `:ro` mount, network posture, OpenRouter key bounds).
+- `contremaitre cleanup [--deps] [--repos]` — sweep label-tagged containers, worktrees, dangling images; opt-in to deps volumes and the clone cache.
+- `contremaitre viewer <run-dir> [--open]` — rebuild the per-run `viewer.html`: transcript, timeline, sub-agents, written files, guardrail events, eval reports. Self-contained — no server needed.
+- `contremaitre index [<runs-root>] [--open]` — rebuild `index.html` across every run under the root: one summary card per run (verdict, models, PR link, cost, duration), newest first, each linking to its viewer. Auto-rebuilt at the end of every run.
+- `contremaitre tui attach <run-dir>` — read-only TUI over a finished run.
+- `contremaitre eval {run|show|compare|promote|all} <case_id>` — v0 regression canary. See [golden_cases/README.md](golden_cases/README.md).
+- `contremaitre image build [--variant base|rust|go]` — build the runtime image. The default-variant image auto-builds on first opencode-mode run and auto-rebuilds when the Dockerfile changes.
+- `contremaitre fixture init <path>` — create a tiny git repo for fake-actor smoke runs.
 
-Drop the `tui run --` prefix and the orchestrator runs headless, printing the verdict at end:
+For controlled egress (instead of `--allow-open-egress`), pass `--docker-network`, `--http-proxy`, `--https-proxy`, `--no-proxy`. Ambient proxy env vars are *not* forwarded into containers — only what you pass explicitly.
 
-```bash
-GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre run \
-  --actor opencode \
-  --base main \
-  --fork git@github.com:<you>/<target-repo>.git \
-  ... (same flags)
-```
+## When something goes wrong
 
-### Dry-run before pulling the trigger
+- **Browse the run.** Open `.contremaitre/runs/<run-id>/viewer.html` — self-contained, no server. If it's missing, rebuild it: `contremaitre viewer .contremaitre/runs/<run-id>`.
+- **Read the event log.** `guardrail_events.jsonl` in the run dir is the structured timeline of every state transition, cap trip, gate result, recovery, and verdict. Pair with `stats.json` (`reason` field disambiguates same-verdict failure modes).
+- **Sanity-check the environment.** `contremaitre doctor --base main --fork …` runs the same preflight as `run` (Docker daemon + image, opencode binary, `:ro` mount enforcement, network posture, OpenRouter key bounds) without spawning a run.
+- **Sweep leftovers.** A SIGKILL'd parent can leave label-tagged containers and worktrees behind. `contremaitre cleanup --dry-run` shows what's stale; `contremaitre cleanup` removes them. Add `--deps` / `--repos` to also clear cross-run caches.
 
-`--publish-mode stub` runs everything through to the publisher and stops — no `git push`, no `gh pr create`. Useful for the first run against a target:
+## Further reading
 
-```bash
-  --publish-mode stub \
-  # GITHUB_TOKEN not needed
-```
+- [docs/control-plane.md](docs/control-plane.md) — implementation map: state machine, host-owned boundaries, hard gates, artifact contract, full CLI reference, module map.
+- [golden_cases/README.md](golden_cases/README.md) — eval canary: case/config schema, headline panels, single-variable rule, methodology notes, how to add a case.
+- [AGENTS.md](AGENTS.md) — conventions for coding agents modifying this repo.
 
-## Run shape
+## Contributing
 
-```
-INIT → WORK → REVIEW → APPROVED → draft PR
-            ↘ WORK    (CHANGES_REQUESTED, up to max_review_rounds)
-            ↘ NO_PR   (NEEDS_HUMAN, cap trip, missing marker, max rounds, malformed verdict)
-              FAILED  (infrastructure error)
-```
+PRs welcome. Conventions live in [AGENTS.md](AGENTS.md); run `uv run pytest` and `just lint` before opening one.
 
-**WORK** is one multi-turn opencode session: the agent invokes the skill end-to-end, the tooled SIM responds as the SWE/user. The loop ends when the agent writes `.contremaitre/IMPLEMENTATION_COMPLETE` in the worktree.
+## License
 
-**REVIEW** is a single-shot SIM call against `.contremaitre/SETTLED_DESIGN.md` and the diff. The SIM returns a strict JSON verdict.
-
-**Publication** runs only after `APPROVED` clears hard gates (diff scan, diff-hash match, clean worktree) and any configured executable checks. Skipping `--check-cmd` is fine — the L1 gate becomes a no-op and the scorecard records `executable_confidence: null`.
-
-**Post-publish code review** (optional). If `--cli-reviewer` is set (default `auto` detects `claude`/`codex` on PATH and prompts on TTY), the orchestrator invokes the chosen CLI after the Draft PR opens. It pulls the PR diff via `gh`, produces a verdict-led markdown review (line 1 is `🟢 LOOKS_GOOD` / `🟠 NEEDS_ATTENTION` / `🔴 MUST_FIX` followed by a one-sentence justification), and posts it as a single PR comment. The CLI runs on your host with your OAuth subscription (Claude Pro/Max, ChatGPT Plus) — no API quota, no container. Subprocess env scrubs `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` so it can't silently bill API. Failures are logged but never block the run — the PR is already published.
-
-`--cli-reviewer both` runs claude and codex sequentially (claude first) and posts two separate PR comments, each with its own `### reviewed by …` header. The TUI shows both streams in one full-width pane separated by `── claude review ──` / `── codex review ──` dividers, and the footer renders a verdict glyph per tool (`CLAUDE Review ✓  CODEX Review ⏵`). Aggregate `MUST_FIX` from either reviewer surfaces as `✗` in the phase machine.
-
-See [docs/control-plane.md](docs/control-plane.md) for the implementation map.
-
-### Executable checks per ecosystem
-
-`--check-cmd` is target-agnostic: pass whatever fast deterministic command tells you the diff is at least mechanically sound. Examples:
-
-| Stack | Lockfile | Example |
-|---|---|---|
-| Node / TS | `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` | `--check-cmd "npx tsc --noEmit"` |
-| Python (uv) | `uv.lock` | `--check-cmd "uv run pytest -q"` |
-| Python (poetry) | `poetry.lock` | `--check-cmd "poetry run pytest -q"` |
-| Python (rye / pip-tools) | `requirements.lock` | `--check-cmd "python -m pytest -q"` |
-| Rust | `Cargo.lock` (needs `--docker-image contremaitre-agent-rust:latest`) | `--check-cmd "cargo check --all-targets"` |
-| Go | `go.sum` (needs `--docker-image contremaitre-agent-go:latest`) | `--check-cmd "go build ./..."` |
-
-The check runs in a sidecar container that mounts the same worktree + lockhash-keyed deps volume the agent used, with a 600s timeout per command. The deps volume sits at `/app/{node_modules,.venv,.cargo-cache,.go-mod-cache}` (per-ecosystem); runtime env vars (`VIRTUAL_ENV`, `CARGO_HOME`, `GOPATH`) are auto-injected so ecosystem tools find it without per-target setup. Repeat the flag to gate on more than one command.
-
-## Eval canary (v0, regression detection)
-
-Pinned `(target_url, base_sha)` cases under [`golden_cases/`](golden_cases/) run the **real opencode actor** with real prompts, real models, and the codex cli_reviewer. Each case runs n=3 times; the cell summary (verdict-key score, terminal mix, LoC + files-changed, review rounds, cost, wall time, cross-family agreement) is compared against a per-case `baseline.json`. Manual trigger.
-
-### Workflow
-
-A case pins the *task* (target_url + base_sha + intent). A config pins the *system being evaluated* (agent/SIM/reviewer models, publish_mode). Each case has one or more configs; each config has its own baseline. The default config name is `default`.
-
-**1. Make a single-variable change.** Edit ONE of: a prompt under `contremaitre/prompts/*.md`, OR a model in `golden_cases/<case_id>/configs/<config>.toml`, OR the cli_reviewer prompt, OR the docker image, OR `skills-lock.json`. Never both prompts AND models in one cycle — [EVAL_ROADMAP §5](EVAL_ROADMAP.md).
-
-**2. Run the (case, config) pair n=3** (~45min on opencode-free):
-
-```bash
-python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --config default --n 3
-```
-
-Live-tails turn counter per role, host commit, review verdict per round, hard gates, PR open, codex review verdict. TTY users see a spinner with `(Xs since last event)` between events.
-
-**3. Inspect the new cell.** No side effects:
-
-```bash
-python3 -m contremaitre eval show case_01_sqlite_utils_8f0c06e --config default
-```
-
-**4. Compare against the (case, config) baseline.** Exits non-zero on any regression:
-
-```bash
-python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e --config default
-```
-
-Regression rules: `cli_review_score` median drops ≥ 0.30, `agent_discipline_score` drops ≥ 0.20, `cli_findings_weighted` rises ≥ 3 absolute or ≥ 50%, format-compliance rates drop, or `cross_family_agreement_rate` drops ≥ 0.30. Drift envelopes (informational): `cost ± 20%`, `wall ± 30%`, `files / loc / rounds ± 50%`.
-
-**5. If improvement, snapshot as the new baseline.** Refuses if the contremaitre tree is dirty, if any contributing run had a parse failure, or if not all 3 runs reached a healthy terminal — commit first:
-
-```bash
-git commit -am "your single-variable change"
-python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e --config default
-git add golden_cases/<case_id>/baselines/<config>.json && git commit -m "eval: re-baseline after ..."
-```
-
-### Testing alternative configurations
-
-To test the same task with a different model combination (e.g. cross-family SIM), add a new config file rather than editing `default.toml` — the original baseline stays intact for cross-config comparison:
-
-```bash
-# Edit golden_cases/case_01_sqlite_utils_8f0c06e/configs/qwen_sim.toml first
-python3 -m contremaitre eval run case_01_sqlite_utils_8f0c06e --config qwen_sim --n 3
-python3 -m contremaitre eval show case_01_sqlite_utils_8f0c06e --config qwen_sim
-```
-
----
-
-`eval promote` is intentionally strict: a baseline captured against a dirty tree or a flaky reviewer would silently normalize regressions away. See [`golden_cases/README.md`](golden_cases/README.md) to add a case. L2/L3 LLM judges remain `PENDING` per [EVAL_ROADMAP §6](EVAL_ROADMAP.md).
-
-Fake-actor scaffolds under [`smoke_cases/`](smoke_cases/) are integration tests of the state machine, not evals. They are not picked up by `contremaitre eval`.
-
-## Smoke run (fake actor, no docker, no spend)
-
-Useful for verifying the install + state machine without launching containers:
-
-```bash
-python3 -m contremaitre fixture init /tmp/contremaitre-fixture
-python3 -m contremaitre run \
-  --base main \
-  --fork file:///tmp/contremaitre-fixture \
-  --run-slug smoke \
-  --check-cmd "python3 -m unittest discover -s tests" \
-  --yes
-```
-
-Artifacts land in `.contremaitre/runs/<run-id>/`.
-
-## Subsystems
-
-### Doctor / preflight
-
-The doctor runs the same checks as preflight without starting a run:
-
-```bash
-python3 -m contremaitre doctor \
-  --base main \
-  --fork git@github.com:<you>/<target-repo>.git \
-  --opencode-config /path/to/opencode.json \
-  --allow-open-egress
-```
-
-Verifies: target repo + base ref, Docker daemon + image, opencode binary inside the image, `:ro` mount enforcement, network/proxy posture, OpenRouter key bounded via `GET /api/v1/key`.
-
-Bypass flags exist but are noisy on purpose: `--skip-preflight`, `--skip-openrouter-key-check`, `--allow-unlimited-openrouter-key`, `--allow-open-egress`.
-
-### Image build
-
-The first opencode-mode run auto-builds `contremaitre-agent:latest`. Subsequent runs auto-rebuild when the Dockerfile content has changed (image staleness is detected by comparing the `contremaitre.dockerfile-sha256` label against the on-disk Dockerfile). Pre-build or force a rebuild:
-
-```bash
-python3 -m contremaitre image build                    # base (default)
-python3 -m contremaitre image build --variant rust     # adds Rust toolchain
-python3 -m contremaitre image build --variant go       # adds Go toolchain
-python3 -m contremaitre image build --no-cache         # force fresh layers
-```
-
-The base image is generic opencode-in-Docker with `uv`, `poetry`, and `mattpocock/skills` installed globally. No target codebase is baked in; the orchestrator mounts the per-run worktree at `/app` at run time. Variants chain `FROM contremaitre-agent:latest` and add their toolchain — use them via `--docker-image contremaitre-agent-{rust,go}:latest` for Cargo / Go targets.
-
-### Prompts
-
-All prompts live as markdown in [`contremaitre/prompts/`](contremaitre/prompts/):
-
-- [`initial_prompt.md`](contremaitre/prompts/initial_prompt.md) — turn-1 message to the agent. Invokes the skill; adds three host-owned scaffolds (no git, write `SETTLED_DESIGN.md`, write `IMPLEMENTATION_COMPLETE`).
-- [`sim_tooled_persona.md`](contremaitre/prompts/sim_tooled_persona.md) — SIM's first-turn persona. Tooled SWE collaborator, `read`/`glob`/`grep` only, skill vocabulary, read-first-claim-second discipline.
-- [`sim_review_prompt.md`](contremaitre/prompts/sim_review_prompt.md) — strict-JSON review against SETTLED + diff.
-- [`cli_reviewer_prompt.md`](contremaitre/prompts/cli_reviewer_prompt.md) — post-publish code review handed to the locally-installed CLI (claude/codex). Enforces a verdict-led format (`🟢 LOOKS_GOOD` / `🟠 NEEDS_ATTENTION` / `🔴 MUST_FIX` + one-sentence justification) + Conventional Comments labels (`issue`/`suggestion`/`nit`/`question`).
-
-### TUI — attach to a finished run
-
-The quickstart already uses `tui run`. To inspect an already-completed run without spawning a new one:
-
-```bash
-python3 -m contremaitre tui attach .contremaitre/runs/<run-id>
-```
-
-`Ctrl-C` quits. When wrapping a live run, `Ctrl-C` also SIGTERMs the orchestrator so its emergency-flush handler fires.
-
-### Viewer — single-file HTML over a finished run
-
-Every run terminus (success or failure) writes `viewer.html` into the run directory alongside `stats.json` / `transcript.md` / `extracted_files/`. The viewer is self-contained (no network, no build step) — open it in a browser to browse the transcript, timeline, sub-agents, written files, guardrail events, and eval reports for that run.
-
-Rebuild it for an existing run directory at any time:
-
-```bash
-python3 -m contremaitre viewer .contremaitre/runs/<run-id>
-python3 -m contremaitre viewer .contremaitre/runs/<run-id> --open   # also opens in default browser
-```
-
-### Cleanup
-
-Each opencode-mode run creates a worktree at `/tmp/contremaitre-<run-id>/` and label-tagged containers (`contremaitre.run-id=<id>`); both are removed by the orchestrator in `finally`. `image build` prunes dangling images on success. The lockhash-keyed deps volumes and the auto-managed local clone caches under `~/.cache/contremaitre/` are kept by default (cross-run caches).
-
-If a parent gets SIGKILL'd mid-run, leftovers can survive. Sweep them:
-
-```bash
-python3 -m contremaitre cleanup --dry-run    # see what would be removed
-python3 -m contremaitre cleanup              # remove stale containers + worktrees + dangling images
-python3 -m contremaitre cleanup --deps       # also nuke lockhash-keyed deps volumes
-python3 -m contremaitre cleanup --repos      # also nuke ~/.cache/contremaitre/<slug>/ clones
-```
-
-Cleans, in order: containers labeled `contremaitre.run-id=*` whose run dir is gone, leftover `/tmp/contremaitre-*` worktrees, dangling docker images (`--skip-images` to keep), and optionally the cross-run caches behind `--deps` / `--repos`.
-
-### Network posture
-
-Open egress is allowed via `--allow-open-egress` (above). For a controlled proxy:
-
-```bash
-  --docker-network <network>
-  --http-proxy http://127.0.0.1:8080
-  --https-proxy http://127.0.0.1:8080
-  --no-proxy localhost,127.0.0.1
-```
-
-Ambient proxy environment variables are not forwarded into containers — only what you pass explicitly.
-
-### `.env` loading
-
-The CLI loads `.env` from the current directory and the source checkout before argument parsing. Shell values win. Intended for `OPENROUTER_API_KEY` (optional — see [`.env.example`](.env.example) and the one-time-setup note above); `.env` is gitignored.
-
-## Tests
-
-One-time setup (creates `.venv` with pytest, rich, and the project in editable mode):
-
-```bash
-uv sync --group dev
-```
-
-Add `--extra tui` if you also want the live TUI (`textual`). Run the suite:
-
-```bash
-uv run pytest
-```
-
-Working on the code itself? See [AGENTS.md](AGENTS.md).
+Licensed under the MIT License — see [LICENSE](LICENSE).

@@ -46,9 +46,9 @@ python3 -m contremaitre eval compare case_01_sqlite_utils_8f0c06e --config defau
 python3 -m contremaitre eval promote case_01_sqlite_utils_8f0c06e --config default
 ```
 
-To test the same task with a different model combo, add a sibling config (e.g. `configs/qwen_sim.toml`) rather than editing `default.toml` — each config has its own baseline. `promote` refuses on a dirty contremaitre tree, on `n<3`, or if any cli_review failed to parse — commit first. The two-variable guard (EVAL_ROADMAP §5) warns when both contremaitre code and the case-pinned tuple drift in one cycle.
+To test the same task with a different model combo, add a sibling config (e.g. `configs/qwen_sim.toml`) rather than editing `default.toml` — each config has its own baseline. `promote` refuses on a dirty contremaitre tree, on `n<3`, or if any cli_review failed to parse — commit first. The two-variable guard ([golden_cases/README.md](golden_cases/README.md#single-variable-rule--two-variable-guard)) warns when both contremaitre code and the case-pinned tuple drift in one cycle.
 
-When you change anything that moves `system_digest` (prompts, image, contremaitre code, models), append an entry to `docs/eval_systems.md` with the **Intent / Outcome / Learning** triple. The journal is the methodology doc — generalizable principles emerge from specific experiments, so they're recorded next to the experiment that produced them. Per-run notes (forensic, no interpretation) go in `LEARNINGS.md` (gitignored).
+When you change anything that moves `system_digest` (prompts, image, contremaitre code, models), append an Intent / Outcome / Learning entry to your local `docs/eval_systems.md` (gitignored — operator notebook). When a Learning generalizes beyond its specific experiment, lift it into the **Methodology notes** section of [golden_cases/README.md](golden_cases/README.md) so the public canary carries the principle forward. Per-run forensic notes go in `LEARNINGS.md` (gitignored).
 
 `smoke_cases/` holds the fake-actor integration scaffolds (state-machine canary, not eval). They are not picked up by `contremaitre eval`.
 

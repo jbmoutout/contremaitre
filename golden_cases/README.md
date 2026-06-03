@@ -1,6 +1,6 @@
 # Golden cases — v0 regression canary
 
-Each case under `golden_cases/<case_id>/` decouples **task** (what's being evaluated) from **configuration** (the system being evaluated). One case can have many configs; cells and baselines are keyed by `(case_id, config_name)` so model swaps don't destroy the task trail and cross-config comparison is a first-class operation. Methodology lessons that emerged from specific system versions are recorded in [`docs/eval_systems.md`](../docs/eval_systems.md) (one Intent / Outcome / Learning block per `system_digest`).
+Each case under `golden_cases/<case_id>/` decouples **task** (what's being evaluated) from **configuration** (the system being evaluated). One case can have many configs; cells and baselines are keyed by `(case_id, config_name)` so model swaps don't destroy the task trail and cross-config comparison is a first-class operation. Generalizable eval-design principles surfaced by past cells live in [Methodology notes](#methodology-notes) below; per-`system_digest` run-by-run forensics stay in each operator's gitignored `docs/eval_systems.md`.
 
 Fake-actor scaffolds live under [`smoke_cases/`](../smoke_cases/) — they're integration tests of the state machine, not evals.
 
@@ -99,18 +99,34 @@ contremaitre eval promote <case_id> --config qwen_sim
 
 `format_compliance`, `discipline`, `review_depth`, `cli_review_breakdown`, `diff_detail`, `efficiency` panels — see `eval show <case_id> --config <name>` for the full layout.
 
-## Two-variable guard
+## Single-variable rule + two-variable guard
 
-Per [EVAL_ROADMAP §5](../EVAL_ROADMAP.md), bump one variable at a time. `eval compare` warns when both `system_digest` (contremaitre code + prompts + image + skills + models) AND `input_digest` (target + base + cli_reviewer) differ from baseline. The warning doesn't block — it names which variables moved so attribution stays clean.
+**Rule** — between any two cells you intend to compare, change ONE input only: a prompt under `contremaitre/prompts/*.md`, OR a model in `configs/<config>.toml`, OR the cli_reviewer prompt, OR the docker image, OR the contremaitre code. Without a control axis you can't attribute the delta.
+
+**Guard** — `eval compare` warns when both `system_digest` (contremaitre code + prompts + image + skills + models) AND `input_digest` (target + base + cli_reviewer) differ from baseline. The warning doesn't block; it names which variables moved so attribution stays explicit.
 
 ## Tracking what each `system_digest` means
 
-A `system_digest` is just a hash. To interpret one later, append an **Intent / Outcome / Learning** entry to [`../docs/eval_systems.md`](../docs/eval_systems.md) whenever a new digest appears. The journal IS the methodology doc — principles are recorded next to the specific experiment that produced them, so future operators see the lesson in context of why it was learned.
+A `system_digest` is just a hash. Keep an operator-local journal (`docs/eval_systems.md` is gitignored as an operator's notebook) with an **Intent / Outcome / Learning** entry per new digest. When a Learning generalizes beyond its experiment, lift it into the **Methodology notes** section below so the public canary carries the principle forward.
+
+## Methodology notes
+
+Generalizable principles surfaced by running cells under this canary on real models. These are about *eval design*, not about contremaitre specifically.
+
+- **`n=3` is the floor for continuous metrics, not for 3-state verdicts.** At n=3, continuous panels (`wall_seconds`, `loc_net_delta`, `agent_discipline_score`, `cost_usd`) stabilize. A 3-state LLM verdict mapped to 1.0 / 0.5 / 0.0 produces a near-useless median — one bad sample dominates. Build headlines around continuous metrics; treat 3-state outcomes as distribution shapes (`verdict_mix`), not numeric scores.
+
+- **A/A controls are mandatory before claiming a regression at small n.** Run the same config twice and confirm the regression reproduces. Without the control, a one-cell regression flag is plausibly sampling noise. The ~45min runtime cost buys high-confidence ground truth that the variable you changed really is the cause.
+
+- **Correlated metrics are one signal, not three confirmations.** When three favorable panels move in the same direction, they often share one upstream cause (removing the formatter-MF class shifts `cli_review_score`, `cli_issue_count`, and hard-gates-pass-rate simultaneously). Gate regression-confirmation claims at the metric-family level, not the raw-metric level.
+
+- **Same-family agent ↔ SIM is the bias scenario.** Two same-tier same-harness judges share failure modes — given more structured context, the SIM becomes *less* critical of sibling-model output, not more. Cross-family in the agent ↔ SIM channel isn't a nice-to-have, it's the architectural target. Corollary: `cross_family_agreement = 1.0` measures consistency between similarly-bounded judges, not independent corroboration of correctness.
+
+- **Self-reported / heuristic metrics can be structurally zero-pinned.** A flow_use matcher requiring a verbatim ≥20-char grep-output line in the SIM verdict was 0.0 for every SIM ever, because SIMs are prompted to paraphrase. Audit any "low-variance, drop from the gate" recommendation against the *unfiltered* run set before committing it.
 
 ## Known limits (v0)
 
 - **n=3 floor is metric-dependent** (L1): continuous panels stabilize, 3-state verdicts don't. `agent_discipline_score` reproduces cleanly A/A; `cli_review_score` median is more variable.
-- **L2/L3 LLM judges remain `PENDING`** per [EVAL_ROADMAP §6](../EVAL_ROADMAP.md).
+- **L2/L3 LLM judges remain `PENDING`** — only L0 (host hard gates: diff scan, diff-hash, clean worktree, draft-only) and L1 (executable `--check-cmd` results + verdict-format compliance) are deterministic. Cross-family reviewer agreement is tracked but not yet a gate.
 - **Real Draft PRs accumulate** on the target fork. Cleanup is manual (`gh pr close --delete-branch ...`) for now.
 - **Cross-case / cross-config comparison is manual**. A future `contremaitre eval diff <case_a>:<config_a> <case_b>:<config_b>` subcommand could automate it.
 
