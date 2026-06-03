@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
 
@@ -532,15 +533,22 @@ def _review_status_tail(
     sim_review_statuses: list[str],
     extra_review_statuses: list[str],
     extra_enabled: bool,
-    cli_review_status: str | None,
-    cli_review_tool: str,
+    cli_review_status: str | None = None,
+    cli_review_tool: str = "",
     cli_review_verdict: str | None = None,
+    cli_review_states: list[tuple[str, str, str | None]] | None = None,
 ) -> Text:
     """The `Review ✓ ✓  Extra Review ✓ ✓  CODEX Review ⏵` footer tail.
 
     Rendered the same way in every phase past REVIEW so the operator's
     gatekeeper verdicts stay visible through cli_review and done, instead
     of disappearing the moment the phase transitions out of "Reviewing".
+
+    `cli_review_states` (a list of `(tool, status, verdict)`) is the
+    multi-tool path — used by `cli_reviewer="both"` to render two
+    glyphs in execution order (e.g. `CLAUDE Review ✓  CODEX Review ⏵`).
+    The single-tool fields are normalised into the same shape when the
+    multi-tool list isn't provided, so the renderer has one code path.
     """
 
     tail = Text()
@@ -560,11 +568,15 @@ def _review_status_tail(
                     tail.append(" ", style=_PAL_TEXT)
                 g, st = _reviewer_glyph(s)
                 tail.append(g, style=st)
-    if cli_review_status is not None:
-        label = (cli_review_tool or "CLI").upper()
-        tail.append(f"  {label} Review ", style=_PAL_TEXT)
-        g, st = _cli_review_status_glyph(cli_review_status, cli_review_verdict)
-        tail.append(g, style=st)
+    states = cli_review_states
+    if states is None and cli_review_status is not None:
+        states = [(cli_review_tool, cli_review_status, cli_review_verdict)]
+    if states:
+        for tool, status, verdict in states:
+            label = (tool or "CLI").upper()
+            tail.append(f"  {label} Review ", style=_PAL_TEXT)
+            g, st = _cli_review_status_glyph(status, verdict)
+            tail.append(g, style=st)
     return tail
 
 
@@ -587,6 +599,7 @@ def _current_phase_label(
     cli_review_status: str | None = None,
     cli_review_tool: str = "",
     cli_review_verdict: str | None = None,
+    cli_review_states: list[tuple[str, str, str | None]] | None = None,
     quota_failure: dict | None = None,
 ) -> Text:
     """Phase name + sub-info (right of the trail).
@@ -650,6 +663,7 @@ def _current_phase_label(
                 cli_review_status=cli_review_status,
                 cli_review_tool=cli_review_tool,
                 cli_review_verdict=cli_review_verdict,
+                cli_review_states=cli_review_states,
             )
         )
         return text
@@ -660,7 +674,14 @@ def _current_phase_label(
         if color_state == "warn":
             text.append("CLI review — failed", style=f"bold {_PAL_WARN}")
         else:
-            label = f"{(cli_review_tool or 'CLI').upper()} review"
+            if cli_review_states and len(cli_review_states) > 1:
+                # Multi-tool — name both reviewers in execution order so
+                # the operator sees which two are running, not a generic
+                # "CLI review".
+                tools = " + ".join(t.upper() for t, _, _ in cli_review_states)
+                label = f"{tools} review"
+            else:
+                label = f"{(cli_review_tool or 'CLI').upper()} review"
             text.append(label, style=f"bold {_PAL_BRIGHT}")
             text.append(" (post-publish)", style=_PAL_TEXT)
         text.append(
@@ -671,6 +692,7 @@ def _current_phase_label(
                 cli_review_status=cli_review_status,
                 cli_review_tool=cli_review_tool,
                 cli_review_verdict=cli_review_verdict,
+                cli_review_states=cli_review_states,
             )
         )
         return text
@@ -696,6 +718,7 @@ def _current_phase_label(
                 cli_review_status=cli_review_status,
                 cli_review_tool=cli_review_tool,
                 cli_review_verdict=cli_review_verdict,
+                cli_review_states=cli_review_states,
             )
         )
     elif terminal_verdict == "NO_PR_CHANGES_REQUESTED":
@@ -1344,6 +1367,98 @@ def _render_cli_review_event(event: dict[str, Any]):
     return t
 
 
+_CLI_REVIEW_VERDICT_RANK = {
+    "MUST_FIX": 3,
+    "NEEDS_ATTENTION": 2,
+    "LOOKS_GOOD": 1,
+}
+
+
+def _aggregate_cli_review_verdict(verdicts: list[str | None]) -> str | None:
+    """Worst-case verdict across a multi-tool cli_review.
+
+    MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD. Drives the aggregate
+    footer glyph in `cli_reviewer="both"` runs — if either reviewer
+    says MUST_FIX the operator should see `✗`, not the rosier of the
+    two. Returns None when no verdict is in scope (every tool either
+    not done or didn't surface a key).
+    """
+
+    best_rank = 0
+    best_key: str | None = None
+    for v in verdicts:
+        rank = _CLI_REVIEW_VERDICT_RANK.get(v or "", 0)
+        if rank > best_rank:
+            best_rank = rank
+            best_key = v
+    return best_key
+
+
+def _derive_cli_review_states(
+    guardrails: list[dict[str, Any]], choice: str
+) -> list[tuple[str, str, str | None]]:
+    """Return `[(tool, status, verdict)]` in render order for `choice`.
+
+    `status` is one of `"streaming"`, `"completed"`, `"failed"`. Tools
+    that haven't emitted `cli_review_started` yet are dropped — they'd
+    show as a dim `·` placeholder otherwise and the footer would start
+    wider than it ends up. Render order matches `expand_choice` so
+    `both` lists claude then codex (left-to-right glyph order in the
+    footer mirrors execution order).
+    """
+
+    tools = _cli_reviewer_expand_choice(choice)
+    if not tools:
+        return []
+    out: list[tuple[str, str, str | None]] = []
+    for tool in tools:
+        started = any(
+            g.get("event") == "cli_review_started" and g.get("tool") == tool
+            for g in guardrails
+        )
+        if not started:
+            continue
+        completed_evt = next(
+            (
+                g
+                for g in guardrails
+                if g.get("event") == "cli_review_completed"
+                and g.get("tool") == tool
+            ),
+            None,
+        )
+        failed = any(
+            g.get("event") == "cli_review_failed" and g.get("tool") == tool
+            for g in guardrails
+        )
+        if failed:
+            status = "failed"
+        elif completed_evt is not None:
+            status = "completed"
+        else:
+            status = "streaming"
+        verdict = completed_evt.get("verdict") if completed_evt else None
+        out.append((tool, status, verdict))
+    return out
+
+
+def _cli_review_tool_header(tool: str) -> Text:
+    """Inline `── {tool} review ──` divider for the cli-review pane.
+
+    Written once at the moment the tool's first stdout chunk lands, so
+    `cli_reviewer="both"` produces two visible boundaries in time order
+    (claude first, then codex). Single-tool runs only see their own
+    divider — harmless visual context, and it keeps the renderer
+    uniform across the single- and multi-tool paths.
+    """
+
+    label = f"── {tool} review "
+    body = label + "─" * max(0, 44 - len(label))
+    sep = Text()
+    sep.append(body, style="bold cyan")
+    return sep
+
+
 def _turn_separator(turn_number: int, role: str) -> Text:
     """Visual break at an orchestrator-driven handover boundary.
 
@@ -1515,9 +1630,12 @@ if _TEXTUAL_AVAILABLE:
             self.agent_model = agent_model
             self.sim_model = sim_model
             self.extra_reviewer_model = extra_reviewer_model
-            # `"codex"`, `"claude"`, or `"none"`. When set, a third column
-            # mounts post-publish and shows the subscription-bound CLI
-            # reviewer's stream.
+            # `"codex"`, `"claude"`, `"both"`, or `"none"`. When set
+            # (other than `"none"`), the post-publish cli-review row
+            # mounts and shows the subscription-bound CLI reviewer's
+            # stream(s). `"both"` interleaves claude then codex into a
+            # single pane with `── claude review ──` / `── codex review ──`
+            # dividers in time order.
             self.cli_reviewer = cli_reviewer
             self.docker_image = docker_image
             self.target_url = target_url
@@ -1564,7 +1682,15 @@ if _TEXTUAL_AVAILABLE:
             # into its own pane (#cli-review-pane). The detected tool name
             # is cached so the chrome border-title can flip to e.g.
             # "CODEX REVIEW" the moment the first chunk lands.
-            self._cli_review_idx = 0
+            #
+            # `cli_reviewer="both"` runs claude THEN codex sequentially;
+            # the pane shows both streams in time order, each preceded by
+            # a `── claude review ──` / `── codex review ──` divider
+            # written once at first event arrival. Per-tool cursors keep
+            # the divider's idempotence: each event renders exactly once
+            # even though the file is re-read on every tick.
+            self._cli_review_cursor: dict[str, int] = {"claude": 0, "codex": 0}
+            self._cli_review_headers_written: set[str] = set()
             self._cli_review_tool: str = ""
             # Captured at terminal state for the post-exit URL summary
             # printed to stdout — gives Apple Terminal users (no OSC 8
@@ -1669,7 +1795,7 @@ if _TEXTUAL_AVAILABLE:
             self._update_sim_log()
             if self.extra_reviewer_model:
                 self._update_extra_reviewer_log()
-            if self.cli_reviewer in ("codex", "claude"):
+            if self.cli_reviewer in ("codex", "claude", "both"):
                 self._update_cli_review_log()
             self._update_activity_log()
             self._update_chrome()
@@ -1715,6 +1841,12 @@ if _TEXTUAL_AVAILABLE:
             appear delayed (looked like "only shows when it's done"). The
             reveal now coincides with the visible `cli_review_started`
             line in the activity log directly below.
+
+            For `cli_reviewer="both"`, claude and codex run sequentially
+            (claude first); each tool's stream is preceded by a
+            `── claude review ──` / `── codex review ──` divider written
+            once at first event arrival. Single-tool configurations only
+            see their own divider.
             """
 
             # Unhide as soon as the orchestrator says the CLI reviewer has
@@ -1725,32 +1857,27 @@ if _TEXTUAL_AVAILABLE:
                 if pane.has_class("hidden"):
                     pane.set_class(False, "hidden")
 
-            events, tool = self._read_cli_review_events()
-            if tool:
-                self._cli_review_tool = tool
             widget = self.query_one("#cli-review-log", RichLog)
             at_bottom = self._at_bottom(widget)
-            for e in events[self._cli_review_idx :]:
-                widget.write(_render_cli_review_event(e))
-            self._cli_review_idx = len(events)
+            # Claude first, codex second — matches `expand_choice("both")`
+            # in cli_reviewer.py, so the dividers land in execution order.
+            for tool in ("claude", "codex"):
+                events = _read_jsonl(self.paths[f"{tool}_review_raw_export"])
+                if not events:
+                    continue
+                if tool not in self._cli_review_headers_written:
+                    widget.write(_cli_review_tool_header(tool))
+                    self._cli_review_headers_written.add(tool)
+                # Cache the most recently-streaming tool for chrome
+                # title flips (only meaningful in single-tool mode, but
+                # cheap to maintain in `both` mode too).
+                self._cli_review_tool = tool
+                cursor = self._cli_review_cursor.get(tool, 0)
+                for e in events[cursor:]:
+                    widget.write(_render_cli_review_event(e))
+                self._cli_review_cursor[tool] = len(events)
             if at_bottom:
                 widget.scroll_end(animate=False)
-
-        def _read_cli_review_events(self) -> tuple[list[dict[str, Any]], str]:
-            """Return (events, tool) for whichever CLI-review sink exists.
-
-            Only one of the two files is written per run; the other path
-            simply doesn't exist on disk. If both somehow exist, claude
-            wins arbitrarily — the orchestrator never writes both.
-            """
-
-            claude = _read_jsonl(self.paths["claude_review_raw_export"])
-            if claude:
-                return claude, "claude"
-            codex = _read_jsonl(self.paths["codex_review_raw_export"])
-            if codex:
-                return codex, "codex"
-            return [], ""
 
         def _update_sim_log(self) -> None:
             events = _read_jsonl(self.paths["sim_raw_export"])
@@ -1908,20 +2035,32 @@ if _TEXTUAL_AVAILABLE:
             # CLI-review event flags — derived early so they're available
             # to both the CLI pane chrome (mid-function) and the phase
             # machine (later). Single source of truth per tick.
-            cli_review_started = any(g.get("event") == "cli_review_started" for g in guardrails)
-            cli_review_completed_evt = next(
-                (g for g in guardrails if g.get("event") == "cli_review_completed"),
-                None,
-            )
-            cli_review_completed = cli_review_completed_evt is not None
-            cli_review_failed = any(g.get("event") == "cli_review_failed" for g in guardrails)
+            #
+            # Per-tool states (`[(tool, status, verdict)]`) drive the
+            # multi-tool path: for `cli_reviewer="both"` the phase
+            # machine and footer treat the cli_review step as one
+            # logical phase but render each tool's verdict glyph
+            # separately. `cli_review_completed` is the aggregate flag —
+            # only true once every expected tool has settled — so the
+            # phase doesn't transition to "done" while the second
+            # reviewer is still streaming.
+            cli_review_states = _derive_cli_review_states(guardrails, self.cli_reviewer)
+            expected_tools = _cli_reviewer_expand_choice(self.cli_reviewer)
+            cli_review_started = any(s[1] in ("streaming", "completed", "failed") for s in cli_review_states)
+            cli_review_failed = any(s[1] == "failed" for s in cli_review_states)
+            if expected_tools:
+                settled_tools = {t for (t, st, _v) in cli_review_states if st in ("completed", "failed")}
+                cli_review_completed = bool(settled_tools) and all(t in settled_tools for t in expected_tools)
+            else:
+                cli_review_completed = False
             # Verdict key (MUST_FIX / NEEDS_ATTENTION / LOOKS_GOOD) the
             # agent wrote on line 1 of the review, surfaced on the
             # completion event payload by the orchestrator. Drives the
             # footer glyph so `MUST_FIX` renders as `✗` instead of the
-            # subprocess-exit-0 `✓`.
-            cli_review_verdict: str | None = (
-                cli_review_completed_evt.get("verdict") if cli_review_completed_evt else None
+            # subprocess-exit-0 `✓`. Worst-case wins for `both`: if
+            # either reviewer says MUST_FIX, the aggregate is MUST_FIX.
+            cli_review_verdict: str | None = _aggregate_cli_review_verdict(
+                [v for (_t, st, v) in cli_review_states if st == "completed"]
             )
 
             agent_turns = _text_event_count(agent_events)
@@ -2094,24 +2233,39 @@ if _TEXTUAL_AVAILABLE:
 
             # ----- CLI review column (only when configured) -----
             # `cli_reviewer` is the operator's choice from launch screen
-            # ("codex" / "claude"); `_cli_review_tool` is what the JSONL
-            # actually shows once chunks land. The two match in normal
-            # operation; if no chunks have arrived yet we fall back to the
-            # configured choice so the title doesn't read "(?) REVIEW" mid-
-            # flight.
-            if self.cli_reviewer in ("codex", "claude"):
+            # ("codex" / "claude" / "both"); `_cli_review_tool` is what
+            # the JSONL actually shows once chunks land — used as the
+            # title-flip hint in single-tool mode. For `both`, the title
+            # reads `CLAUDE+CODEX PR REVIEW` regardless of which sink is
+            # currently streaming, so the operator sees the multi-tool
+            # context at all times.
+            if self.cli_reviewer in ("codex", "claude", "both"):
                 cli_events = _read_jsonl(self.paths["claude_review_raw_export"]) + _read_jsonl(
                     self.paths["codex_review_raw_export"]
                 )
-                tool_label = (self._cli_review_tool or self.cli_reviewer).upper()
+                if self.cli_reviewer == "both":
+                    tool_label = "CLAUDE+CODEX"
+                else:
+                    tool_label = (self._cli_review_tool or self.cli_reviewer).upper()
                 # Pane state mirrors the file-age semantics used elsewhere:
                 # `active` while a chunk arrived in the last 2s, otherwise
                 # `idle`. No container backs this — the CLI runs on the host.
-                cli_file_age = (
-                    _file_age(self.paths["claude_review_raw_export"])
-                    if self._cli_review_tool == "claude"
-                    else _file_age(self.paths["codex_review_raw_export"])
-                )
+                # For `both`, the freshest of the two sinks drives the state.
+                if self.cli_reviewer == "both":
+                    ages = [
+                        a for a in (
+                            _file_age(self.paths["claude_review_raw_export"]),
+                            _file_age(self.paths["codex_review_raw_export"]),
+                        )
+                        if a is not None
+                    ]
+                    cli_file_age = min(ages) if ages else None
+                else:
+                    cli_file_age = (
+                        _file_age(self.paths["claude_review_raw_export"])
+                        if self._cli_review_tool == "claude"
+                        else _file_age(self.paths["codex_review_raw_export"])
+                    )
                 cli_state = _activity_state(
                     container_present=False,
                     file_age=cli_file_age,
@@ -2253,11 +2407,12 @@ if _TEXTUAL_AVAILABLE:
                 sim_review_statuses = []
                 extra_review_statuses = []
 
-            # CLI-review status derived from the same guardrail events that
-            # drive the phase machine — None when this run didn't enable a
-            # CLI reviewer (so the tail renders nothing).
+            # CLI-review aggregate status derived from per-tool states.
+            # Only fed into the single-tool legacy path (`cli_review_status`)
+            # for back-compat; `cli_review_states` is the multi-tool
+            # source of truth fed to the footer renderer directly.
             cli_review_status: str | None = None
-            if self.cli_reviewer in ("codex", "claude"):
+            if self.cli_reviewer in ("codex", "claude", "both"):
                 if cli_review_failed:
                     cli_review_status = "failed"
                 elif cli_review_completed:
@@ -2289,6 +2444,7 @@ if _TEXTUAL_AVAILABLE:
                     cli_review_tool=self._cli_review_tool
                     or (self.cli_reviewer if self.cli_reviewer in ("codex", "claude") else ""),
                     cli_review_verdict=cli_review_verdict,
+                    cli_review_states=cli_review_states if cli_review_states else None,
                     quota_failure=quota_failure,
                 )
             )

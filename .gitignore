@@ -10,6 +10,7 @@ build/
 dist/
 *.egg-info/
 .contremaitre/runs/
+.contremaitre/defaults.toml
 
 .env
 

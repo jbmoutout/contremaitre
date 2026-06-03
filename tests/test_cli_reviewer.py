@@ -148,6 +148,140 @@ class ResolveChoiceTest(unittest.TestCase):
         )
         self.assertEqual(out, "none")
 
+    def test_auto_both_installed_pick_both(self):
+        # The 3rd option ("both") runs codex and claude back-to-back and
+        # posts two PR comments. Surfaced only when both binaries are on
+        # PATH so we don't dangle an unselectable option.
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            input_fn=lambda _: "3",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "both")
+
+    def test_explicit_both_when_both_installed(self):
+        out = cli_reviewer.resolve_choice(
+            flag_value="both",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+        )
+        self.assertEqual(out, "both")
+
+    def test_explicit_both_with_only_one_installed_degrades_to_that_one(self):
+        # `--cli-reviewer both` should not silently skip when only one
+        # tool is present — the operator opted in. Fall back to whichever
+        # is available and warn.
+        out = cli_reviewer.resolve_choice(
+            flag_value="both",
+            available={"claude": "/bin/claude"},
+            tty=True,
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "claude")
+
+    def test_explicit_both_with_neither_installed_returns_none(self):
+        out = cli_reviewer.resolve_choice(
+            flag_value="both",
+            available={},
+            tty=True,
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "none")
+
+
+class SavedDefaultTest(unittest.TestCase):
+    """`saved_default` prefills the auto-picker without short-circuiting it."""
+
+    def test_two_installed_enter_accepts_saved_both(self):
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="both",
+            input_fn=lambda _: "",  # Enter
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "both")
+
+    def test_two_installed_enter_accepts_saved_codex(self):
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="codex",
+            input_fn=lambda _: "",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "codex")
+
+    def test_two_installed_saved_default_can_be_overridden_numerically(self):
+        # Saved was "both" but operator picks `1` (codex). Numeric pick
+        # must still win over the Enter default.
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="both",
+            input_fn=lambda _: "1",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "codex")
+
+    def test_two_installed_saved_default_can_still_skip(self):
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="both",
+            input_fn=lambda _: "s",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "none")
+
+    def test_one_installed_saved_none_flips_default_to_n(self):
+        # `saved_default="none"` flips Enter from Y to N. Y still works
+        # explicitly, but Enter now skips.
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"claude": "/bin/claude"},
+            tty=True,
+            saved_default="none",
+            input_fn=lambda _: "",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "none")
+
+    def test_one_installed_saved_default_y_still_accepts(self):
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"claude": "/bin/claude"},
+            tty=True,
+            saved_default="claude",
+            input_fn=lambda _: "",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "claude")
+
+
+class ExpandChoiceTest(unittest.TestCase):
+    def test_both_expands_to_claude_first_then_codex(self):
+        # Claude first so its comment lands above codex's in the PR
+        # conversation — purely cosmetic but consistent.
+        self.assertEqual(cli_reviewer.expand_choice("both"), ("claude", "codex"))
+
+    def test_single_tool_returns_one_tuple(self):
+        self.assertEqual(cli_reviewer.expand_choice("codex"), ("codex",))
+        self.assertEqual(cli_reviewer.expand_choice("claude"), ("claude",))
+
+    def test_none_returns_empty(self):
+        self.assertEqual(cli_reviewer.expand_choice("none"), ())
+
+    def test_unknown_returns_empty(self):
+        self.assertEqual(cli_reviewer.expand_choice("auto"), ())
+        self.assertEqual(cli_reviewer.expand_choice("garbage"), ())
+
 
 class CommandForTest(unittest.TestCase):
     """Lock down sandbox / permission flags so they don't silently regress."""

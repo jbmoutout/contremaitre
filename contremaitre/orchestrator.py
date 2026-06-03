@@ -566,6 +566,7 @@ class Orchestrator:
     def _run_cli_review(
         self,
         *,
+        tool: str,
         outcome: PublishOutcome,
         approved_hash: str,
     ) -> None:
@@ -579,11 +580,16 @@ class Orchestrator:
         On success the collected markdown is posted as a single PR
         comment. Failures are logged but not raised: the PR is already
         published.
+
+        `tool` is the concrete reviewer to invoke (`"claude"` or
+        `"codex"`), resolved by the caller from `config.cli_reviewer`.
+        For `cli_reviewer="both"` the caller invokes this twice — once
+        per tool — and each invocation produces its own JSONL sink + PR
+        comment.
         """
 
         from . import cli_reviewer as _cli_reviewer
 
-        tool = self.config.cli_reviewer
         sink = _cli_reviewer.jsonl_sink_for(self.paths, tool)
         self._emit(events.CLI_REVIEW_STARTED, tool=tool, url=outcome.url)
 
@@ -743,8 +749,15 @@ class Orchestrator:
         # comment has been posted (or the step has explicitly failed). Never
         # raises — the PR is already published; a missed review is observable
         # via the CLI_REVIEW_FAILED event and recoverable by the human.
-        if self.config.cli_reviewer in ("codex", "claude") and outcome.url:
-            self._run_cli_review(outcome=outcome, approved_hash=approved_hash)
+        # `both` runs claude then codex sequentially; each posts its own
+        # PR comment via its own JSONL sink.
+        from . import cli_reviewer as _cli_reviewer
+
+        for tool in _cli_reviewer.expand_choice(self.config.cli_reviewer):
+            if outcome.url:
+                self._run_cli_review(
+                    tool=tool, outcome=outcome, approved_hash=approved_hash
+                )
         self._write_final_stats(State.APPROVED, TerminalVerdict.READY_FOR_DRAFT_PR, outcome.reason)
         return RunResult(
             run_id=self.run_id,

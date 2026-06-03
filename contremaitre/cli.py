@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import defaults as _defaults
 from .envfile import load_dotenv_defaults
 from .fixture import init_fixture
 from .models import ActorMode, Caps, PublishMode, RunConfig
@@ -149,12 +150,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--cli-reviewer",
-        choices=["auto", "codex", "claude", "none"],
+        choices=["auto", "codex", "claude", "both", "none"],
         default="auto",
         help=(
             "Optional local CLI reviewer run AFTER the Draft PR is published. "
             "Uses the operator's interactive subscription (claude/codex), not API. "
             "`auto` (default) detects what's installed and prompts when stdin is a TTY; "
+            "`both` runs codex and claude sequentially (two PR comments); "
             "`none` skips. The review is posted as a single comment on the PR."
         ),
     )
@@ -189,6 +191,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Skip the pre-launch Y/n prompt. Useful for scripts / CI.",
+    )
+    run_p.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help=(
+            "Skip the model + cli-reviewer pickers entirely and use the "
+            "saved defaults from `contremaitre init` (or hardcoded fallbacks "
+            "when no defaults file exists). Implies --yes. The pre-flight "
+            "ping and recap still run."
+        ),
     )
     run_p.add_argument("--keep-worktree", action="store_true")
     run_p.add_argument("--simulate-drift-after-approval", action="store_true")
@@ -388,6 +400,10 @@ def _run_cmd(args: argparse.Namespace) -> int:
     except subprocess.CalledProcessError as exc:
         print(f"contremaitre: git clone failed: {exc.stderr or exc}", file=sys.stderr)
         return 1
+    # Apply saved defaults (~/.config/contremaitre/defaults.toml) — only
+    # for fields the operator did not pass explicitly. Per-run CLI flags
+    # always win; the file is a convenience layer for picker prefills.
+    _apply_saved_defaults(args, argv=sys.argv)
     try:
         if not _launch_screen(args=args, source_url=source_url, argv_for_explicit_check=sys.argv):
             print("aborted", file=sys.stderr)
@@ -626,6 +642,194 @@ def _print_no_cli_reviewer_banner() -> None:
     print(_RULE)
 
 
+def _pick_models_interactive(
+    *,
+    current_agent: str,
+    current_sim: str,
+    current_extra: str | None,
+    pick_agent: bool,
+    pick_sim: bool,
+    pick_extra: bool,
+    allow_custom: bool,
+    extra_default_skip: bool = False,
+) -> tuple[str, str, str | None, list[tuple[str, str]]]:
+    """Run the agent / sim / extra-reviewer picker; return chosen values.
+
+    Returns `(agent, sim, extra, picker_args)`. `picker_args` is a list of
+    `(flag, value)` tuples for callers that pass-through flags to a
+    spawned subprocess (the `tui run` path); the run-screen caller
+    instead reassigns directly onto its `argparse.Namespace`. Either
+    way, the result tuple is authoritative for what was picked.
+
+    `pick_*` flags toggle each role's prompt — `False` means the value
+    was explicitly set on the command line (or `init` left it unset)
+    and the picker should leave that field alone.
+
+    When the free-model catalog is unreachable, returns inputs unchanged
+    and prints a soft warning — never blocks a run that would otherwise
+    launch with hardcoded defaults.
+    """
+
+    if not (pick_agent or pick_sim or pick_extra):
+        return current_agent, current_sim, current_extra, []
+
+    free = _fetch_free_models()
+    picker_args: list[tuple[str, str]] = []
+    if free is None:
+        print()
+        print(_d("  (model catalog unavailable — using CLI defaults)"))
+        return current_agent, current_sim, current_extra, picker_args
+
+    print()
+    print(f"  {_b('Pick models')}  {_d('(free OpenCode Zen — no key needed)')}")
+    print()
+
+    def _index_of(model: str | None) -> int | None:
+        if not model:
+            return None
+        bare = model.rsplit("/", 1)[-1]
+        candidates = {bare, f"{bare}-free"}
+        for i, m in enumerate(free):
+            if m["id"] in candidates:
+                return i
+        return None
+
+    # Per-role default indices read from the saved values. None when the
+    # saved slug isn't in the free catalog (custom OpenRouter paste, or
+    # no saved value); the picker falls back to a sensible neighbor in
+    # that case.
+    agent_default = _index_of(current_agent)
+    sim_default = _index_of(current_sim)
+    extra_default = _index_of(current_extra)
+    width = len(str(len(free) - 1))
+    for i, m in enumerate(free):
+        roles = []
+        if agent_default == i:
+            roles.append("agent")
+        if sim_default == i:
+            roles.append("sim")
+        if extra_default == i:
+            roles.append("extra")
+        marker = f"  {_d('← ' + ', '.join(roles))}" if roles else ""
+        print(f"    {i:>{width}}  {m['id']}{marker}")
+    if allow_custom:
+        print(f"    {'c':>{width}}  {_d('paste any OpenRouter model name (openrouter.ai/models)')}")
+    print()
+
+    def _pick_inline(role: str, current_idx: int) -> tuple[str, int]:
+        default_id = free[current_idx]["id"]
+        opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
+        prompt = f"  {role:<6}[{current_idx} - {default_id}] (Enter=accept, {opts}, q): "
+        while True:
+            try:
+                reply = input(prompt).strip()
+            except EOFError:
+                return f"opencode/{free[current_idx]['id']}", current_idx
+            low = reply.lower()
+            if low == "":
+                return f"opencode/{free[current_idx]['id']}", current_idx
+            if low == "q":
+                raise KeyboardInterrupt
+            if low.isdigit() and 0 <= int(low) < len(free):
+                idx = int(low)
+                return f"opencode/{free[idx]['id']}", idx
+            if allow_custom and low == "c":
+                try:
+                    slug = input(f"  paste OpenRouter model for {role}: ").strip()
+                except EOFError:
+                    continue
+                if slug:
+                    return _normalize_openrouter_slug(slug), current_idx
+                continue
+            suffix = ", c" if allow_custom else ""
+            print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, or q")
+
+    agent = current_agent
+    agent_idx = agent_default if agent_default is not None else 0
+    if pick_agent:
+        agent, agent_idx = _pick_inline("agent", agent_idx)
+        picker_args.append(("--agent-model", agent))
+
+    sim = current_sim
+    # Sim defaults to its OWN saved value, only falling back to agent's
+    # index when sim has no saved value. Before this fix, sim always
+    # mirrored whatever the operator just picked for agent, which made
+    # saved sim_model in defaults.toml a no-op.
+    sim_idx = sim_default if sim_default is not None else agent_idx
+    if pick_sim:
+        sim, sim_idx = _pick_inline("sim", sim_idx)
+        picker_args.append(("--sim-model", sim))
+
+    extra = current_extra
+    if pick_extra:
+        from .model_family import model_family
+
+        # Saved extra_reviewer_model wins the suggested-default slot if
+        # it's in the catalog; only fall back to cross-family heuristic
+        # when the operator hasn't saved a preference.
+        suggested_idx: int | None = extra_default
+        if suggested_idx is None:
+            sim_fam = model_family(sim)
+            if sim_fam != "unknown":
+                for i, m in enumerate(free):
+                    if model_family(f"opencode/{m['id']}") not in (sim_fam, "unknown"):
+                        suggested_idx = i
+                        break
+        if suggested_idx is None:
+            for i in range(len(free)):
+                if i != sim_idx:
+                    suggested_idx = i
+                    break
+        opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
+        # `extra_default_skip` flips the Enter behavior to "skip" — the
+        # suggested model is still numerically pickable, but the prompt
+        # makes Enter the no-extra-reviewer path. Set by
+        # `extra_reviewer_model = "skip"` in defaults.toml.
+        enter_skips = extra_default_skip or suggested_idx is None
+        if suggested_idx is not None:
+            suggested_id = free[suggested_idx]["id"]
+            if enter_skips:
+                extra_prompt = f"  extra [{suggested_idx} - {suggested_id}] (Enter=skip, {opts}, q): "
+            else:
+                extra_prompt = f"  extra [{suggested_idx} - {suggested_id}] (Enter=accept, s=skip, {opts}, q): "
+        else:
+            extra_prompt = f"  extra  (Enter=skip, {opts}, q): "
+        while True:
+            try:
+                reply = input(extra_prompt).strip()
+            except EOFError:
+                break
+            low = reply.lower()
+            if low == "":
+                if not enter_skips and suggested_idx is not None:
+                    extra = f"opencode/{free[suggested_idx]['id']}"
+                    picker_args.append(("--extra-reviewer-model", extra))
+                break
+            if low in ("s", "skip"):
+                break
+            if low == "q":
+                raise KeyboardInterrupt
+            if low.isdigit() and 0 <= int(low) < len(free):
+                idx = int(low)
+                extra = f"opencode/{free[idx]['id']}"
+                picker_args.append(("--extra-reviewer-model", extra))
+                break
+            if allow_custom and low == "c":
+                try:
+                    slug = input("  paste OpenRouter model for extra: ").strip()
+                except EOFError:
+                    continue
+                if slug:
+                    extra = _normalize_openrouter_slug(slug)
+                    picker_args.append(("--extra-reviewer-model", extra))
+                    break
+                continue
+            suffix = ", c" if allow_custom else ""
+            print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, s to skip, or q")
+
+    return agent, sim, extra, picker_args
+
+
 def _launch_screen(
     *,
     args: argparse.Namespace,
@@ -653,7 +857,11 @@ def _launch_screen(
     cli_reviewer_explicit = _has_flag_in(argv_for_explicit_check, "--cli-reviewer")
     available_clis = cli_reviewer.detect_available()
 
-    yes_mode = getattr(args, "yes", False) or not sys.stdin.isatty()
+    # `--no-prompt` forces non-interactive even on a TTY. The recap still
+    # prints but the pickers are skipped — saved defaults (from
+    # `contremaitre init`) or hardcoded values flow through unchanged.
+    no_prompt = getattr(args, "no_prompt", False)
+    yes_mode = getattr(args, "yes", False) or no_prompt or not sys.stdin.isatty()
 
     if yes_mode:
         # Skip the network probe in non-TTY mode — we only need presence
@@ -687,136 +895,26 @@ def _launch_screen(
     sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
     extra_explicit = _has_flag_in(argv_for_explicit_check, "--extra-reviewer-model")
 
-    extra_model = getattr(args, "extra_reviewer_model", None)
-
     # ----- model picker (single list, agent then SIM, then extra) -----
-    if not (agent_explicit and sim_explicit and extra_explicit):
-        free = _fetch_free_models()
-        if free is None:
-            print()
-            print(_d("  (model catalog unavailable — using CLI defaults)"))
-        else:
-            print()
-            print(f"  {_b('Pick models')}  {_d('(free OpenCode Zen — no key needed)')}")
-            print()
-            bare = (args.agent_model or "").rsplit("/", 1)[-1]
-            candidates = {bare, f"{bare}-free"}
-            default_idx = next((i for i, m in enumerate(free) if m["id"] in candidates), 0)
-            width = len(str(len(free) - 1))
-            for i, m in enumerate(free):
-                marker = f"  {_d('← default')}" if i == default_idx else ""
-                print(f"    {i:>{width}}  {m['id']}{marker}")
-            if allow_custom:
-                print(f"    {'c':>{width}}  {_d('paste any OpenRouter model name (openrouter.ai/models)')}")
-            print()
-
-            def _pick_inline(role: str, current_idx: int) -> tuple[str, int]:
-                default_id = free[current_idx]["id"]
-                opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
-                prompt = f"  {role:<6}[{current_idx} - {default_id}] (Enter=accept, {opts}, q): "
-                while True:
-                    try:
-                        reply = input(prompt).strip()
-                    except EOFError:
-                        return f"opencode/{free[current_idx]['id']}", current_idx
-                    low = reply.lower()
-                    if low == "":
-                        return f"opencode/{free[current_idx]['id']}", current_idx
-                    if low == "q":
-                        raise KeyboardInterrupt
-                    if low.isdigit() and 0 <= int(low) < len(free):
-                        idx = int(low)
-                        return f"opencode/{free[idx]['id']}", idx
-                    if allow_custom and low == "c":
-                        try:
-                            slug = input(f"  paste OpenRouter model for {role}: ").strip()
-                        except EOFError:
-                            continue
-                        if slug:
-                            return _normalize_openrouter_slug(slug), current_idx
-                        continue
-                    suffix = ", c" if allow_custom else ""
-                    print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, or q")
-
-            agent_idx = default_idx
-            if not agent_explicit:
-                chosen_agent, agent_idx = _pick_inline("agent", default_idx)
-                args.agent_model = chosen_agent
-                if forwarded_to_subprocess is not None:
-                    forwarded_to_subprocess.extend(["--agent-model", chosen_agent])
-
-            sim_idx = agent_idx
-            if not sim_explicit:
-                chosen_sim, sim_idx = _pick_inline("sim", agent_idx)
-                args.sim_model = chosen_sim
-                if forwarded_to_subprocess is not None:
-                    forwarded_to_subprocess.extend(["--sim-model", chosen_sim])
-
-            # extra reviewer (cross-family diversity by default)
-            if not extra_explicit:
-                from .model_family import model_family
-
-                # Family suggestion is based on the resolved sim_model,
-                # not sim_idx — a custom paste invalidates the index.
-                sim_fam = model_family(args.sim_model)
-                suggested_idx: int | None = None
-                if sim_fam != "unknown":
-                    for i, m in enumerate(free):
-                        if model_family(f"opencode/{m['id']}") not in (sim_fam, "unknown"):
-                            suggested_idx = i
-                            break
-                if suggested_idx is None:
-                    for i in range(len(free)):
-                        if i != sim_idx:
-                            suggested_idx = i
-                            break
-                opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
-                if suggested_idx is not None:
-                    suggested_id = free[suggested_idx]["id"]
-                    extra_prompt = f"  extra [{suggested_idx} - {suggested_id}] (Enter=accept, s=skip, {opts}, q): "
-                else:
-                    extra_prompt = f"  extra  (Enter=skip, {opts}, q): "
-                while True:
-                    try:
-                        reply = input(extra_prompt).strip()
-                    except EOFError:
-                        break
-                    low = reply.lower()
-                    if low == "":
-                        if suggested_idx is not None:
-                            chosen_extra = f"opencode/{free[suggested_idx]['id']}"
-                            args.extra_reviewer_model = chosen_extra
-                            extra_model = chosen_extra
-                            if forwarded_to_subprocess is not None:
-                                forwarded_to_subprocess.extend(["--extra-reviewer-model", chosen_extra])
-                        break
-                    if low in ("s", "skip"):
-                        break
-                    if low == "q":
-                        raise KeyboardInterrupt
-                    if low.isdigit() and 0 <= int(low) < len(free):
-                        idx = int(low)
-                        chosen_extra = f"opencode/{free[idx]['id']}"
-                        args.extra_reviewer_model = chosen_extra
-                        extra_model = chosen_extra
-                        if forwarded_to_subprocess is not None:
-                            forwarded_to_subprocess.extend(["--extra-reviewer-model", chosen_extra])
-                        break
-                    if allow_custom and low == "c":
-                        try:
-                            slug = input("  paste OpenRouter model for extra: ").strip()
-                        except EOFError:
-                            continue
-                        if slug:
-                            slug = _normalize_openrouter_slug(slug)
-                            args.extra_reviewer_model = slug
-                            extra_model = slug
-                            if forwarded_to_subprocess is not None:
-                                forwarded_to_subprocess.extend(["--extra-reviewer-model", slug])
-                            break
-                        continue
-                    suffix = ", c" if allow_custom else ""
-                    print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, s to skip, or q")
+    agent, sim, extra_model, picker_args = _pick_models_interactive(
+        current_agent=getattr(args, "agent_model", ""),
+        current_sim=getattr(args, "sim_model", ""),
+        current_extra=getattr(args, "extra_reviewer_model", None),
+        pick_agent=not agent_explicit,
+        pick_sim=not sim_explicit,
+        pick_extra=not extra_explicit,
+        # `extra_reviewer_model = "skip"` in defaults.toml flips the
+        # extra-reviewer Enter behavior from "accept the suggestion" to
+        # "skip" — the suggestion is still numerically pickable.
+        extra_default_skip=getattr(args, "_defaults_skip_extra", False),
+        allow_custom=allow_custom,
+    )
+    args.agent_model = agent
+    args.sim_model = sim
+    args.extra_reviewer_model = extra_model
+    if forwarded_to_subprocess is not None:
+        for flag, value in picker_args:
+            forwarded_to_subprocess.extend([flag, value])
 
     # ----- CLI reviewer (post-publish, subscription-bound) -----
     # Banner-then-picker mirrors the OpenRouter-key flow above: when no
@@ -825,10 +923,19 @@ def _launch_screen(
     if not cli_reviewer_explicit:
         if available_clis:
             print()
+            # When the value came from defaults.toml (not an explicit CLI
+            # flag), force the picker to run with the saved value as the
+            # Enter prefill. Otherwise `flag_value="both"` would
+            # short-circuit and the operator would never see the prompt.
+            prefill = getattr(args, "_defaults_cli_reviewer_prefill", None)
+            picker_flag_value = (
+                "auto" if prefill else getattr(args, "cli_reviewer", "auto")
+            )
             chosen = cli_reviewer.resolve_choice(
-                flag_value=getattr(args, "cli_reviewer", "auto"),
+                flag_value=picker_flag_value,
                 available=available_clis,
                 tty=True,
+                saved_default=prefill,
             )
         else:
             _print_no_cli_reviewer_banner()
@@ -915,6 +1022,8 @@ def _launch_screen(
         print(f"  extra           {_b(extra_model)}")
     if cli_reviewer_choice in ("codex", "claude"):
         print(f"  code-review     {_b(cli_reviewer_choice)}  {_d('(post-publish, subscription)')}")
+    elif cli_reviewer_choice == "both":
+        print(f"  code-review     {_b('codex + claude')}  {_d('(post-publish, two PR comments)')}")
     elif cli_reviewer_choice == "none":
         print(f"  code-review     {_d('skipped')}")
     caps_parts: list[str] = []
@@ -1448,6 +1557,61 @@ def _fixture_init_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
+    """Overlay `defaults.toml` onto `args` for any field the operator left blank.
+
+    Loaded BEFORE the launch screen runs, so the picker prefills already
+    show the saved values. We never override an explicit CLI flag —
+    presence is checked against `argv`, not against `args.X != default`
+    (the argparse default is itself a fallback we want to be supersedable
+    by the saved file).
+    """
+
+    saved = _defaults.load()
+    if (
+        saved.agent_model
+        and not _has_flag_in(argv, "--agent-model")
+        and hasattr(args, "agent_model")
+    ):
+        args.agent_model = saved.agent_model
+    if (
+        saved.sim_model
+        and not _has_flag_in(argv, "--sim-model")
+        and hasattr(args, "sim_model")
+    ):
+        args.sim_model = saved.sim_model
+    if (
+        saved.extra_reviewer_model
+        and not _has_flag_in(argv, "--extra-reviewer-model")
+        and hasattr(args, "extra_reviewer_model")
+    ):
+        args.extra_reviewer_model = saved.extra_reviewer_model
+    # `extra_reviewer_model = "skip"` in the file flips the picker's
+    # Enter default from "accept the suggestion" to "skip". The picker
+    # still PROMPTS — the operator can numerically pick a model — but
+    # Enter is the no-extra-reviewer path. `_launch_screen` reads
+    # `args._defaults_skip_extra` and passes it to the picker.
+    if saved.extra_reviewer_skip and not _has_flag_in(
+        argv, "--extra-reviewer-model"
+    ):
+        args.extra_reviewer_model = None
+        args._defaults_skip_extra = True
+    if (
+        saved.cli_reviewer
+        and not _has_flag_in(argv, "--cli-reviewer")
+        and hasattr(args, "cli_reviewer")
+    ):
+        # Two attributes for two paths: `cli_reviewer` carries the
+        # value through `--no-prompt` / yes_mode (no picker), while
+        # `_defaults_cli_reviewer_prefill` tells the interactive picker
+        # to still PROMPT but make Enter accept the saved value
+        # instead of skipping. Without the prefill, the interactive
+        # branch would short-circuit on "both" / "codex" / "claude"
+        # (treated as explicit) and never ask the operator.
+        args.cli_reviewer = saved.cli_reviewer
+        args._defaults_cli_reviewer_prefill = saved.cli_reviewer
+
+
 def _extract_flag_value(args: list[str], flag: str, default: str) -> str:
     """Find a `--flag value` or `--flag=value` pair in a passthrough arg list."""
 
@@ -1536,10 +1700,27 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         forwarded = forwarded[1:]
     run_slug = _extract_flag_value(forwarded, "--run-slug", "run")
     runs_root = Path(_extract_flag_value(forwarded, "--runs-root", ".contremaitre/runs"))
-    agent_model = _extract_flag_value(forwarded, "--agent-model", "openrouter/deepseek/deepseek-v4-flash")
-    sim_model = _extract_flag_value(forwarded, "--sim-model", "openrouter/deepseek/deepseek-v4-flash")
-    extra_reviewer_model = _extract_flag_value(forwarded, "--extra-reviewer-model", "") or None
-    cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", "auto")
+    # Saved defaults seed the prefills before any flag scan — explicit
+    # forwarded flags (--agent-model, etc.) still win because
+    # `_extract_flag_value` finds them first.
+    _saved = _defaults.load()
+    agent_model = _extract_flag_value(
+        forwarded,
+        "--agent-model",
+        _saved.agent_model or "openrouter/deepseek/deepseek-v4-flash",
+    )
+    sim_model = _extract_flag_value(
+        forwarded,
+        "--sim-model",
+        _saved.sim_model or "openrouter/deepseek/deepseek-v4-flash",
+    )
+    extra_reviewer_model = (
+        _extract_flag_value(forwarded, "--extra-reviewer-model", _saved.extra_reviewer_model or "")
+        or None
+    )
+    cli_reviewer_choice = _extract_flag_value(
+        forwarded, "--cli-reviewer", _saved.cli_reviewer or "auto"
+    )
     docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
     # Confirmation has to happen BEFORE the subprocess spawn, because once
     # Textual attaches, stdin is owned by the TUI and an `input()` in the
@@ -1564,6 +1745,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         return 1
     confirm_args = argparse.Namespace(
         yes=("--yes" in forwarded or "-y" in forwarded),
+        no_prompt=("--no-prompt" in forwarded),
         base=base,
         fork=fork or None,
         upstream=upstream or None,
@@ -1580,6 +1762,20 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         http_proxy=_extract_flag_value(forwarded, "--http-proxy", "") or None,
         https_proxy=_extract_flag_value(forwarded, "--https-proxy", "") or None,
     )
+    # Propagate the `extra_reviewer_model = "skip"` sentinel from
+    # defaults.toml so the picker's Enter-skip behavior matches
+    # `contremaitre run`. Only honor it when the operator didn't pass
+    # --extra-reviewer-model explicitly.
+    if _saved.extra_reviewer_skip and not _has_flag_in(
+        forwarded, "--extra-reviewer-model"
+    ):
+        confirm_args._defaults_skip_extra = True
+    # Same story for cli_reviewer: a saved value should prefill the
+    # picker (Enter accepts it), not short-circuit it. Without this the
+    # TUI path would silently apply `cli_reviewer = "both"` from the
+    # file without ever asking.
+    if _saved.cli_reviewer and not _has_flag_in(forwarded, "--cli-reviewer"):
+        confirm_args._defaults_cli_reviewer_prefill = _saved.cli_reviewer
     try:
         if not _launch_screen(
             args=confirm_args,

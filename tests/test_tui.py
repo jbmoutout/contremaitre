@@ -44,6 +44,12 @@ from contremaitre.tui import (
     _verdict_glyph,
     _warnings_token,
 )
+from contremaitre.tui import (
+    _aggregate_cli_review_verdict,
+    _cli_review_tool_header,
+    _derive_cli_review_states,
+    _review_status_tail,
+)
 
 
 # ---------- helpers ----------
@@ -1262,3 +1268,164 @@ def test_short_repo_local_path_falls_back_to_basename():
 def test_short_repo_empty_returns_placeholder():
     assert _short_repo(None) == "?"
     assert _short_repo("") == "?"
+
+
+# ===== cli_reviewer="both" multi-tool helpers =====
+
+
+def test_aggregate_verdict_picks_worst():
+    # MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD. If either reviewer
+    # found a blocker the operator must see `MUST_FIX` in the footer,
+    # not the rosier of the two.
+    assert _aggregate_cli_review_verdict(["LOOKS_GOOD", "MUST_FIX"]) == "MUST_FIX"
+    assert (
+        _aggregate_cli_review_verdict(["NEEDS_ATTENTION", "LOOKS_GOOD"])
+        == "NEEDS_ATTENTION"
+    )
+    assert _aggregate_cli_review_verdict(["LOOKS_GOOD", "LOOKS_GOOD"]) == "LOOKS_GOOD"
+
+
+def test_aggregate_verdict_empty_is_none():
+    assert _aggregate_cli_review_verdict([]) is None
+    assert _aggregate_cli_review_verdict([None, None]) is None
+
+
+def test_aggregate_verdict_ignores_unknown_keys():
+    # Defensive — a renamed verdict in a future review prompt shouldn't
+    # silently outrank the known keys.
+    assert (
+        _aggregate_cli_review_verdict(["BIZARRE", "MUST_FIX"]) == "MUST_FIX"
+    )
+
+
+def test_derive_cli_review_states_both_streaming():
+    # Both started, neither completed → both surfaces as streaming.
+    guardrails = [
+        _g(events.CLI_REVIEW_STARTED, tool="claude"),
+        _g(events.CLI_REVIEW_STARTED, tool="codex"),
+    ]
+    states = _derive_cli_review_states(guardrails, "both")
+    assert states == [("claude", "streaming", None), ("codex", "streaming", None)]
+
+
+def test_derive_cli_review_states_one_completed_one_streaming():
+    # Claude finished with a verdict; codex is still in flight. Order
+    # matches expand_choice — claude first, codex second.
+    guardrails = [
+        _g(events.CLI_REVIEW_STARTED, tool="claude"),
+        _g(events.CLI_REVIEW_COMPLETED, tool="claude", verdict="LOOKS_GOOD"),
+        _g(events.CLI_REVIEW_STARTED, tool="codex"),
+    ]
+    states = _derive_cli_review_states(guardrails, "both")
+    assert states == [
+        ("claude", "completed", "LOOKS_GOOD"),
+        ("codex", "streaming", None),
+    ]
+
+
+def test_derive_cli_review_states_failed_tool_surfaces_status():
+    guardrails = [
+        _g(events.CLI_REVIEW_STARTED, tool="claude"),
+        _g(events.CLI_REVIEW_FAILED, tool="claude"),
+        _g(events.CLI_REVIEW_STARTED, tool="codex"),
+        _g(events.CLI_REVIEW_COMPLETED, tool="codex", verdict="MUST_FIX"),
+    ]
+    states = _derive_cli_review_states(guardrails, "both")
+    assert states == [
+        ("claude", "failed", None),
+        ("codex", "completed", "MUST_FIX"),
+    ]
+
+
+def test_derive_cli_review_states_filters_unstarted_tools():
+    # `both` was requested but only claude has actually started yet —
+    # codex shouldn't pre-render as a dim placeholder.
+    guardrails = [_g(events.CLI_REVIEW_STARTED, tool="claude")]
+    states = _derive_cli_review_states(guardrails, "both")
+    assert states == [("claude", "streaming", None)]
+
+
+def test_derive_cli_review_states_none_choice_returns_empty():
+    assert _derive_cli_review_states([], "none") == []
+
+
+def test_derive_cli_review_states_single_tool_returns_single_entry():
+    guardrails = [
+        _g(events.CLI_REVIEW_STARTED, tool="claude"),
+        _g(events.CLI_REVIEW_COMPLETED, tool="claude", verdict="NEEDS_ATTENTION"),
+    ]
+    assert _derive_cli_review_states(guardrails, "claude") == [
+        ("claude", "completed", "NEEDS_ATTENTION")
+    ]
+
+
+def test_review_status_tail_renders_two_tool_glyphs_for_both():
+    # The multi-tool path renders one `<TOOL> Review <glyph>` segment
+    # per tool — operator sees both verdicts at a glance.
+    tail = _review_status_tail(
+        sim_review_statuses=[],
+        extra_review_statuses=[],
+        extra_enabled=False,
+        cli_review_states=[
+            ("claude", "completed", "LOOKS_GOOD"),
+            ("codex", "streaming", None),
+        ],
+    )
+    assert "CLAUDE Review" in tail.plain
+    assert "CODEX Review" in tail.plain
+    assert "✓" in tail.plain
+    assert "⏵" in tail.plain
+
+
+def test_review_status_tail_falls_back_to_single_tool_params():
+    # Back-compat — when no states list is provided, the historical
+    # (status, tool, verdict) trio still drives a single segment.
+    tail = _review_status_tail(
+        sim_review_statuses=[],
+        extra_review_statuses=[],
+        extra_enabled=False,
+        cli_review_status="completed",
+        cli_review_tool="claude",
+        cli_review_verdict="MUST_FIX",
+    )
+    assert "CLAUDE Review" in tail.plain
+    assert "✗" in tail.plain
+    assert "CODEX Review" not in tail.plain
+
+
+def test_phase_label_cli_review_both_names_both_tools():
+    # `cli_reviewer="both"` shows e.g. `CLAUDE + CODEX review` so the
+    # operator sees both reviewers, not a generic `CLI review`.
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="cli_review",
+            cli_review_states=[
+                ("claude", "streaming", None),
+                ("codex", "streaming", None),
+            ],
+        )
+    )
+    assert "CLAUDE" in text.plain
+    assert "CODEX" in text.plain
+    assert "review" in text.plain
+
+
+def test_phase_label_cli_review_single_tool_unchanged():
+    # Single-tool label still reads `CLAUDE review` (existing behavior).
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="cli_review",
+            cli_review_tool="claude",
+            cli_review_status="streaming",
+        )
+    )
+    assert "CLAUDE review" in text.plain
+    assert "CODEX" not in text.plain
+
+
+def test_cli_review_tool_header_renders_divider_with_tool_name():
+    sep = _cli_review_tool_header("claude")
+    assert "claude review" in sep.plain
+    assert "──" in sep.plain
+    sep_codex = _cli_review_tool_header("codex")
+    assert "codex review" in sep_codex.plain

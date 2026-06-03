@@ -32,6 +32,11 @@ from .jsonlog import append_jsonl, append_text_event
 
 
 VALID_TOOLS = ("codex", "claude")
+# `both` runs codex AND claude back-to-back on the same PR and posts two
+# separate comments (one per tool). Only offered as a picker option when
+# both binaries are installed; honored by `RunConfig.cli_reviewer="both"`
+# in the orchestrator.
+VALID_CHOICES = VALID_TOOLS + ("both", "none")
 SUBPROCESS_TIMEOUT_S = 600
 
 # Path the orchestrator stashes its per-run scaffolds under (SETTLED_DESIGN.md,
@@ -72,18 +77,29 @@ def resolve_choice(
     flag_value: str,
     available: dict[str, str],
     tty: bool,
+    saved_default: str | None = None,
     input_fn=input,
     print_fn=print,
 ) -> str:
     """Decide which tool the orchestrator should run.
 
-    Honors an explicit `--cli-reviewer codex|claude|none`. When `auto`
-    (the default), falls back to:
+    Honors an explicit `--cli-reviewer codex|claude|both|none`. When
+    `auto` (the default), falls back to:
       - neither installed → "none" (silent)
       - one installed + TTY → confirm prompt
-      - both installed + TTY → numbered picker
+      - both installed + TTY → numbered picker incl. a `both` option
       - no TTY → "none" (we can't ask)
-    Returns one of `"codex"`, `"claude"`, `"none"`.
+    Returns one of `"codex"`, `"claude"`, `"both"`, `"none"`.
+
+    `both` requires BOTH binaries on PATH; an explicit `--cli-reviewer both`
+    against a partial install degrades to whichever tool is available
+    (and warns), matching the explicit-single-tool fallback behavior.
+
+    `saved_default` is the operator's saved preference from
+    defaults.toml (not a CLI flag). When set, the interactive picker's
+    Enter behavior is "accept saved_default" instead of "skip". The
+    operator can still override numerically. Ignored when `flag_value`
+    is anything but `"auto"` (explicit always wins).
     """
 
     if flag_value in VALID_TOOLS:
@@ -94,6 +110,17 @@ def resolve_choice(
             )
             return "none"
         return flag_value
+    if flag_value == "both":
+        if len(available) == 2:
+            return "both"
+        if len(available) == 1:
+            tool = next(iter(available))
+            print_fn(
+                f"  cli-reviewer: 'both' requested but only '{tool}' on PATH — using it alone",
+                file=sys.stderr,
+            )
+            return tool
+        return "none"
     if flag_value == "none":
         return "none"
     # flag_value == "auto" (or any unrecognised value treated as auto)
@@ -103,29 +130,56 @@ def resolve_choice(
         return "none"
     if len(available) == 1:
         tool = next(iter(available))
+        # `saved_default == "none"` flips Enter from Y to N. Any other
+        # saved value (the tool itself, "both", or unset) keeps the
+        # historical Y default — the saved-value semantics is "we WANT
+        # cli-review," and Enter accepting that is the right behavior.
+        if saved_default == "none":
+            try:
+                reply = input_fn(f"  cli-review with {tool} after publish? [y/N] ").strip().lower()
+            except EOFError:
+                return "none"
+            return tool if reply in ("y", "yes") else "none"
         try:
             reply = input_fn(f"  cli-review with {tool} after publish? [Y/n] ").strip().lower()
         except EOFError:
             return "none"
         return tool if reply in ("", "y", "yes") else "none"
-    # Both installed — numbered picker.
+    # Both installed — numbered picker incl. a `both` option that runs
+    # the two reviewers sequentially and posts two PR comments.
+    # `saved_default` (when one of codex/claude/both) becomes the Enter
+    # default; otherwise Enter still skips.
+    enter_default: str | None = None
+    if saved_default in VALID_TOOLS or saved_default == "both":
+        enter_default = saved_default
     print_fn("  cli-review:")
     for i, tool in enumerate(VALID_TOOLS, start=1):
         if tool in available:
-            print_fn(f"    [{i}] {tool}")
+            marker = "  ← saved" if tool == enter_default else ""
+            print_fn(f"    [{i}] {tool}{marker}")
+    both_index = len(VALID_TOOLS) + 1
+    both_marker = "  ← saved" if enter_default == "both" else ""
+    print_fn(
+        f"    [{both_index}] both  (run codex and claude, post 2 PR comments){both_marker}"
+    )
     print_fn("    [s] skip")
+    enter_label = enter_default if enter_default else "skip"
     while True:
         try:
-            reply = input_fn("  pick (Enter=skip): ").strip().lower()
+            reply = input_fn(f"  pick (Enter={enter_label}): ").strip().lower()
         except EOFError:
             return "none"
-        if reply in ("", "s", "skip"):
+        if reply == "":
+            return enter_default if enter_default else "none"
+        if reply in ("s", "skip"):
             return "none"
         if reply.isdigit():
             idx = int(reply) - 1
             if 0 <= idx < len(VALID_TOOLS) and VALID_TOOLS[idx] in available:
                 return VALID_TOOLS[idx]
-        print_fn("  enter 1, 2, s, or Enter")
+            if int(reply) == both_index:
+                return "both"
+        print_fn(f"  enter 1, 2, {both_index}, s, or Enter")
 
 
 # ---------- prompt assembly ----------
@@ -509,6 +563,23 @@ def _fmt_duration_short(seconds: float) -> str:
     m = int(seconds // 60)
     s = int(seconds % 60)
     return f"{m}m {s}s" if s else f"{m}m"
+
+
+def expand_choice(choice: str) -> tuple[str, ...]:
+    """Resolve a `cli_reviewer` config value to the list of tools to run.
+
+    `"both"` expands to `("claude", "codex")` (claude first so its
+    comment lands above codex's in the PR conversation — purely cosmetic
+    ordering). Single-tool choices return a 1-tuple; `"none"` / unknown
+    return `()`. Used by the orchestrator to iterate over the right set
+    of subprocess invocations.
+    """
+
+    if choice == "both":
+        return ("claude", "codex")
+    if choice in VALID_TOOLS:
+        return (choice,)
+    return ()
 
 
 def jsonl_sink_for(paths, tool: str) -> Path:
