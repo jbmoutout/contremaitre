@@ -10,14 +10,14 @@ Replaces the evals-era tool_use.py for this harness.
 
 Retired (broken for contremaitre):
   - time_to_first_candidate / tokens_to_first_candidate
-    → looked for "## N. " headers in prose; agent writes HTML cards + SETTLED file;
-      always null regardless of model.
+    -> looked for "## N. " headers in prose; agent writes HTML cards + SETTLED file;
+       always null regardless of model.
   - useful_call_ratio (agent side)
-    → checked tool output in agent final prose; refactor deliverable is the diff;
-      terse models score 0, verbose models score high — model style artifact.
+    -> checked tool output in agent final prose; refactor deliverable is the diff;
+       terse models score 0, verbose models score high — model style artifact.
 
 Retargeted:
-  - time_to_first_candidate → time_to_settled_design_seconds
+  - time_to_first_candidate -> time_to_settled_design_seconds
     anchored to write of .contremaitre/SETTLED_DESIGN.md (harness contract,
     model-agnostic).
 
@@ -34,32 +34,17 @@ Added (SIM): sim_read_settled, sim_read_diff, sim_read_diff_partial,
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
-from .extract import parse_apply_patch
-from .jsonlog import read_jsonl
-
-
-# ---------------------------------------------------------------------------
-# Regex patterns — all anchored to harness contracts, not model prose style
-# ---------------------------------------------------------------------------
-
-_SETTLED_RE = re.compile(r"SETTLED_DESIGN", re.IGNORECASE)
-_IMPL_COMPLETE_RE = re.compile(r"IMPLEMENTATION_COMPLETE")
-_DIFF_RE = re.compile(r"review_diff_round|(?:^|[/\\])diff\.patch$", re.IGNORECASE)
-_CONTREMAITRE_DIR_RE = re.compile(r"[/\\]?\.contremaitre[/\\]")
-
-# Test runner patterns — what "self-verification" looks like in bash tool calls
-_TEST_CMD_RE = re.compile(
-    r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b"
+from .event_stream import (
+    ParsedEvents,
+    ParsedToolCall,
+    ParsedStepFinish,
+    parse_events,
+    parse_guardrail_events,
 )
-# Runtime install patterns — signal container config gap, not agent quality
-_RUNTIME_INSTALL_RE = re.compile(r"apt-?get\s+install|pip\s+install\b|npm\s+install\b")
-
-# Failure markers in test output (heuristic — manual ratification on fail)
-_TEST_FAIL_RE = re.compile(r"\bFAILED\b|\berror:\s|\bfailed\b", re.IGNORECASE)
-_ZERO_TESTS_RE = re.compile(r"0 passed|no tests ran|collected 0 items|Ran 0 tests", re.IGNORECASE)
+from .extract import parse_apply_patch
+from .harness import HarnessContracts
 
 
 # ---------------------------------------------------------------------------
@@ -70,55 +55,65 @@ _ZERO_TESTS_RE = re.compile(r"0 passed|no tests ran|collected 0 items|Ran 0 test
 def compute_flow_use(paths: Any) -> dict[str, Any]:
     """Compute agent + SIM tool-use metrics for a completed run.
 
-    `paths` is a RunPaths instance; fields used:
+    ``paths`` is a RunPaths instance; fields used:
       raw_export, sim_raw_export, review_cycles, guardrail_events.
+    Signature unchanged so callers (evaluator.py, viewer/__init__.py) are
+    unaffected by the internal refactor.
     """
-    agent_events = read_jsonl(paths.raw_export)
-    sim_events = read_jsonl(paths.sim_raw_export)
-    agent = _agent_metrics(agent_events)
+    harness = HarnessContracts()
+    agent_events = parse_events(paths.raw_export)
+    sim_events = parse_events(paths.sim_raw_export)
+    agent = _agent_metrics(agent_events, harness)
     return {
         "schema": "flow_use v1",
         "agent": agent,
-        "sim": _sim_metrics(sim_events, paths),
-        "phases": compute_phases(paths, agent_events),
+        "sim": _sim_metrics(sim_events, paths, harness),
+        "phases": compute_phases(paths, agent_events, harness),
     }
 
 
-def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[str, Any]:
+def compute_phases(
+    paths: Any,
+    agent_events: ParsedEvents | None = None,
+    harness: HarnessContracts | None = None,
+) -> dict[str, Any]:
     """Split the run into grilling / impl / review phases by counting actor turns.
 
     grilling = agent + SIM turns BEFORE SETTLED_DESIGN.md is written (design pass)
     impl     = agent turns from SETTLED write through IMPLEMENTATION_COMPLETE
     review   = SIM review rounds (from review_cycles.jsonl, deduped over retries)
 
-    Anchored to `opencode_actor_start` in guardrail_events.jsonl (one start =
+    Anchored to ``opencode_actor_start`` in guardrail_events.jsonl (one start =
     one process invocation = one turn) and the SETTLED / IMPL_COMPLETE write
     timestamps in raw_export.jsonl. Surfaced live in the TUI footer Zone 3
     and rolled into the PR body lede.
     """
+    if harness is None:
+        harness = HarnessContracts()
     if agent_events is None:
-        agent_events = read_jsonl(paths.raw_export)
-    tool_calls = [e for e in agent_events if e.get("type") == "tool_use"]
-    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
-    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
-    settled_ms = _timestamp_ms(settled_event)
-    impl_ms = _timestamp_ms(impl_event)
+        agent_events = parse_events(paths.raw_export)
+
+    tool_calls = agent_events.tool_calls
+    settled_event = _find_write_to(tool_calls, lambda t: harness.is_settled(t))
+    impl_event = _find_write_to(tool_calls, lambda t: harness.is_impl_complete(t))
+    settled_ms = settled_event.ts if settled_event else None
+    impl_ms = impl_event.ts if impl_event else None
 
     guardrails_path = getattr(paths, "guardrail_events", None)
-    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
+    guardrails = parse_guardrail_events(guardrails_path) if guardrails_path else []
     starts: list[tuple[float, str]] = []
     for g in guardrails:
-        if g.get("event") != "opencode_actor_start":
+        if g.event != "opencode_actor_start":
             continue
-        ts = _timestamp_ms(g)
-        role = g.get("role")
-        if ts is None or role not in ("agent", "sim", "review"):
+        ts = g.ts
+        role = g.role
+        if role not in ("agent", "sim", "review"):
             continue
         starts.append((ts, role))
     starts.sort()
 
     # Identify the impl-start turn: the agent turn whose lifetime contains
-    # the SETTLED write (start_ts ≤ settled_ms < next_start_ts).
+    # the SETTLED write (start_ts <= settled_ms < next_start_ts).
     impl_start_idx: int | None = None
     if settled_ms is not None:
         for i, (ts, role) in enumerate(starts):
@@ -141,9 +136,9 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     impl_agent = sum(1 for ts, r in post if r == "agent" and (impl_ms is None or ts <= impl_ms))
 
     # max(round), not len(): with the extra reviewer enabled, review_cycles
-    # carries two entries per round plus optional `unavailable` entries; the
+    # carries two entries per round plus optional ``unavailable`` entries; the
     # round number is the canonical counter.
-    cycles = read_jsonl(paths.review_cycles)
+    cycles = _read_jsonl_safe(paths.review_cycles)
     review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
 
     return {
@@ -160,51 +155,53 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
 # ---------------------------------------------------------------------------
 
 
-def _agent_metrics(events: list[dict]) -> dict[str, Any]:
-    tool_calls = [e for e in events if e.get("type") == "tool_use"]
+def _agent_metrics(events: ParsedEvents, harness: HarnessContracts) -> dict[str, Any]:
+    tool_calls = events.tool_calls
 
     by_tool: dict[str, int] = {}
-    for e in tool_calls:
-        t = _tool_name(e)
-        by_tool[t] = by_tool.get(t, 0) + 1
+    for tc in tool_calls:
+        by_tool[tc.tool] = by_tool.get(tc.tool, 0) + 1
 
     file_access = _count_file_accesses(tool_calls)
     re_reads = sum(max(0, n - 1) for n in file_access.values())
     convergence, breadth, distinct, total = _convergence(file_access)
 
-    event_times = [ts for e in events if (ts := _timestamp_ms(e)) is not None]
+    all_events_ts = sorted(
+        [e.ts for e in events.tool_calls]
+        + [e.ts for e in events.step_finishes]
+        + [e.ts for e in events.text_events]
+    )
     wall_seconds = (
-        round((event_times[-1] - event_times[0]) / 1000, 1) if len(event_times) > 1 else 0
+        round((all_events_ts[-1] - all_events_ts[0]) / 1000, 1) if len(all_events_ts) > 1 else 0
     )
 
-    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
-    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
-    first_code_edit = _find_first_code_edit(tool_calls)
+    settled_event = _find_write_to(tool_calls, lambda t: harness.is_settled(t))
+    impl_event = _find_write_to(tool_calls, lambda t: harness.is_impl_complete(t))
+    first_code_edit = _find_first_code_edit(tool_calls, harness)
 
-    t0 = event_times[0] if event_times else None
-    settled_ts = _timestamp_ms(settled_event)
+    t0 = all_events_ts[0] if all_events_ts else None
+    settled_ts = settled_event.ts if settled_event else None
     time_to_settled = (
         round((settled_ts - t0) / 1000, 1) if settled_ts is not None and t0 is not None else None
     )
-    tokens_to_settled = _tokens_before(events, settled_event)
+    tokens_to_settled = _tokens_before(events.step_finishes, settled_event)
 
     settled_chars: int | None = None
     if settled_event:
-        settled_chars = _write_chars(settled_event, _SETTLED_RE)
+        settled_chars = _settled_write_chars(settled_event)
 
     settled_before_edit: bool | None = None
     if settled_event and first_code_edit:
-        first_edit_ts = _timestamp_ms(first_code_edit)
         settled_before_edit = (
-            settled_ts < first_edit_ts
-            if settled_ts is not None and first_edit_ts is not None
+            settled_event.ts < first_code_edit.ts
+            if settled_event.ts is not None and first_code_edit.ts is not None
             else None
         )
     elif settled_event:
         settled_before_edit = True
 
     self_verified, self_verify_pass, runtime_install = _check_self_verification(
-        tool_calls, impl_event
+        tool_calls, impl_event, harness
     )
 
     return {
@@ -263,53 +260,44 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
-    if not events:
+def _sim_metrics(events: ParsedEvents, paths: Any, harness: HarnessContracts) -> dict[str, Any]:
+    tool_calls = events.tool_calls
+
+    if not tool_calls and not events.text_events:
         return {"available": False}
 
-    tool_calls = [e for e in events if e.get("type") == "tool_use"]
-
     by_tool: dict[str, int] = {}
-    for e in tool_calls:
-        t = _tool_name(e)
-        by_tool[t] = by_tool.get(t, 0) + 1
+    for tc in tool_calls:
+        by_tool[tc.tool] = by_tool.get(tc.tool, 0) + 1
 
     sim_read_settled = any(
-        _SETTLED_RE.search(_inp(e).get("filePath", "") or "")
-        for e in tool_calls
-        if _tool_name(e) == "read"
+        harness.is_settled(tc.file_path or "")
+        for tc in tool_calls
+        if tc.tool == "read" and tc.file_path
     )
 
     diff_reads = [
-        e
-        for e in tool_calls
-        if _tool_name(e) == "read" and _DIFF_RE.search(_inp(e).get("filePath", "") or "")
+        tc
+        for tc in tool_calls
+        if tc.tool == "read" and tc.file_path and harness.is_diff_path(tc.file_path)
     ]
     sim_read_diff = len(diff_reads) > 0
-    sim_read_diff_partial = any(_read_limit(e) < 200 for e in diff_reads)
+    sim_read_diff_partial = any(tc.limit is not None and tc.limit < 200 for tc in diff_reads)
 
     file_access = _count_file_accesses(tool_calls)
     convergence, breadth, _, _ = _convergence(file_access)
 
-    # sim_useful_call_ratio: fraction of SIM grep calls whose ARGS (pattern
-    # or path/include/glob) are referenced in the verdict text. SIMs
-    # paraphrase output but mention the search terms they ran; matching
-    # output verbatim floored the metric at 0 across every observed run.
-    # Valid for SIM only (verdict prose is the deliverable, not for agents).
-    # Match against the SIM's own last verdict (not the extra reviewer's or
-    # an `unavailable` marker row) so the ratio reflects SIM tool-use → SIM
-    # verdict alignment.
     sim_useful_ratio: float | None = None
-    review_cycles = read_jsonl(paths.review_cycles)
+    review_cycles = _read_jsonl_safe(paths.review_cycles)
     sim_cycles = [
         c for c in review_cycles if c.get("reviewer", "sim") == "sim" and not c.get("unavailable")
     ]
     if sim_cycles:
         last = sim_cycles[-1]
         verdict_text = last.get("summary", "") + " ".join(last.get("checks_performed", []))
-        grep_calls = [e for e in tool_calls if _tool_name(e) == "grep"]
+        grep_calls = [tc for tc in tool_calls if tc.tool == "grep"]
         if grep_calls:
-            cited = sum(1 for e in grep_calls if _grep_args_cited_in(e, verdict_text))
+            cited = sum(1 for tc in grep_calls if _grep_args_cited_in(tc, verdict_text))
             sim_useful_ratio = round(cited / len(grep_calls), 3)
 
     return {
@@ -342,20 +330,25 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _tool_name(e: dict) -> str:
-    return (e.get("part") or {}).get("tool", "?")
-
-
-def _inp(e: dict) -> dict:
-    return ((e.get("part") or {}).get("state") or {}).get("input") or {}
-
-
-def _count_file_accesses(tool_calls: list[dict]) -> dict[str, int]:
+def _count_file_accesses(tool_calls: list[ParsedToolCall]) -> dict[str, int]:
     acc: dict[str, int] = {}
-    for e in tool_calls:
-        for fp in _tool_paths(e):
+    for tc in tool_calls:
+        for fp in _call_paths(tc):
             acc[fp] = acc.get(fp, 0) + 1
     return acc
+
+
+def _call_paths(tc: ParsedToolCall) -> list[str]:
+    """Extract all file paths referenced by a tool call.
+
+    For ``apply_patch``, paths come from parsing the patch text. For all
+    other tools, the single ``file_path`` is used.
+    """
+    if tc.tool == "apply_patch" and tc.patch_text:
+        return [fp for _, fp, _ in parse_apply_patch(tc.patch_text)]
+    if tc.file_path:
+        return [tc.file_path]
+    return []
 
 
 def _convergence(file_access: dict[str, int]) -> tuple[str, float, int, int]:
@@ -375,49 +368,57 @@ def _convergence(file_access: dict[str, int]) -> tuple[str, float, int, int]:
     return label, breadth, distinct, total
 
 
-def _find_write_to(tool_calls: list[dict], pattern: re.Pattern) -> dict | None:
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
+def _find_write_to(
+    tool_calls: list[ParsedToolCall], predicate: Callable[[str], bool]
+) -> ParsedToolCall | None:
+    """Find the first write/edit/apply_patch whose target satisfies *predicate*.
+
+    The ``target`` checked is ``file_path`` for write/edit, or the raw patch
+    text for apply_patch (matching existing behaviour where pattern is
+    searched against the whole patch payload).
+    """
+    for tc in tool_calls:
+        if tc.tool not in ("write", "edit", "apply_patch"):
             continue
-        if (part.get("state") or {}).get("status") != "completed":
+        if tc.status != "completed":
             continue
-        inp = _inp(e)
-        target = (
-            inp.get("filePath") or inp.get("path") or inp.get("patchText") or inp.get("patch") or ""
-        )
-        if pattern.search(str(target)):
-            return e
+        target = tc.file_path or tc.patch_text or ""
+        if predicate(target):
+            return tc
     return None
 
 
-def _find_first_code_edit(tool_calls: list[dict]) -> dict | None:
-    """First write/edit/apply_patch to a path outside .contremaitre/."""
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
+def _find_first_code_edit(
+    tool_calls: list[ParsedToolCall], harness: HarnessContracts
+) -> ParsedToolCall | None:
+    """First write/edit/apply_patch to a path outside ``.contremaitre/``."""
+    for tc in tool_calls:
+        if tc.tool not in ("write", "edit", "apply_patch"):
             continue
-        if (part.get("state") or {}).get("status") != "completed":
+        if tc.status != "completed":
             continue
-        if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
-            return e
+        if any(not harness.is_contremaitre_dir(fp) for fp in _call_paths(tc)):
+            return tc
     return None
 
 
-def _tokens_before(events: list[dict], target: dict | None) -> int | None:
+def _tokens_before(
+    step_finishes: list[ParsedStepFinish], target: ParsedToolCall | None
+) -> int | None:
     if not target:
         return None
     total = 0
-    for e in events:
-        if e is target:
+    for sf in step_finishes:
+        if sf.ts >= target.ts:
             break
-        if e.get("type") == "step_finish":
-            total += (e.get("part") or {}).get("tokens", {}).get("total", 0)
+        total += sf.tokens
     return total
 
 
 def _check_self_verification(
-    tool_calls: list[dict], impl_event: dict | None
+    tool_calls: list[ParsedToolCall],
+    impl_event: ParsedToolCall | None,
+    harness: HarnessContracts,
 ) -> tuple[bool, bool | None, bool]:
     """Return (self_verified, output_suggests_pass, runtime_install_required).
 
@@ -426,105 +427,62 @@ def _check_self_verification(
     output_suggests_pass: heuristic — no FAILED/error: in any test output.
     runtime_install_required: agent had to install a runtime (container gap).
     """
-    impl_ts = _timestamp_ms(impl_event) if impl_event else float("inf")
+    impl_ts = impl_event.ts if impl_event else float("inf")
 
     last_edit_ts: float | None = None
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
+    for tc in tool_calls:
+        if tc.tool not in ("write", "edit", "apply_patch"):
             continue
-        event_ts = _timestamp_ms(e)
-        if event_ts is None:
+        if tc.ts is None:
             continue
-        if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
-            last_edit_ts = event_ts if last_edit_ts is None else max(last_edit_ts, event_ts)
+        if any(not harness.is_contremaitre_dir(fp) for fp in _call_paths(tc)):
+            last_edit_ts = tc.ts if last_edit_ts is None else max(last_edit_ts, tc.ts)
 
     test_outputs: list[str] = []
     runtime_install = False
 
-    for e in tool_calls:
-        if _tool_name(e) != "bash":
+    for tc in tool_calls:
+        if tc.tool != "bash":
             continue
-        cmd = _inp(e).get("command") or ""
-        if _RUNTIME_INSTALL_RE.search(cmd):
+        cmd = tc.command or ""
+        if harness.is_runtime_install(cmd):
             runtime_install = True
-        event_ts = _timestamp_ms(e)
-        if event_ts is None:
+        if tc.ts is None:
             continue
         if (
-            _TEST_CMD_RE.search(cmd)
+            harness.is_test_command(cmd)
             and last_edit_ts is not None
-            and last_edit_ts < event_ts < impl_ts
+            and last_edit_ts < tc.ts < impl_ts
         ):
-            test_outputs.append((e.get("part") or {}).get("state", {}).get("output") or "")
+            test_outputs.append(tc.output)
 
     if not test_outputs:
         return False, None, runtime_install
 
     all_pass = all(
-        not _TEST_FAIL_RE.search(out) and not _ZERO_TESTS_RE.search(out) for out in test_outputs
+        not harness.test_output_suggests_fail(out)
+        and not harness.test_output_suggests_no_tests(out)
+        for out in test_outputs
     )
     return True, all_pass, runtime_install
 
 
-def _timestamp_ms(e: dict | None) -> float | None:
-    if not e:
-        return None
-    raw = e.get("timestamp")
-    if isinstance(raw, int | float):
-        return float(raw)
-    if isinstance(raw, str):
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    ts = e.get("ts")
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
-        except ValueError:
-            return None
-    return None
-
-
-def _tool_paths(e: dict) -> list[str]:
-    inp = _inp(e)
-    tool = _tool_name(e)
-    if tool == "apply_patch":
-        patch = inp.get("patchText") or inp.get("patch") or ""
-        return [fp for _, fp, _ in parse_apply_patch(str(patch))]
-    fp = inp.get("filePath") or inp.get("path") or ""
-    return [str(fp)] if fp else []
-
-
-def _write_chars(e: dict, pattern: re.Pattern) -> int:
-    inp = _inp(e)
-    tool = _tool_name(e)
-    if tool == "write":
-        return len(inp.get("content") or "")
-    if tool == "edit":
-        return len(inp.get("newString") or "")
-    if tool == "apply_patch":
-        patch = inp.get("patchText") or inp.get("patch") or ""
-        return sum(len(body) for _, fp, body in parse_apply_patch(str(patch)) if pattern.search(fp))
+def _settled_write_chars(tc: ParsedToolCall) -> int:
+    """Character count of the content written to SETTLED_DESIGN.md."""
+    if tc.tool == "write":
+        return len(tc.content or "")
+    if tc.tool == "edit":
+        return len(tc.new_string or "")
+    if tc.tool == "apply_patch" and tc.patch_text:
+        return sum(len(body) for _, _, body in parse_apply_patch(tc.patch_text))
     return 0
-
-
-def _read_limit(e: dict) -> int:
-    raw = _inp(e).get("limit")
-    if raw is None:
-        return 9999
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return 9999
 
 
 _REGEX_METACHARS = re.compile(r"[\\^$.|?*+(){}\[\]]")
 
 
 def _grep_args_cited_in(
-    grep_event: dict,
+    grep_call: ParsedToolCall,
     verdict_text: str,
     *,
     min_pattern_len: int = 3,
@@ -537,10 +495,9 @@ def _grep_args_cited_in(
     mention the search terms they ran. Try the pattern as a literal first;
     if it contains regex metacharacters, fall back to the longest
     literal fragment between metachars so that a SIM saying
-    "all `_compile_` helpers" still credits a grep for `_compile_\\w+`.
+    "all ``_compile_`` helpers" still credits a grep for ``_compile_\\w+``.
     """
-    inp = _inp(grep_event)
-    pat = str(inp.get("pattern") or "")
+    pat = grep_call.pattern or ""
     if pat and len(pat) >= min_pattern_len:
         if pat in verdict_text:
             return True
@@ -549,7 +506,31 @@ def _grep_args_cited_in(
         if len(longest) >= min_pattern_len and longest != pat and longest in verdict_text:
             return True
     for k in ("path", "include", "glob"):
-        v = str(inp.get(k) or "")
+        v = str(grep_call.__dict__.get(k) or "")
         if v and len(v) >= min_path_len and v in verdict_text:
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Minimal JSONL reader (review_cycles only — shared via event_stream
+# for raw_export)
+# ---------------------------------------------------------------------------
+
+
+def _read_jsonl_safe(path: Any) -> list[dict]:
+    """Read a JSONL path, returning [] on missing file.
+
+    Used for review_cycles.jsonl which may not exist in all test fixtures.
+    """
+    from pathlib import Path as _Path
+
+    p = _Path(str(path)) if not isinstance(path, _Path) else path
+    if not p.exists():
+        return []
+    import json
+
+    text = p.read_text(encoding="utf-8")
+    if not text.strip():
+        return []
+    return [json.loads(line) for line in text.strip().split("\n") if line.strip()]
