@@ -44,7 +44,9 @@ def _sum_costs(value: Any) -> float:
     if isinstance(value, dict):
         subtotal = 0.0
         for key, child in value.items():
-            if key.lower() in {"cost", "cost_usd", "usd", "total_cost"} and isinstance(child, (int, float)):
+            if key.lower() in {"cost", "cost_usd", "usd", "total_cost"} and isinstance(
+                child, (int, float)
+            ):
                 subtotal += float(child)
             else:
                 subtotal += _sum_costs(child)
@@ -52,4 +54,3 @@ def _sum_costs(value: Any) -> float:
     if isinstance(value, list):
         return sum(_sum_costs(item) for item in value)
     return 0.0
-

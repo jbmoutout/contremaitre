@@ -106,15 +106,21 @@ def _check_repo(config: RunConfig) -> PreflightCheck:
     remote_ref = f"origin/{config.base}"
     base = _run(["git", "-C", str(config.repo), "rev-parse", "--verify", remote_ref])
     if base.returncode != 0:
-        return _fail("repo_base", f"base ref not found on origin: {remote_ref}", _proc_details(base))
-    return _pass("repo", "repo and base ref are available", {"repo": str(config.repo), "base": remote_ref})
+        return _fail(
+            "repo_base", f"base ref not found on origin: {remote_ref}", _proc_details(base)
+        )
+    return _pass(
+        "repo", "repo and base ref are available", {"repo": str(config.repo), "base": remote_ref}
+    )
 
 
 def _check_opencode_config(config: RunConfig) -> PreflightCheck:
     if not config.opencode_config:
         return _fail("opencode_config", "--opencode-config is required for --actor opencode", {})
     if not config.opencode_config.exists():
-        return _fail("opencode_config", f"opencode config does not exist: {config.opencode_config}", {})
+        return _fail(
+            "opencode_config", f"opencode config does not exist: {config.opencode_config}", {}
+        )
     return _pass("opencode_config", "opencode config exists", {"path": str(config.opencode_config)})
 
 
@@ -122,7 +128,9 @@ def _check_docker_image(config: RunConfig) -> PreflightCheck:
     docker = _run(["docker", "version", "--format", "{{.Server.Version}}"])
     if docker.returncode != 0:
         return _fail("docker", "docker daemon is not available", _proc_details(docker))
-    inspect = _run(["docker", "image", "inspect", config.docker_image, "--format", "{{.Id}} {{.Created}}"])
+    inspect = _run(
+        ["docker", "image", "inspect", config.docker_image, "--format", "{{.Id}} {{.Created}}"]
+    )
     if inspect.returncode != 0:
         return _fail(
             "docker_image",
@@ -130,14 +138,22 @@ def _check_docker_image(config: RunConfig) -> PreflightCheck:
             f"(build via `contremaitre image build` or pass --docker-image <existing-tag>)",
             _proc_details(inspect),
         )
-    return _pass("docker_image", "docker image is available", {"image": config.docker_image, "inspect": inspect.stdout.strip()})
+    return _pass(
+        "docker_image",
+        "docker image is available",
+        {"image": config.docker_image, "inspect": inspect.stdout.strip()},
+    )
 
 
 def _check_opencode_binary(config: RunConfig) -> PreflightCheck:
-    proc = _run(["docker", "run", "--rm", config.docker_image, "/root/.opencode/bin/opencode", "--version"])
+    proc = _run(
+        ["docker", "run", "--rm", config.docker_image, "/root/.opencode/bin/opencode", "--version"]
+    )
     if proc.returncode != 0:
         return _fail("opencode_binary", "opencode binary failed inside image", _proc_details(proc))
-    return _pass("opencode_binary", "opencode binary runs inside image", {"version": proc.stdout.strip()})
+    return _pass(
+        "opencode_binary", "opencode binary runs inside image", {"version": proc.stdout.strip()}
+    )
 
 
 def _check_readonly_mount(config: RunConfig) -> PreflightCheck:
@@ -224,19 +240,37 @@ def _check_openrouter_key(config: RunConfig) -> PreflightCheck:
         return _fail("openrouter_key", f"could not verify OpenRouter key: {exc}", {})
     data = info.get("data") if isinstance(info, dict) else None
     if not isinstance(data, dict):
-        return _fail("openrouter_key", "OpenRouter key response did not include data object", {"response": info})
+        return _fail(
+            "openrouter_key",
+            "OpenRouter key response did not include data object",
+            {"response": info},
+        )
 
     limit = data.get("limit")
     remaining = data.get("limit_remaining")
     include_byok = data.get("include_byok_in_limit")
     if limit is None or remaining is None:
         if config.allow_unlimited_openrouter_key:
-            return _warn("openrouter_key", "OpenRouter key is unlimited; explicit bypass supplied", _safe_key_details(data))
-        return _fail("openrouter_key", "OpenRouter key has no provider-side credit limit", _safe_key_details(data))
+            return _warn(
+                "openrouter_key",
+                "OpenRouter key is unlimited; explicit bypass supplied",
+                _safe_key_details(data),
+            )
+        return _fail(
+            "openrouter_key",
+            "OpenRouter key has no provider-side credit limit",
+            _safe_key_details(data),
+        )
     if not isinstance(remaining, (int, float)):
-        return _fail("openrouter_key", "OpenRouter limit_remaining is not numeric", _safe_key_details(data))
+        return _fail(
+            "openrouter_key", "OpenRouter limit_remaining is not numeric", _safe_key_details(data)
+        )
     if remaining <= 0:
-        return _fail("openrouter_key", "OpenRouter key has no remaining limited credit", _safe_key_details(data))
+        return _fail(
+            "openrouter_key",
+            "OpenRouter key has no remaining limited credit",
+            _safe_key_details(data),
+        )
     if remaining > config.caps.max_cost_usd:
         # Provider-side limit is the anti-runaway backstop; orchestrator
         # --max-cost-usd is the per-run budget. The two layers don't have to
@@ -254,7 +288,9 @@ def _check_openrouter_key(config: RunConfig) -> PreflightCheck:
             "OpenRouter key limit excludes BYOK usage; safe for non-BYOK models only",
             _safe_key_details(data),
         )
-    return _pass("openrouter_key", "OpenRouter key has a bounded remaining limit", _safe_key_details(data))
+    return _pass(
+        "openrouter_key", "OpenRouter key has a bounded remaining limit", _safe_key_details(data)
+    )
 
 
 def _fetch_openrouter_key(url: str, key: str) -> dict[str, Any]:

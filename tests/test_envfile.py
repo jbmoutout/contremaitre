@@ -11,7 +11,10 @@ from contremaitre.envfile import load_dotenv_defaults, load_env_file
 
 class EnvFileTest(unittest.TestCase):
     def test_load_env_file_sets_missing_values_and_preserves_existing_env(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"EXISTING": "shell"}, clear=True):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"EXISTING": "shell"}, clear=True),
+        ):
             path = Path(tmp) / ".env"
             path.write_text(
                 "\n".join(

@@ -50,6 +50,7 @@ class DetectAvailableTest(unittest.TestCase):
     def test_only_claude(self):
         def which(name):
             return "/usr/local/bin/claude" if name == "claude" else None
+
         with mock.patch("shutil.which", side_effect=which):
             self.assertEqual(
                 cli_reviewer.detect_available(),
@@ -59,6 +60,7 @@ class DetectAvailableTest(unittest.TestCase):
     def test_both_installed(self):
         def which(name):
             return f"/bin/{name}"
+
         with mock.patch("shutil.which", side_effect=which):
             self.assertEqual(
                 cli_reviewer.detect_available(),
@@ -314,9 +316,7 @@ class CommandForTest(unittest.TestCase):
         cmd = cli_reviewer._command_for("claude", "x")
         self.assertEqual(cmd[:2], ["claude", "-p"])
         self.assertIn("--permission-mode", cmd)
-        self.assertEqual(
-            cmd[cmd.index("--permission-mode") + 1], "bypassPermissions"
-        )
+        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "bypassPermissions")
 
 
 class BuildPromptTest(unittest.TestCase):
@@ -373,16 +373,14 @@ class RunReviewTest(unittest.TestCase):
             # Make the shim accept `exec --skip-git-repo-check <prompt>` —
             # /bin/sh discards extra positional args, so the shim doesn't
             # need to parse them.
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH','')}"}):
+            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '')}"}):
                 sink = tmp / "out.jsonl"
                 result = cli_reviewer.run_review(
                     tool="codex", prompt="please review", jsonl_path=sink
                 )
             self.assertEqual(result.exit_code, 0)
             self.assertIn("Looks fine.", result.markdown)
-            lines = [
-                json.loads(ln) for ln in sink.read_text().splitlines() if ln.strip()
-            ]
+            lines = [json.loads(ln) for ln in sink.read_text().splitlines() if ln.strip()]
             self.assertGreaterEqual(len(lines), 3)
             self.assertEqual(lines[0]["role"], "codex_review")
             self.assertEqual(lines[0]["type"], "text")
@@ -393,11 +391,9 @@ class RunReviewTest(unittest.TestCase):
         with TemporaryDirectory() as td:
             tmp = Path(td)
             _shim(tmp, "claude", SHIM_FAIL)
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH','')}"}):
+            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '')}"}):
                 sink = tmp / "out.jsonl"
-                result = cli_reviewer.run_review(
-                    tool="claude", prompt="x", jsonl_path=sink
-                )
+                result = cli_reviewer.run_review(tool="claude", prompt="x", jsonl_path=sink)
             self.assertEqual(result.exit_code, 7)
             self.assertIsNotNone(result.error)
 
@@ -430,18 +426,14 @@ echo "session noise line 2"
         with TemporaryDirectory() as td:
             tmp = Path(td)
             _shim(tmp, "codex", shim_body)
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH','')}"}):
+            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '')}"}):
                 sink = tmp / "out.jsonl"
-                result = cli_reviewer.run_review(
-                    tool="codex", prompt="x", jsonl_path=sink
-                )
+                result = cli_reviewer.run_review(tool="codex", prompt="x", jsonl_path=sink)
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.markdown.strip(), "clean review markdown")
             self.assertNotIn("session noise", result.markdown)
             # And the JSONL still got the noise lines for the TUI to render.
-            lines = [
-                json.loads(ln) for ln in sink.read_text().splitlines() if ln.strip()
-            ]
+            lines = [json.loads(ln) for ln in sink.read_text().splitlines() if ln.strip()]
             joined = " ".join(e["part"]["text"] for e in lines)
             self.assertIn("session noise", joined)
 
@@ -457,16 +449,14 @@ pwd
             _shim(tmp, "codex", shim_body)
             workdir = tmp / "worktree"
             workdir.mkdir()
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH','')}"}):
+            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '')}"}):
                 sink = tmp / "out.jsonl"
                 result = cli_reviewer.run_review(
                     tool="codex", prompt="x", jsonl_path=sink, cwd=workdir
                 )
             self.assertEqual(result.exit_code, 0)
             # On macOS /tmp is a symlink to /private/tmp; resolve both sides.
-            self.assertEqual(
-                Path(result.markdown.strip()).resolve(), workdir.resolve()
-            )
+            self.assertEqual(Path(result.markdown.strip()).resolve(), workdir.resolve())
 
     def test_subscription_safety_blanks_api_keys(self):
         """Operator's ANTHROPIC_API_KEY must NOT leak into the subprocess.
@@ -480,7 +470,7 @@ pwd
             tmp = Path(td)
             _shim(tmp, "claude", SHIM_ENV_DUMP)
             env_patch = {
-                "PATH": f"{tmp}:{os.environ.get('PATH','')}",
+                "PATH": f"{tmp}:{os.environ.get('PATH', '')}",
                 "ANTHROPIC_API_KEY": "should-not-leak",
                 # OAuth token: claude CLI prefers this over the API key,
                 # so blanking only API_KEY but leaving AUTH_TOKEN set still
@@ -490,9 +480,7 @@ pwd
             }
             with mock.patch.dict(os.environ, env_patch):
                 sink = tmp / "out.jsonl"
-                result = cli_reviewer.run_review(
-                    tool="claude", prompt="x", jsonl_path=sink
-                )
+                result = cli_reviewer.run_review(tool="claude", prompt="x", jsonl_path=sink)
             self.assertEqual(result.exit_code, 0)
             self.assertIn("ANTHROPIC_API_KEY=", result.markdown)
             self.assertIn("ANTHROPIC_AUTH_TOKEN=", result.markdown)
@@ -540,7 +528,9 @@ class PostCommentTest(unittest.TestCase):
             body = tmp / "review.md"
             body.write_text("# review\n")
             log = tmp / "git_log.jsonl"
-            fake_proc = mock.Mock(returncode=0, stdout="https://github.com/x/y/pull/1#issuecomment-1", stderr="")
+            fake_proc = mock.Mock(
+                returncode=0, stdout="https://github.com/x/y/pull/1#issuecomment-1", stderr=""
+            )
             with mock.patch("subprocess.run", return_value=fake_proc) as srun:
                 ok, msg = cli_reviewer.post_comment(
                     pr_url="https://github.com/x/y/pull/1",
@@ -598,7 +588,9 @@ class ParseVerdictTest(unittest.TestCase):
 
     def test_must_fix(self):
         self.assertEqual(
-            cli_reviewer.parse_verdict("🔴 MUST_FIX — blocking issues found\n\nblocking issue at …"),
+            cli_reviewer.parse_verdict(
+                "🔴 MUST_FIX — blocking issues found\n\nblocking issue at …"
+            ),
             "MUST_FIX",
         )
 
@@ -628,9 +620,7 @@ class HeaderTest(unittest.TestCase):
     """Lock down the metadata header shape (H3 only, includes model when known)."""
 
     def test_format_includes_tool_and_duration(self):
-        header = cli_reviewer.format_header(
-            tool="codex", model=None, duration_s=14
-        )
+        header = cli_reviewer.format_header(tool="codex", model=None, duration_s=14)
         self.assertIn("codex", header)
         self.assertIn("14s", header)
         self.assertTrue(header.startswith("### "))
@@ -638,16 +628,12 @@ class HeaderTest(unittest.TestCase):
         self.assertNotIn("## reviewed", header.replace("### ", ""))  # not H2
 
     def test_format_includes_model_when_known(self):
-        header = cli_reviewer.format_header(
-            tool="codex", model="gpt-5.5", duration_s=134
-        )
+        header = cli_reviewer.format_header(tool="codex", model="gpt-5.5", duration_s=134)
         self.assertIn("gpt-5.5", header)
         self.assertIn("2m 14s", header)
 
     def test_format_skips_model_when_none(self):
-        header = cli_reviewer.format_header(
-            tool="claude", model=None, duration_s=90
-        )
+        header = cli_reviewer.format_header(tool="claude", model=None, duration_s=90)
         # No spurious "`None`" or " · `` ·" sneaking into the string.
         self.assertNotIn("None", header)
         self.assertNotIn("``", header)

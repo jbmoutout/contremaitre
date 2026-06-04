@@ -98,9 +98,7 @@ def test_apply_is_a_no_op_when_defaults_file_missing(monkeypatch, tmp_path: Path
     assert args.cli_reviewer == "auto"
 
 
-def test_extra_reviewer_skip_sentinel_raises_picker_flag(
-    monkeypatch, tmp_path: Path
-):
+def test_extra_reviewer_skip_sentinel_raises_picker_flag(monkeypatch, tmp_path: Path):
     # `extra_reviewer_model = "skip"` raises the `_defaults_skip_extra`
     # sentinel so the launch-screen picker still PROMPTS for extra
     # reviewer, but Enter skips instead of accepting the suggestion.
@@ -198,9 +196,7 @@ def _run_picker_with_inputs(
 def test_picker_default_skip_makes_enter_skip_extra_reviewer():
     # All three prompts get Enter. With extra_default_skip=True, the
     # extra slot stays unset — Enter is the skip path.
-    agent, sim, extra, picker_args = _run_picker_with_inputs(
-        ["", "", ""], extra_default_skip=True
-    )
+    agent, sim, extra, picker_args = _run_picker_with_inputs(["", "", ""], extra_default_skip=True)
     assert agent.startswith("opencode/")
     assert sim.startswith("opencode/")
     assert extra is None
@@ -259,9 +255,7 @@ def test_picker_without_default_skip_accepts_suggested_extra_on_enter():
     # Sanity check the inverse — same three Enters, but with the
     # historical default behavior. Enter on the extra slot should accept
     # the suggested model.
-    agent, sim, extra, picker_args = _run_picker_with_inputs(
-        ["", "", ""], extra_default_skip=False
-    )
+    agent, sim, extra, picker_args = _run_picker_with_inputs(["", "", ""], extra_default_skip=False)
     assert extra is not None
     assert extra.startswith("opencode/")
     flags = [flag for flag, _ in picker_args]

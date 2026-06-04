@@ -203,9 +203,7 @@ class ControlPlaneTest(unittest.TestCase):
         self.assertEqual(sim_entry["verdict"], "APPROVED")
         self.assertTrue(extra_entry["unavailable"])
         recoveries = self._read_jsonl(result.run_dir / "recoveries.jsonl")
-        self.assertTrue(
-            any(r.get("kind") == events.EXTRA_REVIEWER_UNAVAILABLE for r in recoveries)
-        )
+        self.assertTrue(any(r.get("kind") == events.EXTRA_REVIEWER_UNAVAILABLE for r in recoveries))
         pr_eval = self._read_json(result.run_dir / "eval" / "pr_eval.json")
         # Structured shape with extra=None and cross_family_agreement=None
         # because the extra reviewer was attempted but unavailable.

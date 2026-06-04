@@ -385,14 +385,18 @@ def _verdict_glyph(verdict: str | None) -> tuple[str, str]:
     return "·", _PAL_DIM
 
 
-def _round_verdicts(review_cycles: list[dict[str, Any]], round_n: int) -> tuple[str | None, str | None]:
+def _round_verdicts(
+    review_cycles: list[dict[str, Any]], round_n: int
+) -> tuple[str | None, str | None]:
     """`(sim_verdict, extra_verdict)` for the given round; either may be None."""
 
     sim = next(
         (
             r.get("verdict")
             for r in review_cycles
-            if (r.get("round") or 0) == round_n and r.get("reviewer", "sim") == "sim" and not r.get("unavailable")
+            if (r.get("round") or 0) == round_n
+            and r.get("reviewer", "sim") == "sim"
+            and not r.get("unavailable")
         ),
         None,
     )
@@ -400,7 +404,9 @@ def _round_verdicts(review_cycles: list[dict[str, Any]], round_n: int) -> tuple[
         (
             r.get("verdict")
             for r in review_cycles
-            if (r.get("round") or 0) == round_n and r.get("reviewer") == "extra" and not r.get("unavailable")
+            if (r.get("round") or 0) == round_n
+            and r.get("reviewer") == "extra"
+            and not r.get("unavailable")
         ),
         None,
     )
@@ -421,7 +427,9 @@ def _current_review_round(guardrails: list[dict[str, Any]]) -> int:
     return sum(
         1
         for g in guardrails
-        if g.get("event") == "opencode_actor_start" and g.get("role") == "review" and g.get("reviewer_id") != "extra"
+        if g.get("event") == "opencode_actor_start"
+        and g.get("role") == "review"
+        and g.get("reviewer_id") != "extra"
     )
 
 
@@ -617,20 +625,26 @@ def _current_phase_label(
         return text
     if phase == "exploring":
         if color_state == "error":
-            text.append(_infra_failure_label("Exploring", provider_failure), style=f"bold {_PAL_ERROR}")
+            text.append(
+                _infra_failure_label("Exploring", provider_failure), style=f"bold {_PAL_ERROR}"
+            )
             return text
         text.append("Exploring", style=f"bold {_PAL_BRIGHT}")
         return text
     if phase == "grilling":
         if color_state == "error":
-            text.append(_infra_failure_label("Grilling", provider_failure), style=f"bold {_PAL_ERROR}")
+            text.append(
+                _infra_failure_label("Grilling", provider_failure), style=f"bold {_PAL_ERROR}"
+            )
             return text
         text.append("Grilling", style=f"bold {_PAL_BRIGHT}")
         text.append(f" (exchange {grilling_exchanges})", style=_PAL_TEXT)
         return text
     if phase == "implementing":
         if color_state == "error":
-            text.append(_infra_failure_label("Implementing", provider_failure), style=f"bold {_PAL_ERROR}")
+            text.append(
+                _infra_failure_label("Implementing", provider_failure), style=f"bold {_PAL_ERROR}"
+            )
             return text
         text.append("Implementing", style=f"bold {_PAL_BRIGHT}")
         if impl_complete:
@@ -646,7 +660,9 @@ def _current_phase_label(
         return text
     if phase == "reviewing":
         if color_state == "error":
-            text.append(_infra_failure_label("Reviewing", provider_failure), style=f"bold {_PAL_ERROR}")
+            text.append(
+                _infra_failure_label("Reviewing", provider_failure), style=f"bold {_PAL_ERROR}"
+            )
             return text
         text.append("Reviewing", style=f"bold {_PAL_BRIGHT}")
         # Show the round number from the count of actor-starts, not from
@@ -669,7 +685,9 @@ def _current_phase_label(
         return text
     if phase == "cli_review":
         if color_state == "error":
-            text.append(_infra_failure_label("CLI review", provider_failure), style=f"bold {_PAL_ERROR}")
+            text.append(
+                _infra_failure_label("CLI review", provider_failure), style=f"bold {_PAL_ERROR}"
+            )
             return text
         if color_state == "warn":
             text.append("CLI review — failed", style=f"bold {_PAL_WARN}")
@@ -932,7 +950,11 @@ def _text_event_count(events: list[dict[str, Any]]) -> int:
 
 
 def _task_count(events: list[dict[str, Any]]) -> int:
-    return sum(1 for e in events if e.get("type") == "tool_use" and (e.get("part") or {}).get("tool") == "task")
+    return sum(
+        1
+        for e in events
+        if e.get("type") == "tool_use" and (e.get("part") or {}).get("tool") == "task"
+    )
 
 
 def _settled_in(events: list[dict[str, Any]]) -> bool:
@@ -1082,7 +1104,9 @@ def _compute_phases_for_tui(
 
 def _self_verified_in(events: list[dict[str, Any]]) -> bool:
     """True if agent ran a test command after its last code edit."""
-    _test_cmd_re = re.compile(r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b")
+    _test_cmd_re = re.compile(
+        r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b"
+    )
     _contremaitre_re = re.compile(r"[/\\]?\.contremaitre[/\\]")
     last_edit_ts = 0
     for e in events:
@@ -1213,7 +1237,13 @@ def _container_mount_mode(cid: str, worktree_str: str) -> str:
 
     try:
         proc = subprocess.run(
-            ["docker", "inspect", cid, "--format", "{{range .Mounts}}{{.Source}}|{{.Mode}};{{end}}"],
+            [
+                "docker",
+                "inspect",
+                cid,
+                "--format",
+                "{{range .Mounts}}{{.Source}}|{{.Mode}};{{end}}",
+            ],
             capture_output=True,
             text=True,
             timeout=2,
@@ -1325,7 +1355,13 @@ def _build_event_row(event: dict[str, Any]):
         state = p.get("state") or {}
         inp = state.get("input") or {}
         body = _tool_body(tool, inp, state)
-        return ("", ts, Text("tool_use", style="dim"), Text(tool, style=f"bold {_tool_style(tool)}"), body)
+        return (
+            "",
+            ts,
+            Text("tool_use", style="dim"),
+            Text(tool, style=f"bold {_tool_style(tool)}"),
+            body,
+        )
 
     if t == "text":
         txt = p.get("text") or ""
@@ -1342,7 +1378,13 @@ def _build_event_row(event: dict[str, Any]):
             msg = data.get("message") or err.get("name") or str(err)[:200]
         else:
             msg = str(err)[:200]
-        return (Text("▍", style="red"), ts, Text("error", style="bold red"), "", Text(msg, style="red"))
+        return (
+            Text("▍", style="red"),
+            ts,
+            Text("error", style="bold red"),
+            "",
+            Text(msg, style="red"),
+        )
 
     return ("", ts, Text(t or "?", style="dim"), "", "")
 
@@ -1430,8 +1472,7 @@ def _derive_cli_review_states(
     out: list[tuple[str, str, str | None]] = []
     for tool in tools:
         started = any(
-            g.get("event") == "cli_review_started" and g.get("tool") == tool
-            for g in guardrails
+            g.get("event") == "cli_review_started" and g.get("tool") == tool for g in guardrails
         )
         if not started:
             continue
@@ -1439,14 +1480,12 @@ def _derive_cli_review_states(
             (
                 g
                 for g in guardrails
-                if g.get("event") == "cli_review_completed"
-                and g.get("tool") == tool
+                if g.get("event") == "cli_review_completed" and g.get("tool") == tool
             ),
             None,
         )
         failed = any(
-            g.get("event") == "cli_review_failed" and g.get("tool") == tool
-            for g in guardrails
+            g.get("event") == "cli_review_failed" and g.get("tool") == tool for g in guardrails
         )
         if failed:
             status = "failed"
@@ -1753,18 +1792,30 @@ if _TEXTUAL_AVAILABLE:
             yield Static("", id="header2")
             with Horizontal(id="panes"):
                 with Vertical(classes="pane", id="agent-pane"):
-                    yield RichLog(id="agent-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
+                    yield RichLog(
+                        id="agent-log", auto_scroll=False, markup=False, wrap=True, highlight=False
+                    )
                     yield Static("", classes="pane-sub", id="agent-sub")
                 with Vertical(id="sim-column"):
                     # SIM on top; EXTRA REVIEWER stacked below when configured
                     # (CSS .hidden on #extra-reviewer-pane collapses it so the
                     # SIM region uses the full right column in single-SIM mode).
                     with Vertical(classes="sim-subpane", id="sim-pane"):
-                        yield RichLog(id="sim-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
+                        yield RichLog(
+                            id="sim-log",
+                            auto_scroll=False,
+                            markup=False,
+                            wrap=True,
+                            highlight=False,
+                        )
                         yield Static("", classes="pane-sub", id="sim-sub")
                     with Vertical(classes="sim-subpane", id="extra-reviewer-pane"):
                         yield RichLog(
-                            id="extra-reviewer-log", auto_scroll=False, markup=False, wrap=True, highlight=False
+                            id="extra-reviewer-log",
+                            auto_scroll=False,
+                            markup=False,
+                            wrap=True,
+                            highlight=False,
                         )
                         yield Static("", classes="pane-sub", id="extra-reviewer-sub")
             # Post-publish CLI reviewer (claude/codex) — full-width row that
@@ -1782,7 +1833,9 @@ if _TEXTUAL_AVAILABLE:
                 )
                 yield Static("", classes="pane-sub", id="cli-review-sub")
             with Vertical(id="activity-panel"):
-                yield RichLog(id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False)
+                yield RichLog(
+                    id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False
+                )
             with Horizontal(id="footer-bar"):
                 yield Static("", id="footer-left")
                 yield Static("", id="footer-right")
@@ -1925,7 +1978,10 @@ if _TEXTUAL_AVAILABLE:
             # pattern as `_update_cli_review_log` — file-age alone would
             # leave the pane hidden during the model's spin-up window.
             guardrails = _read_jsonl(self.paths["guardrail_events"])
-            if any(g.get("event") == "opencode_actor_start" and g.get("reviewer_id") == "extra" for g in guardrails):
+            if any(
+                g.get("event") == "opencode_actor_start" and g.get("reviewer_id") == "extra"
+                for g in guardrails
+            ):
                 pane = self.query_one("#extra-reviewer-pane")
                 if pane.has_class("hidden"):
                     pane.set_class(False, "hidden")
@@ -1955,7 +2011,9 @@ if _TEXTUAL_AVAILABLE:
             # turn N+1 events written in this tick.
             guardrails = _read_jsonl(self.paths["guardrail_events"])
             agent_starts = [
-                e for e in guardrails if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
+                e
+                for e in guardrails
+                if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
             ]
             # SIM pane: SIM-work + SIM-review only. Filter out extra
             # reviewer starts (tagged reviewer_id="extra") so the SIM
@@ -1969,7 +2027,9 @@ if _TEXTUAL_AVAILABLE:
                 and e.get("reviewer_id") != "extra"
             ]
             extra_starts = [
-                e for e in guardrails if e.get("event") == "opencode_actor_start" and e.get("reviewer_id") == "extra"
+                e
+                for e in guardrails
+                if e.get("event") == "opencode_actor_start" and e.get("reviewer_id") == "extra"
             ]
             agent_widget = self.query_one("#agent-log", RichLog)
             sim_widget = self.query_one("#sim-log", RichLog)
@@ -2076,11 +2136,17 @@ if _TEXTUAL_AVAILABLE:
             # reviewer is still streaming.
             cli_review_states = _derive_cli_review_states(guardrails, self.cli_reviewer)
             expected_tools = _cli_reviewer_expand_choice(self.cli_reviewer)
-            cli_review_started = any(s[1] in ("streaming", "completed", "failed") for s in cli_review_states)
+            cli_review_started = any(
+                s[1] in ("streaming", "completed", "failed") for s in cli_review_states
+            )
             cli_review_failed = any(s[1] == "failed" for s in cli_review_states)
             if expected_tools:
-                settled_tools = {t for (t, st, _v) in cli_review_states if st in ("completed", "failed")}
-                cli_review_completed = bool(settled_tools) and all(t in settled_tools for t in expected_tools)
+                settled_tools = {
+                    t for (t, st, _v) in cli_review_states if st in ("completed", "failed")
+                }
+                cli_review_completed = bool(settled_tools) and all(
+                    t in settled_tools for t in expected_tools
+                )
             else:
                 cli_review_completed = False
             # Verdict key (MUST_FIX / NEEDS_ATTENTION / LOOKS_GOOD) the
@@ -2109,7 +2175,9 @@ if _TEXTUAL_AVAILABLE:
                 gr_age_at_freeze = _file_age(self.paths["guardrail_events"])
                 self._frozen_gr_age = gr_age_at_freeze if gr_age_at_freeze is not None else 0.0
             elapsed = (
-                self._frozen_elapsed if terminal and self._frozen_elapsed is not None else (time.time() - self.t_start)
+                self._frozen_elapsed
+                if terminal and self._frozen_elapsed is not None
+                else (time.time() - self.t_start)
             )
 
             # ----- Header -----
@@ -2145,13 +2213,19 @@ if _TEXTUAL_AVAILABLE:
             ag = self._docker_state.get("agent_container")
             sm = self._docker_state.get("sim_container")
             sim_file_age = _file_age(self.paths["sim_raw_export"])
-            extra_file_age = _file_age(self.paths["extra_reviewer_raw_export"]) if self.extra_reviewer_model else None
+            extra_file_age = (
+                _file_age(self.paths["extra_reviewer_raw_export"])
+                if self.extra_reviewer_model
+                else None
+            )
             # SIM-review and extra-review run sequentially and share the
             # docker RO-mount slot, so `sm` could belong to either. The
             # freshest file ages tells us who owns it; the other one is
             # idle (or not enabled).
             extra_owns_container = (
-                bool(sm) and extra_file_age is not None and (sim_file_age is None or extra_file_age <= sim_file_age)
+                bool(sm)
+                and extra_file_age is not None
+                and (sim_file_age is None or extra_file_age <= sim_file_age)
             )
             sim_owns_container = bool(sm) and not extra_owns_container
 
@@ -2182,9 +2256,9 @@ if _TEXTUAL_AVAILABLE:
             # animate during the only window it actually runs in.
             cli_review_file_age: float | None = None
             if self.cli_reviewer in ("codex", "claude"):
-                cli_review_file_age = _file_age(self.paths["claude_review_raw_export"]) or _file_age(
-                    self.paths["codex_review_raw_export"]
-                )
+                cli_review_file_age = _file_age(
+                    self.paths["claude_review_raw_export"]
+                ) or _file_age(self.paths["codex_review_raw_export"])
             cli_review_running_state = _activity_state(
                 container_present=False,
                 file_age=cli_review_file_age,
@@ -2258,7 +2332,9 @@ if _TEXTUAL_AVAILABLE:
                     )
                 )
                 extra_pane = self.query_one("#extra-reviewer-pane")
-                extra_pane.border_title = f"EXTRA REVIEWER ({_short_model(self.extra_reviewer_model)})"
+                extra_pane.border_title = (
+                    f"EXTRA REVIEWER ({_short_model(self.extra_reviewer_model)})"
+                )
                 extra_pane.set_class(active == "extra", "active")
 
             # ----- CLI review column (only when configured) -----
@@ -2283,7 +2359,8 @@ if _TEXTUAL_AVAILABLE:
                 # For `both`, the freshest of the two sinks drives the state.
                 if self.cli_reviewer == "both":
                     ages = [
-                        a for a in (
+                        a
+                        for a in (
                             _file_age(self.paths["claude_review_raw_export"]),
                             _file_age(self.paths["codex_review_raw_export"]),
                         )
@@ -2324,7 +2401,9 @@ if _TEXTUAL_AVAILABLE:
                 # off and the operator couldn't tell at a glance which pane
                 # was the focus. Use the phase signals instead: on between
                 # cli_review_started and cli_review_completed/failed.
-                cli_phase_live = cli_review_started and not (cli_review_completed or cli_review_failed)
+                cli_phase_live = cli_review_started and not (
+                    cli_review_completed or cli_review_failed
+                )
                 cli_pane.set_class(cli_phase_live or active == "cli_review", "active")
 
             # ----- Activity panel title -----
@@ -2356,13 +2435,18 @@ if _TEXTUAL_AVAILABLE:
             pr_title = pr_data.get("title") if pr_data.get("kind") == "PUBLISHED" else None
 
             agent_started = any(
-                g.get("event") == "opencode_actor_start" and g.get("role") == "agent" for g in guardrails
+                g.get("event") == "opencode_actor_start" and g.get("role") == "agent"
+                for g in guardrails
             )
             # WORK-loop SIM only — `role=sim`. Review-pass SIM is a separate
             # role and gates the Implementing → Reviewing transition below.
-            sim_started = any(g.get("event") == "opencode_actor_start" and g.get("role") == "sim" for g in guardrails)
+            sim_started = any(
+                g.get("event") == "opencode_actor_start" and g.get("role") == "sim"
+                for g in guardrails
+            )
             review_started = any(
-                g.get("event") == "opencode_actor_start" and g.get("role") == "review" for g in guardrails
+                g.get("event") == "opencode_actor_start" and g.get("role") == "review"
+                for g in guardrails
             )
             architecture_review_done = _architecture_review_in(agent_events)
             # cli_review_started / _completed / _failed hoisted above.
@@ -2383,7 +2467,9 @@ if _TEXTUAL_AVAILABLE:
             # Phase counters mirror flow_use.compute_phases so footer matches eval.
             review_cycles = _read_jsonl(self.paths["review_cycles"])
             test_runs = _read_jsonl(self.paths["test_runs"])
-            phase_counts = _compute_phases_for_tui(self.paths, agent_events, guardrails, review_cycles)
+            phase_counts = _compute_phases_for_tui(
+                self.paths, agent_events, guardrails, review_cycles
+            )
 
             # Verdict zone text. `attached` covers read-only TUI on an
             # in-progress run; terminal badges come from TerminalVerdict
@@ -2540,7 +2626,9 @@ if _TEXTUAL_AVAILABLE:
                 viewer_link.set_class(False, "hidden")
             else:
                 viewer_link.set_class(True, "hidden")
-            self.query_one("#links-line").set_class(not (terminal and (pr_url or has_viewer)), "hidden")
+            self.query_one("#links-line").set_class(
+                not (terminal and (pr_url or has_viewer)), "hidden"
+            )
 
         def action_quit(self) -> None:
             """Ctrl+C: ack visibly, then drain the orchestrator off-thread.
@@ -2597,7 +2685,10 @@ if _TEXTUAL_AVAILABLE:
 
 def _require_textual() -> None:
     if not _TEXTUAL_AVAILABLE:
-        raise SystemExit("contremaitre tui requires textual.\n" "Install with: python3 -m pip install --user textual")
+        raise SystemExit(
+            "contremaitre tui requires textual.\n"
+            "Install with: python3 -m pip install --user textual"
+        )
 
 
 def _print_final_urls(app: "ContremaitreTUI") -> None:

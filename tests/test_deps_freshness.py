@@ -72,6 +72,7 @@ class DepsFreshnessTest(unittest.TestCase):
             runs = root / "runs"
             orch = self._make_orch(repo=repo, runs_root=runs)
             import dataclasses
+
             orch.config = dataclasses.replace(orch.config, actor_mode=ActorMode.FAKE)
             with patch("contremaitre.orchestrator.ensure_deps_volume") as fake:
                 orch._ensure_pristine_deps_volume()
@@ -93,9 +94,7 @@ class DepsFreshnessTest(unittest.TestCase):
                 mount_path=".venv",
                 runtime_env=(("VIRTUAL_ENV", "/app/.venv"),),
             )
-            with patch(
-                "contremaitre.orchestrator.ensure_deps_volume", return_value=handle
-            ):
+            with patch("contremaitre.orchestrator.ensure_deps_volume", return_value=handle):
                 orch._ensure_pristine_deps_volume()
         self.assertEqual(orch.config.deps_volume, handle)
 
@@ -118,9 +117,7 @@ class DepsFreshnessTest(unittest.TestCase):
             orch = self._make_orch(repo=repo, runs_root=runs)
             with patch(
                 "contremaitre.orchestrator.ensure_deps_volume",
-                side_effect=DepsInstallError(
-                    lockfile="uv.lock", log_path=log_path, returncode=1
-                ),
+                side_effect=DepsInstallError(lockfile="uv.lock", log_path=log_path, returncode=1),
             ):
                 with self.assertRaises(RuntimeError) as ctx:
                     orch._ensure_pristine_deps_volume()
@@ -152,16 +149,15 @@ class OrderingTest(unittest.TestCase):
             # about the first few steps' ordering.
             raise RuntimeError("test-bailout")
 
-        with tempfile.TemporaryDirectory() as tmp, patch.object(
-            orch_mod.Orchestrator, "_create_worktree", fake_create_worktree
-        ), patch.object(
-            orch_mod.Orchestrator, "_ensure_pristine_deps_volume", fake_ensure_pristine
-        ), patch.object(
-            orch_mod.Orchestrator, "_provision_run_deps_volume", fake_provision
-        ), patch(
-            "contremaitre.orchestrator.enforce_preflight"
-        ), patch(
-            "contremaitre.orchestrator.GitRepo"
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(orch_mod.Orchestrator, "_create_worktree", fake_create_worktree),
+            patch.object(
+                orch_mod.Orchestrator, "_ensure_pristine_deps_volume", fake_ensure_pristine
+            ),
+            patch.object(orch_mod.Orchestrator, "_provision_run_deps_volume", fake_provision),
+            patch("contremaitre.orchestrator.enforce_preflight"),
+            patch("contremaitre.orchestrator.GitRepo"),
         ):
             root = Path(tmp)
             runs = root / "runs"

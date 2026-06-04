@@ -75,7 +75,9 @@ def test_normalize_openrouter_slug_prepends_provider_for_raw_paste():
 
 
 def test_normalize_openrouter_slug_preserves_existing_provider_prefix():
-    assert _normalize_openrouter_slug("openrouter/qwen/qwen3.7-max") == "openrouter/qwen/qwen3.7-max"
+    assert (
+        _normalize_openrouter_slug("openrouter/qwen/qwen3.7-max") == "openrouter/qwen/qwen3.7-max"
+    )
     assert _normalize_openrouter_slug("opencode/big-pickle") == "opencode/big-pickle"
 
 

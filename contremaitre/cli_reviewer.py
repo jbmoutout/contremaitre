@@ -159,9 +159,7 @@ def resolve_choice(
             print_fn(f"    [{i}] {tool}{marker}")
     both_index = len(VALID_TOOLS) + 1
     both_marker = "  ← saved" if enter_default == "both" else ""
-    print_fn(
-        f"    [{both_index}] both  (run codex and claude, post 2 PR comments){both_marker}"
-    )
+    print_fn(f"    [{both_index}] both  (run codex and claude, post 2 PR comments){both_marker}")
     print_fn("    [s] skip")
     enter_label = enter_default if enter_default else "skip"
     while True:
@@ -230,11 +228,7 @@ def hide_orchestrator_scaffolds(worktree: Path) -> None:
             return
         exclude_path = git_dir / "info" / "exclude"
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = (
-            exclude_path.read_text(encoding="utf-8")
-            if exclude_path.exists()
-            else ""
-        )
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
         # Line-by-line check, not substring, so a comment containing the
         # pattern doesn't make this falsely think it's already present.
         for line in existing.splitlines():

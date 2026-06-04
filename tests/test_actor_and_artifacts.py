@@ -51,9 +51,7 @@ class FakeActorWritesItsOwnArtifactsTest(unittest.TestCase):
         # Worktree gets created by the orchestrator normally; for these tests
         # we point the fake actor at the fixture repo directly so its
         # subprocess can write inside a real directory.
-        self.paths = self.paths.__class__(
-            **{**self.paths.__dict__, "worktree": self.repo}
-        )
+        self.paths = self.paths.__class__(**{**self.paths.__dict__, "worktree": self.repo})
         self.actor = FakeActorRunner(
             paths=self.paths,
             agent_scenario="normal",
@@ -290,8 +288,12 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
             "type": "step-finish",
             "reason": "tool-calls",
             "cost": cost,
-            "tokens": {"input": 100, "output": 10, "reasoning": 0,
-                       "cache": {"read": 0, "write": 0}},
+            "tokens": {
+                "input": 100,
+                "output": 10,
+                "reasoning": 0,
+                "cache": {"read": 0, "write": 0},
+            },
         }
 
     def _read_jsonl(self, path: Path) -> list[dict]:
@@ -304,21 +306,25 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
     def test_harvest_appends_parent_and_subagent_step_finishes(self):
         # Parent already has one step_finish in raw_export (from stdout).
         self.raw_export.write_text(
-            json.dumps({
-                "type": "step_finish",
-                "sessionID": "ses_parent",
-                "part": {"id": "prt_p1", "type": "step-finish",
-                         "cost": 0.01},
-            }) + "\n",
+            json.dumps(
+                {
+                    "type": "step_finish",
+                    "sessionID": "ses_parent",
+                    "part": {"id": "prt_p1", "type": "step-finish", "cost": 0.01},
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
-        self._make_db(parts=[
-            ("ses_parent", "prt_p1", self._step_finish(0.01)),  # already in raw_export
-            ("ses_parent", "prt_p2", self._step_finish(0.02)),  # stdout missed it
-            ("ses_child1", "prt_c1a", self._step_finish(0.03)),  # subagent
-            ("ses_child1", "prt_c1b", self._step_finish(0.04)),
-            ("ses_child2", "prt_c2", self._step_finish(0.05)),
-        ])
+        self._make_db(
+            parts=[
+                ("ses_parent", "prt_p1", self._step_finish(0.01)),  # already in raw_export
+                ("ses_parent", "prt_p2", self._step_finish(0.02)),  # stdout missed it
+                ("ses_child1", "prt_c1a", self._step_finish(0.03)),  # subagent
+                ("ses_child1", "prt_c1b", self._step_finish(0.04)),
+                ("ses_child2", "prt_c2", self._step_finish(0.05)),
+            ]
+        )
 
         appended = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
@@ -339,10 +345,12 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
     def test_harvest_is_idempotent(self):
         """Calling harvest twice doesn't double-count — part.id dedupes."""
 
-        self._make_db(parts=[
-            ("ses_child", "prt_c1", self._step_finish(0.03)),
-            ("ses_child", "prt_c2", self._step_finish(0.04)),
-        ])
+        self._make_db(
+            parts=[
+                ("ses_child", "prt_c1", self._step_finish(0.03)),
+                ("ses_child", "prt_c2", self._step_finish(0.04)),
+            ]
+        )
 
         first = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
         second = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
@@ -373,9 +381,11 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
         synthesized envelope's `part.id` matches the table column.
         """
 
-        self._make_db(parts=[
-            ("ses_child", "prt_table_only", self._step_finish(0.02)),
-        ])
+        self._make_db(
+            parts=[
+                ("ses_child", "prt_table_only", self._step_finish(0.02)),
+            ]
+        )
         # Sanity: the data blob on disk has no `id` field.
         db_path = self.state_dir / "opencode.db"
         conn = sqlite3.connect(str(db_path))
@@ -395,11 +405,13 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
     def test_harvest_ignores_non_step_finish_parts(self):
         """Text/tool parts in `part` table must not be re-emitted as step_finish."""
 
-        self._make_db(parts=[
-            ("ses_child", "prt_text", {"type": "text", "text": "hello"}),
-            ("ses_child", "prt_tool", {"type": "tool-call", "name": "bash"}),
-            ("ses_child", "prt_sf", self._step_finish(0.02)),
-        ])
+        self._make_db(
+            parts=[
+                ("ses_child", "prt_text", {"type": "text", "text": "hello"}),
+                ("ses_child", "prt_tool", {"type": "tool-call", "name": "bash"}),
+                ("ses_child", "prt_sf", self._step_finish(0.02)),
+            ]
+        )
 
         appended = _harvest_step_finishes_from_sqlite(self.state_dir, self.raw_export)
 
@@ -447,9 +459,7 @@ class RecoverTextFromSqliteTest(unittest.TestCase):
         conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
         cur.execute("CREATE TABLE session (id TEXT, time_created INTEGER)")
-        cur.execute(
-            "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER)"
-        )
+        cur.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER)")
         cur.execute(
             "CREATE TABLE part (id TEXT, session_id TEXT, message_id TEXT, "
             "time_created INTEGER, data TEXT)"

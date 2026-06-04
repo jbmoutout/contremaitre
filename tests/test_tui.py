@@ -160,7 +160,11 @@ def test_is_free_model_paid():
 
 def test_derive_phase_init_when_nothing_started():
     phase, color = _derive_phase(
-        terminal=False, terminal_verdict=None, settled=False, impl_complete=False, agent_started=False
+        terminal=False,
+        terminal_verdict=None,
+        settled=False,
+        impl_complete=False,
+        agent_started=False,
     )
     assert phase == "init"
     assert color == "live"
@@ -448,20 +452,13 @@ def test_current_review_round_advances_per_loop_back():
 
 
 def test_reviewer_status_idle_when_no_start():
-    assert (
-        _reviewer_status(
-            round_n=1, review_cycles=[], guardrails=[], is_extra=False
-        )
-        == "idle"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=[], guardrails=[], is_extra=False) == "idle"
 
 
 def test_reviewer_status_streaming_when_started_no_verdict():
     guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
     assert (
-        _reviewer_status(
-            round_n=1, review_cycles=[], guardrails=guardrails, is_extra=False
-        )
+        _reviewer_status(round_n=1, review_cycles=[], guardrails=guardrails, is_extra=False)
         == "streaming"
     )
 
@@ -594,9 +591,7 @@ def test_phase_label_exploring():
 
 
 def test_phase_label_exploring_error_state_shows_infra_failure():
-    text = _current_phase_label(
-        **_default_label_kwargs(phase="exploring", color_state="error")
-    )
+    text = _current_phase_label(**_default_label_kwargs(phase="exploring", color_state="error"))
     assert "infra failure" in text.plain
 
 
@@ -716,9 +711,7 @@ def test_phase_label_done_pr_pushed_without_title_is_just_done():
     # No title in pr.json → label stays just `Done`. PR # is carried by
     # the verdict zone; putting it in the label too would be noise.
     text = _current_phase_label(
-        **_default_label_kwargs(
-            phase="done", terminal_verdict="READY_FOR_DRAFT_PR", pr_number=1234
-        )
+        **_default_label_kwargs(phase="done", terminal_verdict="READY_FOR_DRAFT_PR", pr_number=1234)
     )
     assert text.plain.strip() == "Done"
     assert "1234" not in text.plain
@@ -778,9 +771,7 @@ def test_phase_label_done_failed_infra():
 
 def test_phase_label_implementing_error_state_shows_infra_failure():
     # FAILED_INFRA frozen at implementing: label must say so, not just "Implementing".
-    text = _current_phase_label(
-        **_default_label_kwargs(phase="implementing", color_state="error")
-    )
+    text = _current_phase_label(**_default_label_kwargs(phase="implementing", color_state="error"))
     assert "infra failure" in text.plain
 
 
@@ -816,8 +807,7 @@ def test_persistent_review_token_none_when_last_round_approved():
 
 def test_warnings_token_none_when_quiet():
     assert (
-        _warnings_token(recoveries=[], test_runs=[], review_cycles=[], extra_enabled=False)
-        is None
+        _warnings_token(recoveries=[], test_runs=[], review_cycles=[], extra_enabled=False) is None
     )
 
 
@@ -1000,12 +990,7 @@ def _completed_apply_patch(*, timestamp: int, path: str) -> dict:
                 "status": "completed",
                 "input": {
                     "patchText": (
-                        "*** Begin Patch\n"
-                        f"*** Update File: {path}\n"
-                        "@@\n"
-                        "-old\n"
-                        "+new\n"
-                        "*** End Patch\n"
+                        f"*** Begin Patch\n*** Update File: {path}\n@@\n-old\n+new\n*** End Patch\n"
                     )
                 },
             },
@@ -1173,11 +1158,17 @@ def test_latest_pending_tool_completed_returns_none():
         # round= field signals which loop we're in.
         (events.REVISION_REQUESTED, {"round": 2}, ["round=2"]),
         # APPROVED → ✓; verdict field echoed.
-        (events.REVIEW_VERDICT, {"verdict": "APPROVED", "round": 1},
-         ["✓", "verdict=APPROVED", "round=1"]),
+        (
+            events.REVIEW_VERDICT,
+            {"verdict": "APPROVED", "round": 1},
+            ["✓", "verdict=APPROVED", "round=1"],
+        ),
         # check_completed surfaces the command + ✓ on rc=0.
-        (events.CHECK_COMPLETED, {"returncode": 0, "cmd": "pytest -q", "duration_seconds": 1.5},
-         ["✓", "pytest -q"]),
+        (
+            events.CHECK_COMPLETED,
+            {"returncode": 0, "cmd": "pytest -q", "duration_seconds": 1.5},
+            ["✓", "pytest -q"],
+        ),
         # hard_gates_checked passed=True → ✓.
         (events.HARD_GATES_CHECKED, {"passed": True}, ["✓"]),
         # actor_start surfaces the role so the operator sees agent/sim/review.
@@ -1297,10 +1288,7 @@ def test_aggregate_verdict_picks_worst():
     # found a blocker the operator must see `MUST_FIX` in the footer,
     # not the rosier of the two.
     assert _aggregate_cli_review_verdict(["LOOKS_GOOD", "MUST_FIX"]) == "MUST_FIX"
-    assert (
-        _aggregate_cli_review_verdict(["NEEDS_ATTENTION", "LOOKS_GOOD"])
-        == "NEEDS_ATTENTION"
-    )
+    assert _aggregate_cli_review_verdict(["NEEDS_ATTENTION", "LOOKS_GOOD"]) == "NEEDS_ATTENTION"
     assert _aggregate_cli_review_verdict(["LOOKS_GOOD", "LOOKS_GOOD"]) == "LOOKS_GOOD"
 
 
@@ -1312,9 +1300,7 @@ def test_aggregate_verdict_empty_is_none():
 def test_aggregate_verdict_ignores_unknown_keys():
     # Defensive — a renamed verdict in a future review prompt shouldn't
     # silently outrank the known keys.
-    assert (
-        _aggregate_cli_review_verdict(["BIZARRE", "MUST_FIX"]) == "MUST_FIX"
-    )
+    assert _aggregate_cli_review_verdict(["BIZARRE", "MUST_FIX"]) == "MUST_FIX"
 
 
 def test_derive_cli_review_states_both_streaming():

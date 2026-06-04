@@ -43,11 +43,11 @@ class DockerfileHashRebuildTest(unittest.TestCase):
             df = Path(tmp) / "Dockerfile"
             df.write_text("FROM scratch\n", encoding="utf-8")
             config = _make_config(cli._DEFAULT_IMAGE, Path(tmp))
-            with self._patch_dockerfile(df), patch(
-                "contremaitre.cli.subprocess.run"
-            ) as fake_run, patch(
-                "contremaitre.cli._build_image_inline", return_value=0
-            ) as fake_build:
+            with (
+                self._patch_dockerfile(df),
+                patch("contremaitre.cli.subprocess.run") as fake_run,
+                patch("contremaitre.cli._build_image_inline", return_value=0) as fake_build,
+            ):
                 # inspect returns non-zero → image missing
                 fake_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
                 rc = cli._ensure_default_image_built(config)
@@ -68,11 +68,11 @@ class DockerfileHashRebuildTest(unittest.TestCase):
             df.write_bytes(content)
             digest = hashlib.sha256(content).hexdigest()
             config = _make_config(cli._DEFAULT_IMAGE, Path(tmp))
-            with self._patch_dockerfile(df), patch(
-                "contremaitre.cli.subprocess.run"
-            ) as fake_run, patch(
-                "contremaitre.cli._build_image_inline", return_value=0
-            ) as fake_build:
+            with (
+                self._patch_dockerfile(df),
+                patch("contremaitre.cli.subprocess.run") as fake_run,
+                patch("contremaitre.cli._build_image_inline", return_value=0) as fake_build,
+            ):
                 fake_run.return_value = MagicMock(returncode=0, stdout=digest + "\n", stderr="")
                 rc = cli._ensure_default_image_built(config)
         self.assertEqual(rc, 0)
@@ -87,11 +87,11 @@ class DockerfileHashRebuildTest(unittest.TestCase):
             df = Path(tmp) / "Dockerfile"
             df.write_bytes(b"FROM scratch\nRUN echo new\n")
             config = _make_config(cli._DEFAULT_IMAGE, Path(tmp))
-            with self._patch_dockerfile(df), patch(
-                "contremaitre.cli.subprocess.run"
-            ) as fake_run, patch(
-                "contremaitre.cli._build_image_inline", return_value=0
-            ) as fake_build:
+            with (
+                self._patch_dockerfile(df),
+                patch("contremaitre.cli.subprocess.run") as fake_run,
+                patch("contremaitre.cli._build_image_inline", return_value=0) as fake_build,
+            ):
                 fake_run.return_value = MagicMock(
                     returncode=0, stdout="stale-hash-from-prior-build\n", stderr=""
                 )
@@ -108,11 +108,11 @@ class DockerfileHashRebuildTest(unittest.TestCase):
             df = Path(tmp) / "Dockerfile"
             df.write_bytes(b"FROM scratch\n")
             config = _make_config(cli._DEFAULT_IMAGE, Path(tmp))
-            with self._patch_dockerfile(df), patch(
-                "contremaitre.cli.subprocess.run"
-            ) as fake_run, patch(
-                "contremaitre.cli._build_image_inline", return_value=0
-            ) as fake_build:
+            with (
+                self._patch_dockerfile(df),
+                patch("contremaitre.cli.subprocess.run") as fake_run,
+                patch("contremaitre.cli._build_image_inline", return_value=0) as fake_build,
+            ):
                 fake_run.return_value = MagicMock(returncode=0, stdout="\n", stderr="")
                 cli._ensure_default_image_built(config)
         fake_build.assert_called_once()
@@ -154,8 +154,9 @@ class BuildImageStampsLabelTest(unittest.TestCase):
             content = b"FROM scratch\nRUN echo hi\n"
             df.write_bytes(content)
             expected = hashlib.sha256(content).hexdigest()
-            with patch("contremaitre.cli.subprocess.run") as fake_run, patch(
-                "contremaitre.cli._prune_dangling_images"
+            with (
+                patch("contremaitre.cli.subprocess.run") as fake_run,
+                patch("contremaitre.cli._prune_dangling_images"),
             ):
                 fake_run.return_value = MagicMock(returncode=0)
                 rc = cli._build_image_inline(

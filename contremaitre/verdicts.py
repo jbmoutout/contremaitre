@@ -119,4 +119,3 @@ def diff_hash(repo: GitRepo, base: str) -> str:
 def write_review_diff(repo: GitRepo, base: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(repo.diff_bytes(base))
-

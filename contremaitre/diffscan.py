@@ -35,10 +35,14 @@ from .git_utils import GitRepo
 # the `*/`-prefixed variant explicitly to catch nested `.env` files.
 FORBIDDEN_PATTERNS = (
     # Environment / dotenv variants — anywhere in the tree.
-    ".env", "*/.env",
-    ".env.*", "*/.env.*",
-    ".envrc", "*/.envrc",
-    ".envrc.*", "*/.envrc.*",
+    ".env",
+    "*/.env",
+    ".env.*",
+    "*/.env.*",
+    ".envrc",
+    "*/.envrc",
+    ".envrc.*",
+    "*/.envrc.*",
     # PEM-encoded key + private-key material.
     "*.pem",
     "*.key",
@@ -50,10 +54,14 @@ FORBIDDEN_PATTERNS = (
 # SHOULD update these — blocking them would force either silent skip
 # or unnecessary failure.
 FORBIDDEN_EXCEPTIONS = (
-    ".env.example", "*/.env.example",
-    ".env.sample", "*/.env.sample",
-    ".env.template", "*/.env.template",
-    ".env.defaults", "*/.env.defaults",
+    ".env.example",
+    "*/.env.example",
+    ".env.sample",
+    "*/.env.sample",
+    ".env.template",
+    "*/.env.template",
+    ".env.defaults",
+    "*/.env.defaults",
 )
 
 
@@ -65,7 +73,9 @@ class DiffScanResult:
     patterns: tuple[str, ...] = FORBIDDEN_PATTERNS
 
 
-def scan_diff(repo: GitRepo, base: str, patterns: tuple[str, ...] = FORBIDDEN_PATTERNS) -> DiffScanResult:
+def scan_diff(
+    repo: GitRepo, base: str, patterns: tuple[str, ...] = FORBIDDEN_PATTERNS
+) -> DiffScanResult:
     raw = repo.output("diff", "--name-only", f"{base}...HEAD")
     changed = [line.strip() for line in raw.splitlines() if line.strip()]
     forbidden = [path for path in changed if _is_forbidden(path, patterns)]
@@ -81,4 +91,3 @@ def _is_forbidden(path: str, patterns: tuple[str, ...]) -> bool:
     if not any(fnmatch(path, pattern) for pattern in patterns):
         return False
     return not any(fnmatch(path, exc) for exc in FORBIDDEN_EXCEPTIONS)
-

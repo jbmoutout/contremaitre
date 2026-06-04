@@ -13,9 +13,12 @@ class JsonLogReadTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "events.jsonl"
             path.write_text(
-                json.dumps({"a": 1}) + "\n"
-                + json.dumps({"b": 2}) + "\n"
-                + json.dumps({"c": 3}) + "\n",
+                json.dumps({"a": 1})
+                + "\n"
+                + json.dumps({"b": 2})
+                + "\n"
+                + json.dumps({"c": 3})
+                + "\n",
                 encoding="utf-8",
             )
             result = read_jsonl(path)
@@ -25,10 +28,7 @@ class JsonLogReadTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "mixed.jsonl"
             path.write_text(
-                json.dumps({"ok": 1}) + "\n"
-                + "\n"
-                + "not-json\n"
-                + json.dumps({"ok": 2}) + "\n",
+                json.dumps({"ok": 1}) + "\n" + "\n" + "not-json\n" + json.dumps({"ok": 2}) + "\n",
                 encoding="utf-8",
             )
             result = read_jsonl(path)

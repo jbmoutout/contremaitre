@@ -520,7 +520,9 @@ def _render_row(r: dict[str, Any]) -> str:
     title_bits: list[str] = []
     if repo_slug:
         if repo_url:
-            title_bits.append(f'<a href="{_escape(repo_url)}" target="_blank" rel="noopener">{_escape(repo_slug)}</a>')
+            title_bits.append(
+                f'<a href="{_escape(repo_url)}" target="_blank" rel="noopener">{_escape(repo_slug)}</a>'
+            )
         else:
             title_bits.append(_escape(repo_slug))
         if r["base"]:
@@ -533,15 +535,23 @@ def _render_row(r: dict[str, Any]) -> str:
     title_line = '<span class="sep">·</span>'.join(f" {b} " for b in title_bits).strip()
 
     # Run id + when become meta (still scannable, just demoted from title).
-    id_line = f'<div class="rep-meta">' f'<code>{_escape(r["run_id"])}</code> · {_escape(r["when"])}' f"</div>"
+    id_line = (
+        f'<div class="rep-meta"><code>{_escape(r["run_id"])}</code> · {_escape(r["when"])}</div>'
+    )
 
     models_bits: list[str] = []
     if r["agent_model"]:
-        models_bits.append(f'<span style="color:var(--agent)">agent</span> <code>{_escape(r["agent_model"])}</code>')
+        models_bits.append(
+            f'<span style="color:var(--agent)">agent</span> <code>{_escape(r["agent_model"])}</code>'
+        )
     if r["sim_model"]:
-        models_bits.append(f'<span style="color:var(--sim)">sim</span> <code>{_escape(r["sim_model"])}</code>')
+        models_bits.append(
+            f'<span style="color:var(--sim)">sim</span> <code>{_escape(r["sim_model"])}</code>'
+        )
     if r["extra_model"]:
-        models_bits.append(f'<span style="color:var(--extra)">extra</span> <code>{_escape(r["extra_model"])}</code>')
+        models_bits.append(
+            f'<span style="color:var(--extra)">extra</span> <code>{_escape(r["extra_model"])}</code>'
+        )
     # One badge per cli_review on disk (orchestrator + any cli_review_extra
     # passes). Side-by-side display lets A1's cross-reviewer comparison read
     # off the index — codex MUST_FIX next to claude NEEDS_ATTENTION etc.
@@ -568,14 +578,24 @@ def _render_row(r: dict[str, Any]) -> str:
             f'<span style="color:var(--accent)">{_escape(cr["tool"])} review</span>'
             f"{suffix}"
         )
-    models_line = " · ".join(models_bits) if models_bits else '<span class="no-eval">no model recorded</span>'
+    models_line = (
+        " · ".join(models_bits) if models_bits else '<span class="no-eval">no model recorded</span>'
+    )
 
-    branch_line = f'<div class="rep-meta">branch <code>{_escape(r["pr_branch"])}</code></div>' if r["pr_branch"] else ""
+    branch_line = (
+        f'<div class="rep-meta">branch <code>{_escape(r["pr_branch"])}</code></div>'
+        if r["pr_branch"]
+        else ""
+    )
 
     blurb = r["impl_complete"] or r["settled_preamble"] or r["reason"]
     if blurb and len(blurb) > 280:
         blurb = blurb[:280].rstrip() + "…"
-    blurb_line = f'<div class="rep-meta" style="color:var(--text-dim)">{_escape(blurb)}</div>' if blurb else ""
+    blurb_line = (
+        f'<div class="rep-meta" style="color:var(--text-dim)">{_escape(blurb)}</div>'
+        if blurb
+        else ""
+    )
 
     cost_label, is_free = _fmt_cost(r["cost_usd"])
     cost_pill = (
@@ -628,11 +648,19 @@ def _pr_title_bit(r: dict[str, Any]) -> str:
         label = f"<b>PR #{_escape(pr_no)}</b>"
         if title:
             label += f" · {_escape(title)}"
-        return f'<a class="pr-link" href="{_escape(url)}" target="_blank" rel="noopener">' f"{label} ↗</a>"
+        return (
+            f'<a class="pr-link" href="{_escape(url)}" target="_blank" rel="noopener">{label} ↗</a>'
+        )
     if kind:
         return f'<span class="score-pill pr-pill-no-pr"><b>{_escape(kind)}</b></span>'
     return ""
 
 
 def _escape(text: Any) -> str:
-    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )

@@ -40,9 +40,7 @@ class DepsInstallError(RuntimeError):
     """
 
     def __init__(self, *, lockfile: str, log_path: Path, returncode: int):
-        super().__init__(
-            f"deps install for {lockfile} failed (rc={returncode}); see {log_path}"
-        )
+        super().__init__(f"deps install for {lockfile} failed (rc={returncode}); see {log_path}")
         self.lockfile = lockfile
         self.log_path = log_path
         self.returncode = returncode
@@ -74,7 +72,10 @@ class _Lockfile:
 
 _PY_VENV_ENV: tuple[tuple[str, str], ...] = (
     ("VIRTUAL_ENV", "/app/.venv"),
-    ("PATH", "/app/.venv/bin:/root/.local/bin:/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+    (
+        "PATH",
+        "/app/.venv/bin:/root/.local/bin:/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    ),
 )
 
 
@@ -225,39 +226,60 @@ def ensure_deps_volume(
     print(f"contremaitre: populating deps volume {volume} (log: {log_path})", file=sys.stderr)
     try:
         subprocess.run(
-            ["docker", "volume", "create",
-             "--label", "contremaitre.purpose=deps-cache",
-             "--label", f"contremaitre.project={project_id}",
-             volume],
-            check=True, capture_output=True, text=True, timeout=10,
+            [
+                "docker",
+                "volume",
+                "create",
+                "--label",
+                "contremaitre.purpose=deps-cache",
+                "--label",
+                f"contremaitre.project={project_id}",
+                volume,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except subprocess.CalledProcessError as exc:
         log_path.write_text(f"docker volume create failed:\n{exc.stderr}", encoding="utf-8")
         raise DepsInstallError(lockfile=lockfile.name, log_path=log_path, returncode=exc.returncode)
 
     docker_cmd = [
-        "docker", "run", "--rm",
-        "--label", "contremaitre.role=deps-install",
+        "docker",
+        "run",
+        "--rm",
+        "--label",
+        "contremaitre.role=deps-install",
         # Prevent lifecycle hooks that try to write to the source repo
         # (which is mounted RO). Husky's `prepare` script calls `husky
         # install` → writes to `.git/hooks/` → EACCES on the RO mount.
         # HUSKY=0 is the canonical opt-out; CI=1 is the broader signal
         # for "don't run interactive setup hooks".
-        "-e", "HUSKY=0",
-        "-e", "CI=1",
+        "-e",
+        "HUSKY=0",
+        "-e",
+        "CI=1",
     ]
     # Runtime env vars (VIRTUAL_ENV / CARGO_HOME / GOPATH) pass through
     # unchanged — install and runtime both see /app, so paths embedded
     # at install time (uv shebangs, cargo registry index) resolve later.
     for key, value in lockfile.runtime_env:
         docker_cmd.extend(["-e", f"{key}={value}"])
-    docker_cmd.extend([
-        "-v", f"{repo.resolve()}:/app:rw",
-        "-v", f"{volume}:/app/{lockfile.cache_mount_path}",
-        "-w", "/app",
-        base_image,
-        "sh", "-lc", lockfile.install_cmd,
-    ])
+    docker_cmd.extend(
+        [
+            "-v",
+            f"{repo.resolve()}:/app:rw",
+            "-v",
+            f"{volume}:/app/{lockfile.cache_mount_path}",
+            "-w",
+            "/app",
+            base_image,
+            "sh",
+            "-lc",
+            lockfile.install_cmd,
+        ]
+    )
     proc = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=900)
     log_path.write_text(
         f"$ {lockfile.install_cmd}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
@@ -266,9 +288,12 @@ def ensure_deps_volume(
     if proc.returncode != 0:
         subprocess.run(
             ["docker", "volume", "rm", "-f", volume],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
-        raise DepsInstallError(lockfile=lockfile.name, log_path=log_path, returncode=proc.returncode)
+        raise DepsInstallError(
+            lockfile=lockfile.name, log_path=log_path, returncode=proc.returncode
+        )
     _prune_stale_deps_volumes(
         project_slug=project_slug,
         lockfile_name=lockfile.name,
@@ -303,7 +328,9 @@ def _prune_stale_deps_volumes(
     try:
         proc = subprocess.run(
             ["docker", "volume", "ls", "-q", "--filter", f"name={prefix}"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return
@@ -315,7 +342,9 @@ def _prune_stale_deps_volumes(
             continue
         rm = subprocess.run(
             ["docker", "volume", "rm", name],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if rm.returncode == 0:
             print(f"contremaitre: pruned stale deps volume {name}", file=sys.stderr)
@@ -346,23 +375,43 @@ def clone_deps_volume_for_run(*, pristine: DepsVolume, run_id: str, base_image: 
 
     per_run = f"contremaitre-run-{run_id}-deps"
     subprocess.run(
-        ["docker", "volume", "create",
-         "--label", "contremaitre.purpose=deps-run",
-         "--label", f"contremaitre.run-id={run_id}",
-         per_run],
-        check=True, capture_output=True, text=True, timeout=10,
+        [
+            "docker",
+            "volume",
+            "create",
+            "--label",
+            "contremaitre.purpose=deps-run",
+            "--label",
+            f"contremaitre.run-id={run_id}",
+            per_run,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     subprocess.run(
         [
-            "docker", "run", "--rm",
-            "--label", f"contremaitre.run-id={run_id}",
-            "--label", "contremaitre.role=deps-clone",
-            "-v", f"{pristine.name}:/src:ro",
-            "-v", f"{per_run}:/dst",
+            "docker",
+            "run",
+            "--rm",
+            "--label",
+            f"contremaitre.run-id={run_id}",
+            "--label",
+            "contremaitre.role=deps-clone",
+            "-v",
+            f"{pristine.name}:/src:ro",
+            "-v",
+            f"{per_run}:/dst",
             base_image,
-            "sh", "-lc", "cp -a /src/. /dst/",
+            "sh",
+            "-lc",
+            "cp -a /src/. /dst/",
         ],
-        check=True, capture_output=True, text=True, timeout=300,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
     return DepsVolume(
         name=per_run,
@@ -375,7 +424,9 @@ def _volume_exists(name: str) -> bool:
     try:
         proc = subprocess.run(
             ["docker", "volume", "inspect", name],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -388,7 +439,9 @@ def list_deps_volumes() -> list[str]:
     try:
         proc = subprocess.run(
             ["docker", "volume", "ls", "-q", "--filter", "name=contremaitre-deps-"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return []

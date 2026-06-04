@@ -95,15 +95,29 @@ def _shared_run_doctor_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--openrouter-env-var", default="OPENROUTER_API_KEY")
     p.add_argument("--docker-network", default=None, help="Optional docker --network value")
-    p.add_argument("--http-proxy", default=None, help="Optional HTTP_PROXY value passed by env name to containers")
-    p.add_argument("--https-proxy", default=None, help="Optional HTTPS_PROXY value passed by env name to containers")
-    p.add_argument("--no-proxy", default=None, help="Optional NO_PROXY value passed by env name to containers")
+    p.add_argument(
+        "--http-proxy",
+        default=None,
+        help="Optional HTTP_PROXY value passed by env name to containers",
+    )
+    p.add_argument(
+        "--https-proxy",
+        default=None,
+        help="Optional HTTPS_PROXY value passed by env name to containers",
+    )
+    p.add_argument(
+        "--no-proxy", default=None, help="Optional NO_PROXY value passed by env name to containers"
+    )
     p.add_argument(
         "--allow-open-egress",
         action="store_true",
         help="Allow opencode containers without explicit network/proxy policy",
     )
-    p.add_argument("--skip-openrouter-key-check", action="store_true", help="Do not query OpenRouter key metadata")
+    p.add_argument(
+        "--skip-openrouter-key-check",
+        action="store_true",
+        help="Do not query OpenRouter key metadata",
+    )
     p.add_argument(
         "--allow-unlimited-openrouter-key",
         action="store_true",
@@ -123,8 +137,14 @@ def build_parser() -> argparse.ArgumentParser:
     shared = _shared_run_doctor_parser()
 
     run_p = sub.add_parser("run", parents=[shared], help="Run the WORK + REVIEW loop")
-    run_p.add_argument("--fork", default=None, help="Push remote for the run branch. Required for --publish-mode gh.")
-    run_p.add_argument("--upstream", default=None, help="Canonical (read-only) remote, mounted as `upstream`.")
+    run_p.add_argument(
+        "--fork",
+        default=None,
+        help="Push remote for the run branch. Required for --publish-mode gh.",
+    )
+    run_p.add_argument(
+        "--upstream", default=None, help="Canonical (read-only) remote, mounted as `upstream`."
+    )
     run_p.add_argument("--branch-prefix", default="refactor")
     run_p.add_argument(
         "--agent-model",
@@ -160,18 +180,34 @@ def build_parser() -> argparse.ArgumentParser:
             "`none` skips. The review is posted as a single comment on the PR."
         ),
     )
-    run_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value)
+    run_p.add_argument(
+        "--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value
+    )
     run_p.add_argument("--run-slug", default="run")
-    run_p.add_argument("--check-cmd", action="append", default=[], help="Executable check command; repeatable")
+    run_p.add_argument(
+        "--check-cmd", action="append", default=[], help="Executable check command; repeatable"
+    )
     run_p.add_argument(
         "--sim-scenario",
-        choices=["approved", "changes_requested", "needs_human", "malformed", "malformed_then_approved"],
+        choices=[
+            "approved",
+            "changes_requested",
+            "needs_human",
+            "malformed",
+            "malformed_then_approved",
+        ],
         default="approved",
         help="Fake SIM behavior (ignored in --actor opencode)",
     )
     run_p.add_argument(
         "--extra-reviewer-scenario",
-        choices=["approved", "changes_requested", "needs_human", "malformed", "malformed_then_approved"],
+        choices=[
+            "approved",
+            "changes_requested",
+            "needs_human",
+            "malformed",
+            "malformed_then_approved",
+        ],
         default="approved",
         help=(
             "Fake extra-reviewer behavior (ignored in --actor opencode and "
@@ -185,7 +221,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="normal",
         help="Fake agent behavior (ignored in --actor opencode)",
     )
-    run_p.add_argument("--publish-mode", choices=[mode.value for mode in PublishMode], default=PublishMode.STUB.value)
+    run_p.add_argument(
+        "--publish-mode",
+        choices=[mode.value for mode in PublishMode],
+        default=PublishMode.STUB.value,
+    )
     run_p.add_argument(
         "-y",
         "--yes",
@@ -204,8 +244,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument("--keep-worktree", action="store_true")
     run_p.add_argument("--simulate-drift-after-approval", action="store_true")
-    run_p.add_argument("--container-user", default=None, help="Optional docker --user value, e.g. $(id -u):$(id -g)")
-    run_p.add_argument("--skip-preflight", action="store_true", help="Bypass operational preflight checks")
+    run_p.add_argument(
+        "--container-user",
+        default=None,
+        help="Optional docker --user value, e.g. $(id -u):$(id -g)",
+    )
+    run_p.add_argument(
+        "--skip-preflight", action="store_true", help="Bypass operational preflight checks"
+    )
     run_p.add_argument("--agent-timeout-seconds", type=int, default=1800)
     run_p.add_argument("--sim-timeout-seconds", type=int, default=1500)
     run_p.add_argument(
@@ -226,7 +272,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
         help="Sleep this many seconds before retrying after a transient provider error.",
     )
-    run_p.add_argument("--gh-repo", default=None, help="Optional owner/repo for gh pr create --repo")
+    run_p.add_argument(
+        "--gh-repo", default=None, help="Optional owner/repo for gh pr create --repo"
+    )
     run_p.add_argument("--pr-title", default=None)
     run_p.add_argument("--pr-body", default=None)
     run_p.add_argument("--max-turns", type=int, default=30)
@@ -236,8 +284,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--max-review-rounds", type=int, default=3)
     run_p.set_defaults(func=_run_cmd)
 
-    doctor_p = sub.add_parser("doctor", parents=[shared], help="Validate live-run operational prerequisites")
-    doctor_p.add_argument("--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.OPENCODE.value)
+    doctor_p = sub.add_parser(
+        "doctor", parents=[shared], help="Validate live-run operational prerequisites"
+    )
+    doctor_p.add_argument(
+        "--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.OPENCODE.value
+    )
     doctor_p.add_argument("--run-slug", default="doctor")
     doctor_p.set_defaults(func=_doctor_cmd)
 
@@ -250,7 +302,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     image_p = sub.add_parser("image", help="Manage the opencode runtime image")
     image_sub = image_p.add_subparsers(dest="image_command", required=True)
-    image_build = image_sub.add_parser("build", help="Build the runtime docker image from the package's Dockerfile")
+    image_build = image_sub.add_parser(
+        "build", help="Build the runtime docker image from the package's Dockerfile"
+    )
     image_build.add_argument(
         "--variant",
         choices=list(_VARIANT_DOCKERFILES),
@@ -276,13 +330,19 @@ def build_parser() -> argparse.ArgumentParser:
     image_build.add_argument("--no-cache", action="store_true")
     image_build.set_defaults(func=_image_build_cmd)
 
-    cleanup_p = sub.add_parser("cleanup", help="Prune stale containers + worktrees + dangling images")
+    cleanup_p = sub.add_parser(
+        "cleanup", help="Prune stale containers + worktrees + dangling images"
+    )
     cleanup_p.add_argument("--runs-root", type=Path, default=Path(".contremaitre/runs"))
     cleanup_p.add_argument(
-        "--dry-run", action="store_true", help="Report what would be removed without touching anything"
+        "--dry-run",
+        action="store_true",
+        help="Report what would be removed without touching anything",
     )
     cleanup_p.add_argument(
-        "--skip-images", action="store_true", help="Skip docker image prune (containers + worktrees only)"
+        "--skip-images",
+        action="store_true",
+        help="Skip docker image prune (containers + worktrees only)",
     )
     cleanup_p.add_argument(
         "--deps",
@@ -301,7 +361,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     tui_p = sub.add_parser("tui", help="Live Textual TUI (requires `textual`)")
     tui_sub = tui_p.add_subparsers(dest="tui_command", required=True)
-    tui_run = tui_sub.add_parser("run", help="Spawn `contremaitre run` and attach the TUI to its run dir")
+    tui_run = tui_sub.add_parser(
+        "run", help="Spawn `contremaitre run` and attach the TUI to its run dir"
+    )
     tui_run.add_argument(
         "run_args",
         nargs=argparse.REMAINDER,
@@ -309,7 +371,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tui_run.add_argument("--refresh-hz", type=float, default=5.0)
     tui_run.add_argument(
-        "--discover-timeout", type=float, default=30.0, help="Seconds to wait for the spawned run to create its dir"
+        "--discover-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for the spawned run to create its dir",
     )
     tui_run.set_defaults(func=_tui_run_cmd)
     tui_attach = tui_sub.add_parser("attach", help="Read-only attach to an existing run directory")
@@ -360,7 +425,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Runs root (default: .contremaitre/runs)",
     )
 
-    eval_config_kwargs = dict(default="default", help="Config name under golden_cases/<case_id>/configs/ (default: default)")
+    eval_config_kwargs = dict(
+        default="default",
+        help="Config name under golden_cases/<case_id>/configs/ (default: default)",
+    )
 
     eval_run = eval_sub.add_parser("run", help="Run one case n times with the named config")
     eval_run.add_argument("case_id")
@@ -369,32 +437,44 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_run.set_defaults(func=_eval_run_cmd)
 
-    eval_check = eval_sub.add_parser("check", help="Validate one run dir against its (case, config)")
+    eval_check = eval_sub.add_parser(
+        "check", help="Validate one run dir against its (case, config)"
+    )
     eval_check.add_argument("run_dir", type=Path)
     eval_check.set_defaults(func=_eval_check_cmd)
 
-    eval_compare = eval_sub.add_parser("compare", help="Aggregate latest n runs and compare to (case, config) baseline")
+    eval_compare = eval_sub.add_parser(
+        "compare", help="Aggregate latest n runs and compare to (case, config) baseline"
+    )
     eval_compare.add_argument("case_id")
     eval_compare.add_argument("--config", **eval_config_kwargs)
     eval_compare.add_argument("--n", type=int, default=3)
     eval_compare.add_argument("--runs-root", **eval_runs_root_kwargs)
-    eval_compare.add_argument("--json", action="store_true", help="Raw JSON output (default: pretty scorecard)")
+    eval_compare.add_argument(
+        "--json", action="store_true", help="Raw JSON output (default: pretty scorecard)"
+    )
     eval_compare.set_defaults(func=_eval_compare_cmd)
 
-    eval_promote = eval_sub.add_parser("promote", help="Snapshot the latest n-run cell as the (case, config) baseline")
+    eval_promote = eval_sub.add_parser(
+        "promote", help="Snapshot the latest n-run cell as the (case, config) baseline"
+    )
     eval_promote.add_argument("case_id")
     eval_promote.add_argument("--config", **eval_config_kwargs)
     eval_promote.add_argument("--n", type=int, default=3)
     eval_promote.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_promote.set_defaults(func=_eval_promote_cmd)
 
-    eval_all = eval_sub.add_parser("all", help="Run every case × the named config and compare to baselines")
+    eval_all = eval_sub.add_parser(
+        "all", help="Run every case × the named config and compare to baselines"
+    )
     eval_all.add_argument("--config", **eval_config_kwargs)
     eval_all.add_argument("--n", type=int, default=3)
     eval_all.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_all.set_defaults(func=_eval_all_cmd)
 
-    eval_show = eval_sub.add_parser("show", help="Pretty-print the scorecard for a (case, config) (no side effects)")
+    eval_show = eval_sub.add_parser(
+        "show", help="Pretty-print the scorecard for a (case, config) (no side effects)"
+    )
     eval_show.add_argument("case_id")
     eval_show.add_argument("--config", **eval_config_kwargs)
     eval_show.add_argument("--n", type=int, default=3)
@@ -807,7 +887,9 @@ def _pick_models_interactive(
         if suggested_idx is not None:
             suggested_id = free[suggested_idx]["id"]
             if enter_skips:
-                extra_prompt = f"  extra [{suggested_idx} - {suggested_id}] (Enter=skip, {opts}, q): "
+                extra_prompt = (
+                    f"  extra [{suggested_idx} - {suggested_id}] (Enter=skip, {opts}, q): "
+                )
             else:
                 extra_prompt = f"  extra [{suggested_idx} - {suggested_id}] (Enter=accept, s=skip, {opts}, q): "
         else:
@@ -946,9 +1028,7 @@ def _launch_screen(
             # Enter prefill. Otherwise `flag_value="both"` would
             # short-circuit and the operator would never see the prompt.
             prefill = getattr(args, "_defaults_cli_reviewer_prefill", None)
-            picker_flag_value = (
-                "auto" if prefill else getattr(args, "cli_reviewer", "auto")
-            )
+            picker_flag_value = "auto" if prefill else getattr(args, "cli_reviewer", "auto")
             chosen = cli_reviewer.resolve_choice(
                 flag_value=picker_flag_value,
                 available=available_clis,
@@ -1075,7 +1155,9 @@ def _launch_screen(
             print(f"  {_b('free-tier quota exhausted for:')}")
             for role, model in quota_blockers:
                 print(f"    {role}  {model}")
-            print(f"  {_d('try again later, or pick a different model with --' + 'agent-model/--sim-model.')}")
+            print(
+                f"  {_d('try again later, or pick a different model with --' + 'agent-model/--sim-model.')}"
+            )
             print()
         if unknown_or_models:
             print(f"  {_b('unknown OpenRouter model:')}")
@@ -1214,7 +1296,9 @@ def _ensure_default_image_built(config: RunConfig) -> int:
     expected_hash = _dockerfile_hash(dockerfile)
     if expected_hash is None:
         # Dockerfile missing — fall through to build which surfaces the same error.
-        return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
+        return _build_image_inline(
+            image_name=config.docker_image, dockerfile=dockerfile, no_cache=False
+        )
     try:
         inspect = subprocess.run(
             [
@@ -1236,7 +1320,9 @@ def _ensure_default_image_built(config: RunConfig) -> int:
             f"contremaitre: image {config.docker_image} not found — building inline",
             file=sys.stderr,
         )
-        return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
+        return _build_image_inline(
+            image_name=config.docker_image, dockerfile=dockerfile, no_cache=False
+        )
     actual_hash = inspect.stdout.strip()
     if actual_hash == expected_hash:
         return 0
@@ -1245,7 +1331,9 @@ def _ensure_default_image_built(config: RunConfig) -> int:
         f"(label={actual_hash or '<missing>'}, dockerfile={expected_hash}) — rebuilding",
         file=sys.stderr,
     )
-    return _build_image_inline(image_name=config.docker_image, dockerfile=dockerfile, no_cache=False)
+    return _build_image_inline(
+        image_name=config.docker_image, dockerfile=dockerfile, no_cache=False
+    )
 
 
 def _dockerfile_hash(dockerfile: Path) -> str | None:
@@ -1597,11 +1685,7 @@ def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
         and hasattr(args, "agent_model")
     ):
         args.agent_model = saved.agent_model
-    if (
-        saved.sim_model
-        and not _has_flag_in(argv, "--sim-model")
-        and hasattr(args, "sim_model")
-    ):
+    if saved.sim_model and not _has_flag_in(argv, "--sim-model") and hasattr(args, "sim_model"):
         args.sim_model = saved.sim_model
     if (
         saved.extra_reviewer_model
@@ -1614,9 +1698,7 @@ def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
     # still PROMPTS — the operator can numerically pick a model — but
     # Enter is the no-extra-reviewer path. `_launch_screen` reads
     # `args._defaults_skip_extra` and passes it to the picker.
-    if saved.extra_reviewer_skip and not _has_flag_in(
-        argv, "--extra-reviewer-model"
-    ):
+    if saved.extra_reviewer_skip and not _has_flag_in(argv, "--extra-reviewer-model"):
         args.extra_reviewer_model = None
         args._defaults_skip_extra = True
     if (
@@ -1760,7 +1842,9 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         print("contremaitre tui run: --base is required", file=sys.stderr)
         return 1
     repo_cache_raw = _extract_flag_value(forwarded, "--repo-cache", "")
-    cache_path = Path(repo_cache_raw).resolve() if repo_cache_raw else _default_cache_path(source_url)
+    cache_path = (
+        Path(repo_cache_raw).resolve() if repo_cache_raw else _default_cache_path(source_url)
+    )
     try:
         _ensure_local_clone(cache_path=cache_path, source_url=source_url, base=base)
     except (RuntimeError, subprocess.CalledProcessError) as exc:
@@ -1789,9 +1873,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     # defaults.toml so the picker's Enter-skip behavior matches
     # `contremaitre run`. Only honor it when the operator didn't pass
     # --extra-reviewer-model explicitly.
-    if _saved.extra_reviewer_skip and not _has_flag_in(
-        forwarded, "--extra-reviewer-model"
-    ):
+    if _saved.extra_reviewer_skip and not _has_flag_in(forwarded, "--extra-reviewer-model"):
         confirm_args._defaults_skip_extra = True
     # Same story for cli_reviewer: a saved value should prefill the
     # picker (Enter accepts it), not short-circuit it. Without this the

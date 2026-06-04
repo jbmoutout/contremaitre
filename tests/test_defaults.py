@@ -62,9 +62,7 @@ def test_load_drops_invalid_cli_reviewer_value(tmp_path: Path):
     # A defaults file from a future version (or a typo) must not break
     # the launch screen — we silently drop unknown enum values.
     path = tmp_path / "defaults.toml"
-    path.write_text(
-        'agent_model = "opencode/big-pickle"\ncli_reviewer = "lefuturoide"\n'
-    )
+    path.write_text('agent_model = "opencode/big-pickle"\ncli_reviewer = "lefuturoide"\n')
     out = defaults.load(path)
     assert out.agent_model == "opencode/big-pickle"
     assert out.cli_reviewer is None
@@ -119,9 +117,7 @@ def test_defaults_path_prefers_cwd_local_over_xdg(monkeypatch, tmp_path: Path):
     assert defaults.defaults_path() == local
 
 
-def test_defaults_path_falls_back_to_xdg_when_cwd_local_missing(
-    monkeypatch, tmp_path: Path
-):
+def test_defaults_path_falls_back_to_xdg_when_cwd_local_missing(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     xdg = tmp_path / "xdg" / "contremaitre" / "defaults.toml"

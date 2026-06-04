@@ -33,4 +33,3 @@ def init_fixture(path: Path, *, overwrite: bool = False) -> Path:
     git.run("remote", "add", "origin", f"file://{path.resolve()}")
     git.run("fetch", "origin", "main")
     return path
-

@@ -66,4 +66,3 @@ def append_transcript(path: Path, *, speaker: str, phase: str, text: str) -> Non
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(f"\n\n## {phase} - {speaker}\n\n{text.strip()}\n")
-

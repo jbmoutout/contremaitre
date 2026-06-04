@@ -105,9 +105,7 @@ def run_extra(
     """
 
     if tool not in cli_reviewer.VALID_TOOLS:
-        raise ValueError(
-            f"unknown tool: {tool!r} (expected one of {cli_reviewer.VALID_TOOLS})"
-        )
+        raise ValueError(f"unknown tool: {tool!r} (expected one of {cli_reviewer.VALID_TOOLS})")
 
     run_dir = run_dir.resolve()
     run_config = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
@@ -119,18 +117,13 @@ def run_extra(
 
     cache_repo = _cache_path_for(target_url)
     if not (cache_repo / ".git").exists():
-        raise FileNotFoundError(
-            f"cache clone missing for {target_url} — expected at {cache_repo}"
-        )
+        raise FileNotFoundError(f"cache clone missing for {target_url} — expected at {cache_repo}")
 
     extra_index = _next_extra_index(run_dir)
     extra_dir = run_dir / "extras" / f"cli_review_{extra_index:03d}"
     extra_dir.mkdir(parents=True, exist_ok=True)
 
-    worktree = (
-        Path("/tmp")
-        / f"contremaitre-cli-review-extra-{run_dir.name}-{extra_index:03d}"
-    )
+    worktree = Path("/tmp") / f"contremaitre-cli-review-extra-{run_dir.name}-{extra_index:03d}"
     if worktree.exists():
         _git_worktree_remove(cache_repo, worktree)
 
@@ -172,12 +165,8 @@ def run_extra(
         review_md_path = extra_dir / "review.md"
         if result.markdown.strip():
             model = cli_reviewer.extract_model(tool=tool, jsonl_path=sink)
-            header = cli_reviewer.format_header(
-                tool=tool, model=model, duration_s=duration_s
-            )
-            review_md_path.write_text(
-                header + result.markdown.lstrip(), encoding="utf-8"
-            )
+            header = cli_reviewer.format_header(tool=tool, model=model, duration_s=duration_s)
+            review_md_path.write_text(header + result.markdown.lstrip(), encoding="utf-8")
             summary["model"] = model
 
         posted = False

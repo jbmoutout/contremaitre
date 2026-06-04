@@ -23,9 +23,13 @@ class PreflightTest(unittest.TestCase):
 
     def test_unlimited_openrouter_key_fails(self):
         config = self._config(http_proxy="http://proxy.local:8080")
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}), self._mock_docker_ok(), patch(
-            "contremaitre.preflight._fetch_openrouter_key",
-            return_value={"data": {"label": "test", "limit": None, "limit_remaining": None}},
+        with (
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}),
+            self._mock_docker_ok(),
+            patch(
+                "contremaitre.preflight._fetch_openrouter_key",
+                return_value={"data": {"label": "test", "limit": None, "limit_remaining": None}},
+            ),
         ):
             report = run_preflight(config)
 
@@ -37,16 +41,20 @@ class PreflightTest(unittest.TestCase):
         # the orchestrator cap is the per-run budget, the provider limit is
         # the daily backstop. A looser daily limit warns, doesn't block.
         config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}), self._mock_docker_ok(), patch(
-            "contremaitre.preflight._fetch_openrouter_key",
-            return_value={
-                "data": {
-                    "label": "test",
-                    "limit": 100,
-                    "limit_remaining": 80,
-                    "include_byok_in_limit": True,
-                }
-            },
+        with (
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}),
+            self._mock_docker_ok(),
+            patch(
+                "contremaitre.preflight._fetch_openrouter_key",
+                return_value={
+                    "data": {
+                        "label": "test",
+                        "limit": 100,
+                        "limit_remaining": 80,
+                        "include_byok_in_limit": True,
+                    }
+                },
+            ),
         ):
             report = run_preflight(config)
 
@@ -55,16 +63,20 @@ class PreflightTest(unittest.TestCase):
 
     def test_bounded_openrouter_key_and_explicit_proxy_pass(self):
         config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}), self._mock_docker_ok(), patch(
-            "contremaitre.preflight._fetch_openrouter_key",
-            return_value={
-                "data": {
-                    "label": "test",
-                    "limit": 30,
-                    "limit_remaining": 12,
-                    "include_byok_in_limit": True,
-                }
-            },
+        with (
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}),
+            self._mock_docker_ok(),
+            patch(
+                "contremaitre.preflight._fetch_openrouter_key",
+                return_value={
+                    "data": {
+                        "label": "test",
+                        "limit": 30,
+                        "limit_remaining": 12,
+                        "include_byok_in_limit": True,
+                    }
+                },
+            ),
         ):
             report = run_preflight(config)
 
@@ -96,16 +108,20 @@ class PreflightTest(unittest.TestCase):
 
     def test_non_byok_limited_openrouter_key_warns_but_passes(self):
         config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}), self._mock_docker_ok(), patch(
-            "contremaitre.preflight._fetch_openrouter_key",
-            return_value={
-                "data": {
-                    "label": "test",
-                    "limit": 30,
-                    "limit_remaining": 12,
-                    "include_byok_in_limit": False,
-                }
-            },
+        with (
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}),
+            self._mock_docker_ok(),
+            patch(
+                "contremaitre.preflight._fetch_openrouter_key",
+                return_value={
+                    "data": {
+                        "label": "test",
+                        "limit": 30,
+                        "limit_remaining": 12,
+                        "include_byok_in_limit": False,
+                    }
+                },
+            ),
         ):
             report = run_preflight(config)
 
@@ -145,7 +161,9 @@ class PreflightTest(unittest.TestCase):
             if cmd[0] == "git":
                 return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
             if cmd[:3] == ["docker", "run", "--rm"] and "touch /app/.contremaitre_ro_probe" in cmd:
-                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Read-only file system")
+                return subprocess.CompletedProcess(
+                    cmd, 1, stdout="", stderr="Read-only file system"
+                )
             return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
 
         return patch("contremaitre.preflight._run", side_effect=fake_run)

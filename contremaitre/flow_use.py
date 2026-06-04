@@ -59,9 +59,7 @@ _RUNTIME_INSTALL_RE = re.compile(r"apt-?get\s+install|pip\s+install\b|npm\s+inst
 
 # Failure markers in test output (heuristic — manual ratification on fail)
 _TEST_FAIL_RE = re.compile(r"\bFAILED\b|\berror:\s|\bfailed\b", re.IGNORECASE)
-_ZERO_TESTS_RE = re.compile(
-    r"0 passed|no tests ran|collected 0 items|Ran 0 tests", re.IGNORECASE
-)
+_ZERO_TESTS_RE = re.compile(r"0 passed|no tests ran|collected 0 items|Ran 0 tests", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -140,18 +138,13 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
 
     pre_settled_agent = sum(1 for _, r in pre if r == "agent")
     pre_settled_sim = sum(1 for _, r in pre if r == "sim")
-    impl_agent = sum(
-        1 for ts, r in post
-        if r == "agent" and (impl_ms is None or ts <= impl_ms)
-    )
+    impl_agent = sum(1 for ts, r in post if r == "agent" and (impl_ms is None or ts <= impl_ms))
 
     # max(round), not len(): with the extra reviewer enabled, review_cycles
     # carries two entries per round plus optional `unavailable` entries; the
     # round number is the canonical counter.
     cycles = read_jsonl(paths.review_cycles)
-    review_rounds = (
-        max((e.get("round") or 0) for e in cycles) if cycles else 0
-    )
+    review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
 
     return {
         "pre_settled_agent_turns": pre_settled_agent,
@@ -181,9 +174,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
 
     event_times = [ts for e in events if (ts := _timestamp_ms(e)) is not None]
     wall_seconds = (
-        round((event_times[-1] - event_times[0]) / 1000, 1)
-        if len(event_times) > 1
-        else 0
+        round((event_times[-1] - event_times[0]) / 1000, 1) if len(event_times) > 1 else 0
     )
 
     settled_event = _find_write_to(tool_calls, _SETTLED_RE)
@@ -193,9 +184,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     t0 = event_times[0] if event_times else None
     settled_ts = _timestamp_ms(settled_event)
     time_to_settled = (
-        round((settled_ts - t0) / 1000, 1)
-        if settled_ts is not None and t0 is not None
-        else None
+        round((settled_ts - t0) / 1000, 1) if settled_ts is not None and t0 is not None else None
     )
     tokens_to_settled = _tokens_before(events, settled_event)
 
@@ -294,8 +283,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     diff_reads = [
         e
         for e in tool_calls
-        if _tool_name(e) == "read"
-        and _DIFF_RE.search(_inp(e).get("filePath", "") or "")
+        if _tool_name(e) == "read" and _DIFF_RE.search(_inp(e).get("filePath", "") or "")
     ]
     sim_read_diff = len(diff_reads) > 0
     sim_read_diff_partial = any(_read_limit(e) < 200 for e in diff_reads)
@@ -314,8 +302,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     sim_useful_ratio: float | None = None
     review_cycles = read_jsonl(paths.review_cycles)
     sim_cycles = [
-        c for c in review_cycles
-        if c.get("reviewer", "sim") == "sim" and not c.get("unavailable")
+        c for c in review_cycles if c.get("reviewer", "sim") == "sim" and not c.get("unavailable")
     ]
     if sim_cycles:
         last = sim_cycles[-1]
@@ -397,11 +384,7 @@ def _find_write_to(tool_calls: list[dict], pattern: re.Pattern) -> dict | None:
             continue
         inp = _inp(e)
         target = (
-            inp.get("filePath")
-            or inp.get("path")
-            or inp.get("patchText")
-            or inp.get("patch")
-            or ""
+            inp.get("filePath") or inp.get("path") or inp.get("patchText") or inp.get("patch") or ""
         )
         if pattern.search(str(target)):
             return e
@@ -454,9 +437,7 @@ def _check_self_verification(
         if event_ts is None:
             continue
         if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
-            last_edit_ts = (
-                event_ts if last_edit_ts is None else max(last_edit_ts, event_ts)
-            )
+            last_edit_ts = event_ts if last_edit_ts is None else max(last_edit_ts, event_ts)
 
     test_outputs: list[str] = []
     runtime_install = False
@@ -481,8 +462,7 @@ def _check_self_verification(
         return False, None, runtime_install
 
     all_pass = all(
-        not _TEST_FAIL_RE.search(out) and not _ZERO_TESTS_RE.search(out)
-        for out in test_outputs
+        not _TEST_FAIL_RE.search(out) and not _ZERO_TESTS_RE.search(out) for out in test_outputs
     )
     return True, all_pass, runtime_install
 
@@ -526,11 +506,7 @@ def _write_chars(e: dict, pattern: re.Pattern) -> int:
         return len(inp.get("newString") or "")
     if tool == "apply_patch":
         patch = inp.get("patchText") or inp.get("patch") or ""
-        return sum(
-            len(body)
-            for _, fp, body in parse_apply_patch(str(patch))
-            if pattern.search(fp)
-        )
+        return sum(len(body) for _, fp, body in parse_apply_patch(str(patch)) if pattern.search(fp))
     return 0
 
 

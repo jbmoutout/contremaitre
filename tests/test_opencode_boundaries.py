@@ -40,9 +40,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
         # Lock the literal allow/deny lines. Bare `assertIn("read", persona)`
         # matches "already", "thread", "instead" and survives a persona that
         # grants `write` + `bash` — the policy reversal we care about.
-        self.assertIn(
-            "**Allowed**: `read`, `glob`, `grep`.", persona
-        )
+        self.assertIn("**Allowed**: `read`, `glob`, `grep`.", persona)
         self.assertIn(
             "**Forbidden**: `write`, `edit`, `apply_patch`, `bash`, `task`.",
             persona,
@@ -55,10 +53,13 @@ class OpencodeBoundaryTest(unittest.TestCase):
         )
 
     def test_opencode_docker_command_whitelists_env_and_mounts_worktree_read_only(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ,
-            {"OPENROUTER_API_KEY": "secret-key", "HTTP_PROXY": "ambient-proxy"},
-            clear=False,
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                os.environ,
+                {"OPENROUTER_API_KEY": "secret-key", "HTTP_PROXY": "ambient-proxy"},
+                clear=False,
+            ),
         ):
             root = Path(tmp)
             paths = build_run_paths(root / "runs", f"20260521-{root.name}")
@@ -106,7 +107,10 @@ class OpencodeBoundaryTest(unittest.TestCase):
             self.assertIn("sess", cmd)
 
     def test_opencode_docker_command_passes_explicit_proxy_only_by_name(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"OPENROUTER_API_KEY": "secret-key"}):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": "secret-key"}),
+        ):
             root = Path(tmp)
             paths = build_run_paths(root / "runs", f"20260521-{root.name}")
             paths.run_dir.mkdir(parents=True)
@@ -145,7 +149,9 @@ class OpencodeBoundaryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
-            subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "init", "-b", "main", str(repo)], check=True, capture_output=True
+            )
             (repo / "README.md").write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
             subprocess.run(
@@ -164,11 +170,23 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 check=True,
                 capture_output=True,
             )
-            config = RunConfig(repo=repo, base="main", runs_root=root / "runs", run_slug="host-commit")
+            config = RunConfig(
+                repo=repo, base="main", runs_root=root / "runs", run_slug="host-commit"
+            )
             orch = Orchestrator(config)
             orch._prepare_run_dir()
             subprocess.run(
-                ["git", "-C", str(repo), "worktree", "add", str(orch.paths.worktree), "-b", "work", "main"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "worktree",
+                    "add",
+                    str(orch.paths.worktree),
+                    "-b",
+                    "work",
+                    "main",
+                ],
                 check=True,
                 capture_output=True,
             )
@@ -186,10 +204,30 @@ class OpencodeBoundaryTest(unittest.TestCase):
 
             orch._commit_agent_changes(repo=GitRepo(orch.paths.worktree, orch.paths.git_log))
 
-            status = subprocess.run(["git", "-C", str(orch.paths.worktree), "status", "--porcelain"], check=True, capture_output=True, text=True)
-            log_title = subprocess.run(["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%s"], check=True, capture_output=True, text=True)
-            log_body = subprocess.run(["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%b"], check=True, capture_output=True, text=True)
-            log_files = subprocess.run(["git", "-C", str(orch.paths.worktree), "show", "--name-only", "--pretty="], check=True, capture_output=True, text=True)
+            status = subprocess.run(
+                ["git", "-C", str(orch.paths.worktree), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            log_title = subprocess.run(
+                ["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%s"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            log_body = subprocess.run(
+                ["git", "-C", str(orch.paths.worktree), "log", "-1", "--pretty=%b"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            log_files = subprocess.run(
+                ["git", "-C", str(orch.paths.worktree), "show", "--name-only", "--pretty="],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             # `.contremaitre/` is excluded from the commit by pathspec but
             # stays in the worktree (SIM reads it across WORK rounds), so
             # status shows it as untracked.
@@ -215,24 +253,47 @@ class OpencodeBoundaryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
-            subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "init", "-b", "main", str(repo)], check=True, capture_output=True
+            )
             (repo / "README.md").write_text("base\n", encoding="utf-8")
             (repo / ".gitignore").write_text(".next/\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
             subprocess.run(
                 [
-                    "git", "-C", str(repo),
-                    "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-                    "commit", "-m", "base",
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-m",
+                    "base",
                 ],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
-            config = RunConfig(repo=repo, base="main", runs_root=root / "runs", run_slug="host-commit-ignored")
+            config = RunConfig(
+                repo=repo, base="main", runs_root=root / "runs", run_slug="host-commit-ignored"
+            )
             orch = Orchestrator(config)
             orch._prepare_run_dir()
             subprocess.run(
-                ["git", "-C", str(repo), "worktree", "add", str(orch.paths.worktree), "-b", "work", "main"],
-                check=True, capture_output=True,
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "worktree",
+                    "add",
+                    str(orch.paths.worktree),
+                    "-b",
+                    "work",
+                    "main",
+                ],
+                check=True,
+                capture_output=True,
             )
             (orch.paths.worktree / "README.md").write_text("changed\n", encoding="utf-8")
             # Agent produced build output that the target repo gitignores.
@@ -252,7 +313,9 @@ class OpencodeBoundaryTest(unittest.TestCase):
 
             log_files = subprocess.run(
                 ["git", "-C", str(orch.paths.worktree), "show", "--name-only", "--pretty="],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
             self.assertIn("README.md", log_files.stdout)
             self.assertNotIn(".next", log_files.stdout)
@@ -260,7 +323,10 @@ class OpencodeBoundaryTest(unittest.TestCase):
             orch._cleanup_worktree()
 
     def test_gh_publisher_pushes_and_creates_draft_pr_from_host(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"GITHUB_TOKEN": "token"}):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"GITHUB_TOKEN": "token"}),
+        ):
             root = Path(tmp)
             paths = build_run_paths(root / "runs", f"20260521-{root.name}")
             paths.run_dir.mkdir(parents=True)
@@ -279,11 +345,17 @@ class OpencodeBoundaryTest(unittest.TestCase):
 
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
-                stdout = "https://github.com/owner/repo/pull/1\n" if cmd[:3] == ["gh", "pr", "create"] else ""
+                stdout = (
+                    "https://github.com/owner/repo/pull/1\n"
+                    if cmd[:3] == ["gh", "pr", "create"]
+                    else ""
+                )
                 return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
             with patch("contremaitre.publisher.subprocess.run", side_effect=fake_run):
-                outcome = GhPublisher().publish(config=config, paths=paths, branch="refactor/x", diff_hash="abc")
+                outcome = GhPublisher().publish(
+                    config=config, paths=paths, branch="refactor/x", diff_hash="abc"
+                )
 
             self.assertEqual(outcome.kind.value, "PUBLISHED")
             self.assertFalse(outcome.dry_run)
@@ -321,9 +393,7 @@ class GhPublisherPreconditionsTest(unittest.TestCase):
         return paths
 
     def test_publish_without_github_token_raises(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {}, clear=True
-        ):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
             paths = self._paths(Path(tmp))
             config = self._config(fork="git@github.com:user/repo.git")
             with self.assertRaisesRegex(RuntimeError, r"GITHUB_TOKEN.*GH_TOKEN"):
@@ -332,8 +402,9 @@ class GhPublisherPreconditionsTest(unittest.TestCase):
                 )
 
     def test_publish_without_fork_raises(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {"GITHUB_TOKEN": "token"}, clear=True
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"GITHUB_TOKEN": "token"}, clear=True),
         ):
             paths = self._paths(Path(tmp))
             config = self._config(fork=None)

@@ -134,13 +134,11 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as runs:
             repo = Path(tmp)
             (repo / lockfile_name).write_text(lockfile_content, encoding="utf-8")
-            with patch(
-                "contremaitre.runtime_image._volume_exists", return_value=False
-            ), patch(
-                "contremaitre.runtime_image._prune_stale_deps_volumes"
-            ), patch(
-                "contremaitre.runtime_image.subprocess.run"
-            ) as fake_run:
+            with (
+                patch("contremaitre.runtime_image._volume_exists", return_value=False),
+                patch("contremaitre.runtime_image._prune_stale_deps_volumes"),
+                patch("contremaitre.runtime_image.subprocess.run") as fake_run,
+            ):
                 fake_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 ensure_deps_volume(
                     repo=repo,
@@ -167,7 +165,9 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
     def test_poetry_install_mounts_venv_and_sets_virtual_env(self):
         cmd = self._run_and_capture("poetry.lock", "")
         joined = " ".join(cmd)
-        self.assertRegex(joined, r"contremaitre-deps-test-project-poetry-lock-[0-9a-f]+:/app/\.venv\b")
+        self.assertRegex(
+            joined, r"contremaitre-deps-test-project-poetry-lock-[0-9a-f]+:/app/\.venv\b"
+        )
         self.assertIn("VIRTUAL_ENV=/app/.venv", cmd)
         self.assertIn("POETRY_VIRTUALENVS_IN_PROJECT=true", cmd[-1])
 
@@ -175,7 +175,8 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         cmd = self._run_and_capture("package-lock.json", "{}")
         joined = " ".join(cmd)
         self.assertRegex(
-            joined, r"contremaitre-deps-test-project-package-lock-json-[0-9a-f]+:/app/node_modules\b"
+            joined,
+            r"contremaitre-deps-test-project-package-lock-json-[0-9a-f]+:/app/node_modules\b",
         )
         # No VIRTUAL_ENV / CARGO_HOME / GOPATH for Node.
         for env_key in ("VIRTUAL_ENV", "CARGO_HOME", "GOPATH"):
@@ -230,13 +231,11 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as runs:
             repo = Path(tmp)
             (repo / "uv.lock").write_text("[]", encoding="utf-8")
-            with patch(
-                "contremaitre.runtime_image._volume_exists", return_value=False
-            ), patch(
-                "contremaitre.runtime_image._prune_stale_deps_volumes"
-            ), patch(
-                "contremaitre.runtime_image.subprocess.run"
-            ) as fake_run:
+            with (
+                patch("contremaitre.runtime_image._volume_exists", return_value=False),
+                patch("contremaitre.runtime_image._prune_stale_deps_volumes"),
+                patch("contremaitre.runtime_image.subprocess.run") as fake_run,
+            ):
                 fake_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
                 handle = ensure_deps_volume(
                     repo=repo,

@@ -90,7 +90,9 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
             content = input_.get("content") or ""
             out = paths.extracted_files_dir / _host_name(fp)
             out.write_text(content, encoding="utf-8")
-            written.append({"original_path": fp, "host_file": str(out), "len": len(content), "tool": tool})
+            written.append(
+                {"original_path": fp, "host_file": str(out), "len": len(content), "tool": tool}
+            )
         elif tool == "edit":
             fp = input_.get("filePath") or input_.get("path")
             if not fp:
@@ -105,24 +107,45 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
             )
             with out.open("a", encoding="utf-8") as f:
                 f.write(block)
-            written.append({
-                "original_path": fp, "host_file": str(out),
-                "len": len(new_s), "old_len": len(old_s), "tool": tool,
-            })
+            written.append(
+                {
+                    "original_path": fp,
+                    "host_file": str(out),
+                    "len": len(new_s),
+                    "old_len": len(old_s),
+                    "tool": tool,
+                }
+            )
         else:  # apply_patch
             patch_text = input_.get("patchText") or input_.get("patch") or ""
             for op, fp, body in parse_apply_patch(patch_text):
                 if op == "Add":
                     out = paths.extracted_files_dir / _host_name(fp)
                     out.write_text(body, encoding="utf-8")
-                    written.append({"original_path": fp, "host_file": str(out), "len": len(body), "tool": f"{tool}:Add"})
+                    written.append(
+                        {
+                            "original_path": fp,
+                            "host_file": str(out),
+                            "len": len(body),
+                            "tool": f"{tool}:Add",
+                        }
+                    )
                 elif op == "Update":
                     out = paths.extracted_files_dir / f"{_host_name(fp)}.edits.md"
                     with out.open("a", encoding="utf-8") as f:
                         f.write(f"\n---\n## apply_patch (Update)\n\n```\n{body}\n```\n")
-                    written.append({"original_path": fp, "host_file": str(out), "len": len(body), "tool": f"{tool}:Update"})
+                    written.append(
+                        {
+                            "original_path": fp,
+                            "host_file": str(out),
+                            "len": len(body),
+                            "tool": f"{tool}:Update",
+                        }
+                    )
                 else:  # Delete
-                    written.append({"original_path": fp, "host_file": None, "len": 0, "tool": f"{tool}:Delete"})
+                    written.append(
+                        {"original_path": fp, "host_file": None, "len": 0, "tool": f"{tool}:Delete"}
+                    )
 
     subagents: list[dict[str, Any]] = []
     n = 0
@@ -142,31 +165,39 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
         status = state.get("status") or ""
         slug = slugify(desc)
         fname = paths.subagents_dir / f"agent_{n:02d}_{slug}.md"
-        body = "\n".join([
-            f"# Sub-agent {n}: {desc}",
-            "",
-            f"- Subagent type: `{subagent_type}`",
-            f"- Status: `{status}`",
-            f"- Prompt length: {len(prompt)} chars",
-            f"- Output length: {len(output)} chars",
-            "",
-            "## Prompt to sub-agent",
-            "",
-            "```",
-            prompt,
-            "```",
-            "",
-            "## Sub-agent output",
-            "",
-            output if output else "_(no output captured)_",
-            "",
-        ])
+        body = "\n".join(
+            [
+                f"# Sub-agent {n}: {desc}",
+                "",
+                f"- Subagent type: `{subagent_type}`",
+                f"- Status: `{status}`",
+                f"- Prompt length: {len(prompt)} chars",
+                f"- Output length: {len(output)} chars",
+                "",
+                "## Prompt to sub-agent",
+                "",
+                "```",
+                prompt,
+                "```",
+                "",
+                "## Sub-agent output",
+                "",
+                output if output else "_(no output captured)_",
+                "",
+            ]
+        )
         fname.write_text(body, encoding="utf-8")
-        subagents.append({
-            "n": n, "description": desc, "subagent_type": subagent_type,
-            "status": status, "prompt_len": len(prompt),
-            "output_len": len(output), "host_file": str(fname),
-        })
+        subagents.append(
+            {
+                "n": n,
+                "description": desc,
+                "subagent_type": subagent_type,
+                "status": status,
+                "prompt_len": len(prompt),
+                "output_len": len(output),
+                "host_file": str(fname),
+            }
+        )
 
     # Belt-and-suspenders: capture everything in the worktree's `.contremaitre/`
     # directory directly. The event-based scan above only catches files written
@@ -188,12 +219,14 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
                 dst.write_bytes(src.read_bytes())
             except OSError:
                 continue
-            salvaged.append({
-                "original_path": f".contremaitre/{src.name}",
-                "host_file": str(dst),
-                "len": src.stat().st_size,
-                "tool": "worktree_scan",
-            })
+            salvaged.append(
+                {
+                    "original_path": f".contremaitre/{src.name}",
+                    "host_file": str(dst),
+                    "len": src.stat().st_size,
+                    "tool": "worktree_scan",
+                }
+            )
     written.extend(salvaged)
 
     return {

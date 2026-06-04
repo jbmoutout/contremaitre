@@ -148,7 +148,9 @@ class Orchestrator:
                 self.paths.recoveries,
                 {"kind": events.SIGTERM_EMERGENCY_WRITE, "turns": self.turns, "signal": "sigterm"},
             )
-            self._write_final_stats(State.FAILED, TerminalVerdict.FAILED_INFRA, "killed_via_sigterm")
+            self._write_final_stats(
+                State.FAILED, TerminalVerdict.FAILED_INFRA, "killed_via_sigterm"
+            )
             self._extract_artifacts_safely()
             raise SystemExit(143)
 
@@ -219,9 +221,13 @@ class Orchestrator:
         try:
             build_viewer(self.paths)
         except Exception as exc:
-            append_jsonl(self.paths.recoveries, {"kind": events.VIEWER_BUILD_FAILED, "error": repr(exc)})
+            append_jsonl(
+                self.paths.recoveries, {"kind": events.VIEWER_BUILD_FAILED, "error": repr(exc)}
+            )
 
-    def _review_rounds(self, *, actor: ActorRunner, worktree_git: GitRepo, branch: str) -> RunResult:
+    def _review_rounds(
+        self, *, actor: ActorRunner, worktree_git: GitRepo, branch: str
+    ) -> RunResult:
         last_required_changes: list[str] = []
         last_parsed: ParsedVerdict | None = None
         last_sim: ParsedVerdict | None = None
@@ -621,9 +627,7 @@ class Orchestrator:
         # line. H3 (not H1/H2) so it stays visually subordinate to the
         # agent's verdict headline (`🔴 MUST_FIX — …` etc.).
         model = _cli_reviewer.extract_model(tool=tool, jsonl_path=sink)
-        header = _cli_reviewer.format_header(
-            tool=tool, model=model, duration_s=duration_s
-        )
+        header = _cli_reviewer.format_header(tool=tool, model=model, duration_s=duration_s)
         final_markdown = header + result.markdown.lstrip()
 
         review_md = self.paths.run_dir / f"{tool}_review.md"
@@ -755,9 +759,7 @@ class Orchestrator:
 
         for tool in _cli_reviewer.expand_choice(self.config.cli_reviewer):
             if outcome.url:
-                self._run_cli_review(
-                    tool=tool, outcome=outcome, approved_hash=approved_hash
-                )
+                self._run_cli_review(tool=tool, outcome=outcome, approved_hash=approved_hash)
         self._write_final_stats(State.APPROVED, TerminalVerdict.READY_FOR_DRAFT_PR, outcome.reason)
         return RunResult(
             run_id=self.run_id,
@@ -918,7 +920,9 @@ class Orchestrator:
             trajectory={
                 "turns": self.turns,
                 "states": self.trajectory,
-                "process_reliability": 1.0 if verdict == TerminalVerdict.READY_FOR_DRAFT_PR else 0.5,
+                "process_reliability": 1.0
+                if verdict == TerminalVerdict.READY_FOR_DRAFT_PR
+                else 0.5,
             },
             needs_human=needs_human,
         )
@@ -929,7 +933,9 @@ class Orchestrator:
         self.paths.run_dir.mkdir(parents=True, exist_ok=False)
         self.paths.eval_dir.mkdir(parents=True, exist_ok=True)
         self.paths.initial_prompt.write_text(prompts.INITIAL_PROMPT, encoding="utf-8")
-        self.paths.transcript.write_text(f"# Contremaitre transcript - {self.run_id}\n", encoding="utf-8")
+        self.paths.transcript.write_text(
+            f"# Contremaitre transcript - {self.run_id}\n", encoding="utf-8"
+        )
         # Provenance manifest. Records models, image, target, base, and the
         # version of the system under test (contremaitre SHA + prompt /
         # skills-lock / dockerfile hashes). Downstream readers (`tui attach`,
@@ -945,7 +951,9 @@ class Orchestrator:
             if self.paths.worktree.name.startswith("contremaitre-"):
                 shutil.rmtree(self.paths.worktree)
             else:
-                raise RuntimeError(f"refusing to remove non-Contremaitre path: {self.paths.worktree}")
+                raise RuntimeError(
+                    f"refusing to remove non-Contremaitre path: {self.paths.worktree}"
+                )
         # Re-pin the cache's `origin` URL to the canonical source for
         # this run BEFORE fetching. The previous run's worktree rewired
         # `origin` to `--fork` (so the publisher could `git push origin
@@ -993,9 +1001,7 @@ class Orchestrator:
         # treats `:(exclude)X` as an explicit mention of X, and the add
         # aborts when X is also gitignored ("paths are ignored").
         excludes = [
-            f":(exclude){path}"
-            for path in _HOST_COMMIT_EXCLUDES
-            if not _is_gitignored(repo, path)
+            f":(exclude){path}" for path in _HOST_COMMIT_EXCLUDES if not _is_gitignored(repo, path)
         ]
         repo.run("add", "--", ".", *excludes)
         repo.run("commit", "-m", title, "-m", body)
@@ -1098,7 +1104,9 @@ class Orchestrator:
         )
         return snapshot
 
-    def _write_final_stats(self, terminal_state: State, verdict: TerminalVerdict, reason: str) -> None:
+    def _write_final_stats(
+        self, terminal_state: State, verdict: TerminalVerdict, reason: str
+    ) -> None:
         write_json(
             self.paths.stats,
             {
@@ -1113,7 +1121,9 @@ class Orchestrator:
                 "extra_reviewer_model": self.config.extra_reviewer_model,
                 "actor_mode": self.config.actor_mode.value,
                 "publish_mode": self.config.publish_mode.value,
-                "recorded_cost_usd": estimate_recorded_cost_usd(self.paths.raw_export, self.paths.sim_raw_export),
+                "recorded_cost_usd": estimate_recorded_cost_usd(
+                    self.paths.raw_export, self.paths.sim_raw_export
+                ),
             },
         )
         write_json(self.paths.trajectory, {"states": self.trajectory})
@@ -1209,8 +1219,17 @@ class Orchestrator:
 
         try:
             ls = _sp.run(
-                ["docker", "volume", "ls", "-q", "--filter", f"label=contremaitre.run-id={self.run_id}"],
-                capture_output=True, text=True, timeout=5,
+                [
+                    "docker",
+                    "volume",
+                    "ls",
+                    "-q",
+                    "--filter",
+                    f"label=contremaitre.run-id={self.run_id}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
         except (OSError, _sp.TimeoutExpired):
             return
@@ -1233,7 +1252,9 @@ class Orchestrator:
         try:
             ps = _sp.run(
                 ["docker", "ps", "-q", "--filter", f"label=contremaitre.run-id={self.run_id}"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
         except (OSError, _sp.TimeoutExpired):
             return
@@ -1272,9 +1293,13 @@ def _only_contremaitre_changes(porcelain: str) -> bool:
     """
 
     _INTERNAL_PREFIXES = (
-        ".contremaitre/", ".contremaitre",
+        ".contremaitre/",
+        ".contremaitre",
         "opencode.json",
-        "dist/", "build/", "out/", ".next/",
+        "dist/",
+        "build/",
+        "out/",
+        ".next/",
         "__pycache__/",
     )
 
@@ -1309,7 +1334,7 @@ def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
     title = first_line.lstrip("#").strip()
     for prefix in ("Settled design — ", "Settled design - ", "Settled design: "):
         if title.lower().startswith(prefix.lower()):
-            title = title[len(prefix):].strip()
+            title = title[len(prefix) :].strip()
             break
     if not title:
         title = fallback_title

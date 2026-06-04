@@ -53,6 +53,7 @@ def build_viewer(paths: RunPaths) -> Path:
     # top-level import here would be circular.
     try:
         from .index import build_index
+
         build_index(paths.run_dir.parent)
     except Exception:
         pass
@@ -68,7 +69,9 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     agent_events = _read_jsonl(paths.raw_export)
     sim_events = _read_jsonl(paths.sim_raw_export)
     extra_reviewer_events = _read_jsonl(paths.extra_reviewer_raw_export)
-    extra_reviewer_enabled = bool(extra_reviewer_events) or bool(stats_raw.get("extra_reviewer_model"))
+    extra_reviewer_enabled = bool(extra_reviewer_events) or bool(
+        stats_raw.get("extra_reviewer_model")
+    )
 
     agent_summary = _summarize_events(agent_events)
     sim_summary = _summarize_events(sim_events)
@@ -95,9 +98,15 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     pr = _read_json(paths.pr_json, default=None)
 
     eval_blob: dict[str, Any] = {}
-    for src in (paths.cost_report, paths.preflight_report, paths.checks_report,
-                paths.pr_eval, paths.settled_diff_report,
-                paths.architecture_delta_report, paths.trajectory_report):
+    for src in (
+        paths.cost_report,
+        paths.preflight_report,
+        paths.checks_report,
+        paths.pr_eval,
+        paths.settled_diff_report,
+        paths.architecture_delta_report,
+        paths.trajectory_report,
+    ):
         loaded = _read_json(src, default=None)
         if loaded is not None:
             eval_blob[src.stem] = loaded
@@ -111,18 +120,30 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
         **stats_raw,
         "cost_usd": stats_raw.get("recorded_cost_usd"),
         "n_events": agent_summary["n_events"] + sim_summary["n_events"] + extra_summary["n_events"],
-        "n_tool_uses": agent_summary["n_tool_uses"] + sim_summary["n_tool_uses"] + extra_summary["n_tool_uses"],
-        "n_text_events": agent_summary["n_text_events"] + sim_summary["n_text_events"] + extra_summary["n_text_events"],
-        "n_step_finishes": agent_summary["n_step_finishes"] + sim_summary["n_step_finishes"] + extra_summary["n_step_finishes"],
+        "n_tool_uses": agent_summary["n_tool_uses"]
+        + sim_summary["n_tool_uses"]
+        + extra_summary["n_tool_uses"],
+        "n_text_events": agent_summary["n_text_events"]
+        + sim_summary["n_text_events"]
+        + extra_summary["n_text_events"],
+        "n_step_finishes": agent_summary["n_step_finishes"]
+        + sim_summary["n_step_finishes"]
+        + extra_summary["n_step_finishes"],
         "tool_counts": _merge_counts(
             _merge_counts(agent_summary["tool_counts"], sim_summary["tool_counts"]),
             extra_summary["tool_counts"],
         ),
-        "tokens_in": agent_summary["tokens_in"] + sim_summary["tokens_in"] + extra_summary["tokens_in"],
-        "tokens_out": agent_summary["tokens_out"] + sim_summary["tokens_out"] + extra_summary["tokens_out"],
+        "tokens_in": agent_summary["tokens_in"]
+        + sim_summary["tokens_in"]
+        + extra_summary["tokens_in"],
+        "tokens_out": agent_summary["tokens_out"]
+        + sim_summary["tokens_out"]
+        + extra_summary["tokens_out"],
         "agent_tool_counts": agent_summary["tool_counts"],
         "sim_tool_counts": sim_summary["tool_counts"],
-        "extra_reviewer_tool_counts": extra_summary["tool_counts"] if extra_reviewer_enabled else None,
+        "extra_reviewer_tool_counts": extra_summary["tool_counts"]
+        if extra_reviewer_enabled
+        else None,
         "extra_reviewer_enabled": extra_reviewer_enabled,
         "files_written_count": len(extracted_files),
         "subagent_count": len(sub_agents),
@@ -363,9 +384,7 @@ def _build_chat(
     agent_turns = _stream_turns(agent_events, "AGENT")
     sim_turns = _stream_turns(sim_events, "SIM")
     extra_turns = (
-        _stream_turns(extra_reviewer_events, "EXTRA")
-        if extra_reviewer_events is not None
-        else []
+        _stream_turns(extra_reviewer_events, "EXTRA") if extra_reviewer_events is not None else []
     )
     turns = sorted(
         agent_turns + sim_turns + extra_turns,
@@ -415,15 +434,17 @@ def _stream_turns(events: list[dict[str, Any]], role: str) -> list[dict[str, Any
         for tool in pending_tools:
             name = tool["tool"]
             summary[name] = summary.get(name, 0) + 1
-        turns.append({
-            "who": role,
-            "ts": ts,
-            "text": text,
-            "tools": pending_tools,
-            "summary": summary,
-            "cost": round(pending_cost, 6),
-            "tokens": pending_tokens,
-        })
+        turns.append(
+            {
+                "who": role,
+                "ts": ts,
+                "text": text,
+                "tools": pending_tools,
+                "summary": summary,
+                "cost": round(pending_cost, 6),
+                "tokens": pending_tokens,
+            }
+        )
         pending_tools = []
         pending_tokens = 0
         pending_cost = 0.0
@@ -436,16 +457,21 @@ def _stream_turns(events: list[dict[str, Any]], role: str) -> list[dict[str, Any
             state = part.get("state") or {}
             output = state.get("output") or ""
             if isinstance(output, str) and len(output) > _CHAT_OUTPUT_CAP:
-                output = output[:_CHAT_OUTPUT_CAP] + f"\n\n… [truncated {len(output) - _CHAT_OUTPUT_CAP} chars]"
-            pending_tools.append({
-                "tool": part.get("tool") or "?",
-                "ts": ts,
-                "status": state.get("status"),
-                "title": state.get("title") or "",
-                "input": state.get("input") or {},
-                "output": output,
-                "metadata": state.get("metadata") or {},
-            })
+                output = (
+                    output[:_CHAT_OUTPUT_CAP]
+                    + f"\n\n… [truncated {len(output) - _CHAT_OUTPUT_CAP} chars]"
+                )
+            pending_tools.append(
+                {
+                    "tool": part.get("tool") or "?",
+                    "ts": ts,
+                    "status": state.get("status"),
+                    "title": state.get("title") or "",
+                    "input": state.get("input") or {},
+                    "output": output,
+                    "metadata": state.get("metadata") or {},
+                }
+            )
         elif t == "step_finish":
             tok = part.get("tokens") or {}
             pending_tokens += int(tok.get("input") or 0) + int(tok.get("output") or 0)
@@ -484,7 +510,7 @@ def _build_timeline(events: list[dict[str, Any]], actor: str) -> list[dict[str, 
                     rec[key] = inp[key][:240]
                     break
         elif t == "text":
-            text = (part.get("text") or ev.get("text") or "")
+            text = part.get("text") or ev.get("text") or ""
             rec["text_len"] = len(text)
             rec["text_preview"] = text[:200]
         elif t == "step_finish":
@@ -646,8 +672,5 @@ const DATA = {payload};
 
 def _escape(text: str) -> str:
     return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )

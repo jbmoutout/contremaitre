@@ -129,9 +129,13 @@ def _run_sidecar(
     paths: RunPaths,
 ) -> subprocess.CompletedProcess[str]:
     docker_cmd = [
-        "docker", "run", "--rm",
-        "--label", f"contremaitre.run-id={paths.run_id}",
-        "--label", "contremaitre.role=check",
+        "docker",
+        "run",
+        "--rm",
+        "--label",
+        f"contremaitre.run-id={paths.run_id}",
+        "--label",
+        "contremaitre.role=check",
     ]
     if config.container_user:
         docker_cmd.extend(["--user", config.container_user])
@@ -141,7 +145,9 @@ def _run_sidecar(
     if config.deps_volume:
         # RW so a check that needs to install something (rare but real)
         # doesn't hit EACCES. Matches the agent-side mount mode.
-        docker_cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
+        docker_cmd.extend(
+            ["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"]
+        )
         for key, value in config.deps_volume.runtime_env:
             docker_cmd.extend(["-e", f"{key}={value}"])
     # `sh -c` (not `-lc`). A login shell sources /etc/profile, which

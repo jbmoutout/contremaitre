@@ -79,7 +79,8 @@ class ViewerTest(unittest.TestCase):
         write_json(paths.stats, {"run_id": paths.run_id, "verdict": "FAILED_INFRA"})
         paths.extracted_files_dir.mkdir(parents=True)
         (paths.extracted_files_dir / "evil.html").write_text(
-            "<script>alert(1)</script>", encoding="utf-8",
+            "<script>alert(1)</script>",
+            encoding="utf-8",
         )
 
         out = build_viewer(paths)

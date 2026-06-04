@@ -24,8 +24,8 @@ from .models import PublishMode, RunConfig, RunPaths
 
 class PublishOutcomeKind(str, Enum):
     PUBLISHED = "PUBLISHED"  # Publisher ran. May be dry-run (stub) or real (gh).
-    BLOCKED = "BLOCKED"      # Hard gate or executable check refused publication.
-    NO_PR = "NO_PR"          # Run ended before publication was attempted.
+    BLOCKED = "BLOCKED"  # Hard gate or executable check refused publication.
+    NO_PR = "NO_PR"  # Run ended before publication was attempted.
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,9 @@ class PublishOutcome:
     url: str | None = None
     approved_diff_hash: str | None = None
     current_diff_hash: str | None = None
-    dry_run: bool = True  # True for stub or for non-PUBLISHED kinds; False only when gh actually opened a PR.
+    dry_run: bool = (
+        True  # True for stub or for non-PUBLISHED kinds; False only when gh actually opened a PR.
+    )
     # PR title as passed to `gh pr create --title` (or what would have been
     # passed in stub mode). None for non-PUBLISHED outcomes. Exposed in
     # pr.json so downstream readers (TUI footer, viewer) can render it
@@ -81,12 +83,16 @@ def record_publication(paths: RunPaths, outcome: PublishOutcome) -> None:
 
 
 class Publisher:
-    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishOutcome:
+    def publish(
+        self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str
+    ) -> PublishOutcome:
         raise NotImplementedError
 
 
 class StubPublisher(Publisher):
-    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishOutcome:
+    def publish(
+        self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str
+    ) -> PublishOutcome:
         # PUBLISHED implies the drift check passed, so approved == current.
         # Derive title even in stub mode so pr.json carries the same shape
         # as real publishes (and the schema lock test holds).
@@ -110,7 +116,9 @@ class StubPublisher(Publisher):
 class GhPublisher(Publisher):
     """Host-side GitHub publisher using local git + GitHub CLI."""
 
-    def publish(self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str) -> PublishOutcome:
+    def publish(
+        self, *, config: RunConfig, paths: RunPaths, branch: str, diff_hash: str
+    ) -> PublishOutcome:
         if not os.environ.get("GITHUB_TOKEN") and not os.environ.get("GH_TOKEN"):
             raise RuntimeError("GITHUB_TOKEN or GH_TOKEN is required for --publish-mode gh")
         if not config.fork:
@@ -120,14 +128,22 @@ class GhPublisher(Publisher):
         derived_title, derived_body = _derive_pr_metadata(paths, diff_hash)
         pr_body = _write_pr_body(paths, config, derived_body)
         final_title = config.pr_title or derived_title
-        self._run(["git", "push", "origin", f"HEAD:{branch}"], cwd=paths.worktree, paths=paths, env=env)
+        self._run(
+            ["git", "push", "origin", f"HEAD:{branch}"], cwd=paths.worktree, paths=paths, env=env
+        )
         cmd = [
-            "gh", "pr", "create",
+            "gh",
+            "pr",
+            "create",
             "--draft",
-            "--base", config.base,
-            "--head", branch,
-            "--title", final_title,
-            "--body-file", str(pr_body),
+            "--base",
+            config.base,
+            "--head",
+            branch,
+            "--title",
+            final_title,
+            "--body-file",
+            str(pr_body),
         ]
         if config.gh_repo:
             cmd.extend(["--repo", config.gh_repo])
@@ -168,7 +184,9 @@ class GhPublisher(Publisher):
             },
         )
         if proc.returncode != 0:
-            raise RuntimeError(f"publisher command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}")
+            raise RuntimeError(
+                f"publisher command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}"
+            )
         return proc
 
 
@@ -211,7 +229,9 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         if not p.exists():
             return []
         try:
-            return [_json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            return [
+                _json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()
+            ]
         except (OSError, ValueError):
             return []
 
@@ -242,21 +262,22 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     # Per-reviewer split. Treat missing `reviewer` field as "sim" so old runs
     # written before the extra-reviewer feature land in the right bucket.
     sim_cycles = [
-        r for r in review_cycles
-        if r.get("reviewer", "sim") == "sim" and not r.get("unavailable")
+        r for r in review_cycles if r.get("reviewer", "sim") == "sim" and not r.get("unavailable")
     ]
     extra_attempted = any(r.get("reviewer") == "extra" for r in review_cycles)
     sim = sim_cycles[-1] if sim_cycles else {}
     last_round_value = max((r.get("round") or 0 for r in review_cycles), default=0)
     last_round_entries = [r for r in review_cycles if (r.get("round") or 0) == last_round_value]
     last_round_extra = next(
-        (r for r in last_round_entries
-         if r.get("reviewer") == "extra" and not r.get("unavailable")),
+        (
+            r
+            for r in last_round_entries
+            if r.get("reviewer") == "extra" and not r.get("unavailable")
+        ),
         None,
     )
     last_round_extra_unavailable = any(
-        r.get("reviewer") == "extra" and r.get("unavailable")
-        for r in last_round_entries
+        r.get("reviewer") == "extra" and r.get("unavailable") for r in last_round_entries
     )
 
     # Phase split — surfaces "design pass actually happened" vs "agent shipped
@@ -281,23 +302,19 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     lede_parts = [f"֍ **{verdict}**"]
     if extra_attempted:
         if last_round_extra is not None:
-            agreement = (
-                (sim.get("verdict") or "").upper() == (last_round_extra.get("verdict") or "").upper()
-            )
+            agreement = (sim.get("verdict") or "").upper() == (
+                last_round_extra.get("verdict") or ""
+            ).upper()
             lede_parts.append("SIM+EXTRA agreed" if agreement else "SIM+EXTRA disagreed")
         elif last_round_extra_unavailable:
             lede_parts.append("EXTRA unavailable")
     if confidence is not None:
         if last_round_extra is not None and last_round_extra.get("confidence") is not None:
-            lede_parts.append(
-                f"confidence {confidence:.2f}/{last_round_extra['confidence']:.2f}"
-            )
+            lede_parts.append(f"confidence {confidence:.2f}/{last_round_extra['confidence']:.2f}")
         else:
             lede_parts.append(f"confidence {confidence:.1f}")
     if phases.get("grilling_exchanges") is not None:
-        lede_parts.append(
-            f"grill {phases['grilling_exchanges']} · impl {phases['impl_turns']}"
-        )
+        lede_parts.append(f"grill {phases['grilling_exchanges']} · impl {phases['impl_turns']}")
     if n_rounds:
         lede_parts.append(f"{n_rounds} review round{'s' if n_rounds > 1 else ''}")
     if n_tests:
@@ -305,10 +322,7 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         lede_parts.append(f"tests {n_pass}/{n_tests} {mark}")
 
     # ----- revision callout (any reviewer bouncing in any round) -----
-    bounced = [
-        r for r in review_cycles
-        if (r.get("verdict") or "").upper() == "CHANGES_REQUESTED"
-    ]
+    bounced = [r for r in review_cycles if (r.get("verdict") or "").upper() == "CHANGES_REQUESTED"]
     revision_lines: list[str] = []
     for r in bounced:
         reqs = r.get("required_changes") or []
@@ -318,9 +332,7 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
             if len(reqs) > 1:
                 note += f" (+ {len(reqs) - 1} more)"
             who = r.get("reviewer", "sim").upper()
-            revision_lines.append(
-                f"> Round {r.get('round', '?')} {who} flagged: {note}"
-            )
+            revision_lines.append(f"> Round {r.get('round', '?')} {who} flagged: {note}")
 
     # ----- SIM checklist (collapsible) -----
     checks_performed = sim.get("checks_performed") or []
@@ -410,9 +422,7 @@ def _build_scorecard_block(pr_eval: dict | None) -> str:
         lines.append(f"- Reviewer confidence: {' · '.join(bits)}")
     discipline_bits: list[str] = []
     if scorecard.get("self_verified") is not None:
-        discipline_bits.append(
-            f"self-verified {'✓' if scorecard['self_verified'] else '✗'}"
-        )
+        discipline_bits.append(f"self-verified {'✓' if scorecard['self_verified'] else '✗'}")
     if scorecard.get("settled_before_code") is not None:
         discipline_bits.append(
             f"settled-before-code {'✓' if scorecard['settled_before_code'] else '✗'}"
@@ -422,10 +432,7 @@ def _build_scorecard_block(pr_eval: dict | None) -> str:
     if not lines:
         return ""
     items = "\n".join(lines)
-    return (
-        "<details>\n<summary>Eval scorecard</summary>\n\n"
-        f"{items}\n\n</details>"
-    )
+    return f"<details>\n<summary>Eval scorecard</summary>\n\n{items}\n\n</details>"
 
 
 def _extract_url(stdout: str) -> str | None:

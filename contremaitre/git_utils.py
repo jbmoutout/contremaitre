@@ -41,7 +41,9 @@ class GitRepo:
             "GIT_AUTHOR_NAME": os.environ.get("GIT_AUTHOR_NAME", "Contremaitre"),
             "GIT_AUTHOR_EMAIL": os.environ.get("GIT_AUTHOR_EMAIL", "contremaitre@example.invalid"),
             "GIT_COMMITTER_NAME": os.environ.get("GIT_COMMITTER_NAME", "Contremaitre"),
-            "GIT_COMMITTER_EMAIL": os.environ.get("GIT_COMMITTER_EMAIL", "contremaitre@example.invalid"),
+            "GIT_COMMITTER_EMAIL": os.environ.get(
+                "GIT_COMMITTER_EMAIL", "contremaitre@example.invalid"
+            ),
         }
         proc = subprocess.run(
             cmd,
@@ -70,7 +72,9 @@ class GitRepo:
                 },
             )
         if check and proc.returncode != 0:
-            raise GitError(f"git command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}")
+            raise GitError(
+                f"git command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}"
+            )
         return result
 
     def output(self, *args: str) -> str:
@@ -105,4 +109,3 @@ class GitRepo:
 
     def status_porcelain(self) -> str:
         return self.output("status", "--porcelain")
-

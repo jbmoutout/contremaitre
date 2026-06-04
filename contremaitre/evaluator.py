@@ -52,8 +52,14 @@ def write_eval_reports(
         ],
     }
     write_json(paths.checks_report, checks_payload)
-    write_json(paths.settled_diff_report, _pending_report("L2 SETTLED-to-diff focused judge not implemented"))
-    write_json(paths.architecture_delta_report, _pending_report("L3 architecture-delta focused judge not implemented"))
+    write_json(
+        paths.settled_diff_report,
+        _pending_report("L2 SETTLED-to-diff focused judge not implemented"),
+    )
+    write_json(
+        paths.architecture_delta_report,
+        _pending_report("L3 architecture-delta focused judge not implemented"),
+    )
     write_json(paths.trajectory_report, trajectory)
 
     try:
@@ -85,7 +91,9 @@ def write_eval_reports(
             "cross_family_agreement": cross_family_agreement,
             "process_reliability": trajectory.get("process_reliability", 0.0),
             "self_verified": flow_use["agent"].get("self_verified", {}).get("value"),
-            "settled_before_code": flow_use["agent"].get("settled_write_before_first_code_edit", {}).get("value"),
+            "settled_before_code": flow_use["agent"]
+            .get("settled_write_before_first_code_edit", {})
+            .get("value"),
             "design_conformance": None,
             "architecture_value": None,
         },
@@ -245,4 +253,3 @@ def _render_md(payload: dict[str, Any]) -> str:
         rendered = "n/a" if value is None else value
         lines.append(f"- {key}: {rendered}")
     return "\n".join(lines) + "\n"
-

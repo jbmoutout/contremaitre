@@ -26,7 +26,8 @@ def _seed_worktree(worktree: Path, *, settled: str, impl_complete: str | None) -
     (worktree / ".contremaitre" / "SETTLED_DESIGN.md").write_text(settled, encoding="utf-8")
     if impl_complete is not None:
         (worktree / ".contremaitre" / "IMPLEMENTATION_COMPLETE").write_text(
-            impl_complete, encoding="utf-8",
+            impl_complete,
+            encoding="utf-8",
         )
 
 
@@ -82,7 +83,9 @@ class DerivePrMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self._paths(Path(tmp))
             _seed_worktree(
-                paths.worktree, settled=_SETTLED_FIXTURE, impl_complete="ok",
+                paths.worktree,
+                settled=_SETTLED_FIXTURE,
+                impl_complete="ok",
             )
             _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
             # SETTLED's H1 must be gone; demoted to H3.
@@ -101,7 +104,9 @@ class DerivePrMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self._paths(Path(tmp))
             _seed_worktree(
-                paths.worktree, settled=_SETTLED_FIXTURE, impl_complete="ok",
+                paths.worktree,
+                settled=_SETTLED_FIXTURE,
+                impl_complete="ok",
             )
             _seed_eval(
                 paths.eval_dir,
@@ -127,7 +132,9 @@ class DerivePrMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self._paths(Path(tmp))
             _seed_worktree(
-                paths.worktree, settled=_SETTLED_FIXTURE, impl_complete="ok",
+                paths.worktree,
+                settled=_SETTLED_FIXTURE,
+                impl_complete="ok",
             )
             _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
             self.assertNotIn("Eval scorecard", body)
@@ -139,7 +146,9 @@ class DerivePrMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self._paths(Path(tmp))
             _seed_worktree(
-                paths.worktree, settled=_SETTLED_FIXTURE, impl_complete="ok",
+                paths.worktree,
+                settled=_SETTLED_FIXTURE,
+                impl_complete="ok",
             )
             _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
             self.assertEqual(body.count(f"Run: {paths.run_id}"), 0)
@@ -152,7 +161,8 @@ class IndexReadImplCompleteTest(unittest.TestCase):
             run_dir = Path(tmp) / "20260526-test-run"
             (run_dir / "extracted_files").mkdir(parents=True)
             (run_dir / "extracted_files" / ".contremaitre__IMPLEMENTATION_COMPLETE").write_text(
-                "Did the thing.\n", encoding="utf-8",
+                "Did the thing.\n",
+                encoding="utf-8",
             )
             self.assertEqual(_read_impl_complete(run_dir), "Did the thing.")
 
@@ -170,7 +180,8 @@ class IndexReadImplCompleteTest(unittest.TestCase):
             run_dir = Path(tmp) / "20260526-summary"
             (run_dir / "extracted_files").mkdir(parents=True)
             (run_dir / "extracted_files" / ".contremaitre__IMPLEMENTATION_COMPLETE").write_text(
-                "Refactored X into Y.", encoding="utf-8",
+                "Refactored X into Y.",
+                encoding="utf-8",
             )
             row = _summarize_run(run_dir)
             self.assertEqual(row["impl_complete"], "Refactored X into Y.")

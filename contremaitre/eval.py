@@ -259,7 +259,9 @@ def run_case(case: CaseDef, config: ConfigDef, *, runs_root: Path, rep_index: in
     after = {p.name for p in runs_root.iterdir() if p.is_dir()}
     new_dirs = [p for p in (runs_root / n for n in (after - before)) if slug in p.name]
     if rc != 0 and not new_dirs:
-        raise RuntimeError(f"contremaitre run failed (rc={rc}) and produced no run dir for slug={slug}")
+        raise RuntimeError(
+            f"contremaitre run failed (rc={rc}) and produced no run dir for slug={slug}"
+        )
     if not new_dirs:
         raise RuntimeError(f"no new run dir produced for slug={slug}")
     if len(new_dirs) > 1:
@@ -305,7 +307,7 @@ def _fmt_progress(obj: dict[str, Any], elapsed: float, state: dict[str, int]) ->
     e = obj.get("event")
     if e not in _PROGRESS_EVENTS:
         return None
-    minutes = f"{elapsed/60:5.1f}m"
+    minutes = f"{elapsed / 60:5.1f}m"
     if e == "opencode_actor_start":
         role = obj.get("role", "?")
         if role == "agent":
@@ -449,7 +451,7 @@ def _watch_progress(
             elapsed = time.monotonic() - started
             idle = int(time.monotonic() - last_event_at)
             sys.stderr.write(
-                f"\r      [{elapsed/60:5.1f}m] {_SPINNER_FRAMES[spinner_idx]} "
+                f"\r      [{elapsed / 60:5.1f}m] {_SPINNER_FRAMES[spinner_idx]} "
                 f"running... ({idle}s since last event)\033[K"
             )
             sys.stderr.flush()
@@ -647,10 +649,7 @@ def _weighted_findings(by_label: dict[str, int]) -> int:
     `cli_review_score=0.0`, but they're meaningfully different signals.
     """
 
-    return sum(
-        count * _FINDING_SEVERITY_WEIGHTS.get(label, 0)
-        for label, count in by_label.items()
-    )
+    return sum(count * _FINDING_SEVERITY_WEIGHTS.get(label, 0) for label, count in by_label.items())
 
 
 def _citation_density(cli: dict[str, Any]) -> float | None:
@@ -723,12 +722,22 @@ def _diff_stats(run_dir: Path) -> dict[str, int | None]:
 
     diffs = sorted(run_dir.glob("review_diff_round*.diff"))
     if not diffs:
-        return {"files_changed": None, "loc_added": None, "loc_deleted": None, "loc_net_delta": None}
+        return {
+            "files_changed": None,
+            "loc_added": None,
+            "loc_deleted": None,
+            "loc_net_delta": None,
+        }
     latest = diffs[-1]
     try:
         text = latest.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {"files_changed": None, "loc_added": None, "loc_deleted": None, "loc_net_delta": None}
+        return {
+            "files_changed": None,
+            "loc_added": None,
+            "loc_deleted": None,
+            "loc_net_delta": None,
+        }
 
     added = 0
     deleted = 0
@@ -867,7 +876,9 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
     # encode severity (issue >> suggestion >> nit). Sum with weights so a
     # MUST_FIX with one critical issue scores differently from a MUST_FIX
     # with four trivial nits. Praise/thought ignored — usually 0 anyway.
-    cli_findings_weighted = _weighted_findings(cli.get("by_label") or {}) if cli.get("ran") else None
+    cli_findings_weighted = (
+        _weighted_findings(cli.get("by_label") or {}) if cli.get("ran") else None
+    )
     cli_citation_density = _citation_density(cli)
 
     # Continuous orchestrator-side discipline composite. Per-run [0, 1] score
@@ -886,7 +897,9 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
         "cli_review_verdict_key": cli["verdict_key"],
         "cli_findings_weighted": cli_findings_weighted,
         "cli_issue_count": (cli.get("by_label") or {}).get("issue") if cli.get("ran") else None,
-        "cli_suggestion_count": (cli.get("by_label") or {}).get("suggestion") if cli.get("ran") else None,
+        "cli_suggestion_count": (cli.get("by_label") or {}).get("suggestion")
+        if cli.get("ran")
+        else None,
         "cli_nit_count": (cli.get("by_label") or {}).get("nit") if cli.get("ran") else None,
         "cli_citation_density": cli_citation_density,
         "agent_discipline_score": agent_discipline,
@@ -905,15 +918,21 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
             "cli_review_parse_ok": cli["parse_ok"],
             "sim_verdicts_parse_ok": _sim_verdicts_parse_ok(run_dir),
             "hard_gates_passed": pr_eval.get("hard_gates") == "PASS" if pr_eval else None,
-            "implementation_complete_written": _flow_value(flow_agent, "implementation_complete_written"),
+            "implementation_complete_written": _flow_value(
+                flow_agent, "implementation_complete_written"
+            ),
         },
         "discipline": {
             "settled_before_code": scorecard.get("settled_before_code"),
             "self_verified": scorecard.get("self_verified"),
             "runtime_install_required": _flow_value(flow_agent, "runtime_install_required"),
             "context_pollution_events": _flow_value(flow_agent, "context_pollution_events"),
-            "exploration_convergence": (flow_agent.get("exploration_convergence") or {}).get("value"),
-            "time_to_settled_design_seconds": _flow_value(flow_agent, "time_to_settled_design_seconds"),
+            "exploration_convergence": (flow_agent.get("exploration_convergence") or {}).get(
+                "value"
+            ),
+            "time_to_settled_design_seconds": _flow_value(
+                flow_agent, "time_to_settled_design_seconds"
+            ),
             "tokens_to_settled_design": _flow_value(flow_agent, "tokens_to_settled_design"),
             "sim_useful_call_ratio": _flow_value(flow_sim, "sim_useful_call_ratio"),
         },
@@ -958,7 +977,9 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
     # inconsistent). For NO_PR_* terminals, gates may never have run; that's
     # fine.
     fc = diagnostic["format_compliance"]
-    base_sha_ok = case.expected_base_sha is None or (base_sha and base_sha.startswith(case.expected_base_sha))
+    base_sha_ok = case.expected_base_sha is None or (
+        base_sha and base_sha.startswith(case.expected_base_sha)
+    )
     terminal_healthy = terminal in {
         "READY_FOR_DRAFT_PR",
         "NO_PR_CHANGES_REQUESTED",
@@ -1088,8 +1109,12 @@ def aggregate_cell(reports: list[CanaryReport]) -> Cell:
 
     diagnostic = {
         "format_compliance": {
-            "cli_review_parse_ok_rate": _rate(diag_panel("format_compliance", "cli_review_parse_ok")),
-            "sim_verdicts_parse_ok_rate": _rate(diag_panel("format_compliance", "sim_verdicts_parse_ok")),
+            "cli_review_parse_ok_rate": _rate(
+                diag_panel("format_compliance", "cli_review_parse_ok")
+            ),
+            "sim_verdicts_parse_ok_rate": _rate(
+                diag_panel("format_compliance", "sim_verdicts_parse_ok")
+            ),
             "hard_gates_passed_rate": _rate(diag_panel("format_compliance", "hard_gates_passed")),
             "implementation_complete_written_rate": _rate(
                 diag_panel("format_compliance", "implementation_complete_written")
@@ -1098,18 +1123,38 @@ def aggregate_cell(reports: list[CanaryReport]) -> Cell:
         "discipline": {
             "settled_before_code_rate": _rate(diag_panel("discipline", "settled_before_code")),
             "self_verified_rate": _rate(diag_panel("discipline", "self_verified")),
-            "runtime_install_required_rate": _rate(diag_panel("discipline", "runtime_install_required")),
-            "context_pollution_events": _median_range(diag_panel("discipline", "context_pollution_events")),
-            "exploration_convergence_mix": _mix(diag_panel("discipline", "exploration_convergence")),
-            "time_to_settled_design_seconds": _median_range(diag_panel("discipline", "time_to_settled_design_seconds")),
-            "tokens_to_settled_design": _median_range(diag_panel("discipline", "tokens_to_settled_design")),
-            "sim_useful_call_ratio": _median_range(diag_panel("discipline", "sim_useful_call_ratio")),
+            "runtime_install_required_rate": _rate(
+                diag_panel("discipline", "runtime_install_required")
+            ),
+            "context_pollution_events": _median_range(
+                diag_panel("discipline", "context_pollution_events")
+            ),
+            "exploration_convergence_mix": _mix(
+                diag_panel("discipline", "exploration_convergence")
+            ),
+            "time_to_settled_design_seconds": _median_range(
+                diag_panel("discipline", "time_to_settled_design_seconds")
+            ),
+            "tokens_to_settled_design": _median_range(
+                diag_panel("discipline", "tokens_to_settled_design")
+            ),
+            "sim_useful_call_ratio": _median_range(
+                diag_panel("discipline", "sim_useful_call_ratio")
+            ),
         },
         "review_depth": {
-            "total_checks_performed": _median_range(diag_panel("review_depth", "total_checks_performed")),
-            "total_required_changes": _median_range(diag_panel("review_depth", "total_required_changes")),
-            "sim_review_confidence": _median_range(diag_panel("review_depth", "sim_review_confidence")),
-            "extra_reviewer_confidence": _median_range(diag_panel("review_depth", "extra_reviewer_confidence")),
+            "total_checks_performed": _median_range(
+                diag_panel("review_depth", "total_checks_performed")
+            ),
+            "total_required_changes": _median_range(
+                diag_panel("review_depth", "total_required_changes")
+            ),
+            "sim_review_confidence": _median_range(
+                diag_panel("review_depth", "sim_review_confidence")
+            ),
+            "extra_reviewer_confidence": _median_range(
+                diag_panel("review_depth", "extra_reviewer_confidence")
+            ),
             "process_reliability": _median_range(diag_panel("review_depth", "process_reliability")),
         },
         "cli_review_breakdown": {
@@ -1122,7 +1167,9 @@ def aggregate_cell(reports: list[CanaryReport]) -> Cell:
         },
         "efficiency": {
             "turns": _median_range(diag_panel("efficiency", "turns")),
-            "agent_tool_call_count": _median_range(diag_panel("efficiency", "agent_tool_call_count")),
+            "agent_tool_call_count": _median_range(
+                diag_panel("efficiency", "agent_tool_call_count")
+            ),
             "sim_tool_call_count": _median_range(diag_panel("efficiency", "sim_tool_call_count")),
         },
     }
@@ -1236,9 +1283,9 @@ def _envelope_check(
         return f"{name} {base} → {cur} (was zero)"
     delta = (cur - base) / abs(base)
     if direction == "down" and delta < -envelope:
-        return f"{name} {base:.3g} → {cur:.3g} (Δ {delta*100:+.0f}%)"
+        return f"{name} {base:.3g} → {cur:.3g} (Δ {delta * 100:+.0f}%)"
     if direction == "symmetric" and abs(delta) > envelope:
-        return f"{name} {base:.3g} → {cur:.3g} (Δ {delta*100:+.0f}%)"
+        return f"{name} {base:.3g} → {cur:.3g} (Δ {delta * 100:+.0f}%)"
     return None
 
 
@@ -1267,7 +1314,11 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
     cur_score = _median(h_cur.get("cli_review_score"))
     base_score = _median(h_base.get("cli_review_score"))
     msg = _envelope_check(
-        "cli_review_score", cur_score, base_score, envelope=_DRIFT_ENVELOPES["cli_review_score"], direction="down"
+        "cli_review_score",
+        cur_score,
+        base_score,
+        envelope=_DRIFT_ENVELOPES["cli_review_score"],
+        direction="down",
     )
     if msg:
         regressions.append(msg)
@@ -1318,7 +1369,11 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
     # Format-compliance: any drop counts as regression.
     fc_cur = current.diagnostic.get("format_compliance", {})
     fc_base = baseline.diagnostic.get("format_compliance", {})
-    for name in ("cli_review_parse_ok_rate", "sim_verdicts_parse_ok_rate", "hard_gates_passed_rate"):
+    for name in (
+        "cli_review_parse_ok_rate",
+        "sim_verdicts_parse_ok_rate",
+        "hard_gates_passed_rate",
+    ):
         cur_v = fc_cur.get(name)
         base_v = fc_base.get(name)
         if isinstance(cur_v, (int, float)) and isinstance(base_v, (int, float)) and cur_v < base_v:
@@ -1442,14 +1497,14 @@ def cmd_run(*, project_root: Path, case_id: str, config_name: str, n: int, runs_
         try:
             run_dir = run_case(case, config, runs_root=runs_root, rep_index=i + 1)
         except RuntimeError as exc:
-            print(f"  [{i+1}/{n}] FAILED to launch: {exc}", file=sys.stderr)
+            print(f"  [{i + 1}/{n}] FAILED to launch: {exc}", file=sys.stderr)
             return 1
         report = check_run(case, config, run_dir)
         write_canary_report(report, run_dir)
         status = "OK" if report.ok else "FAIL"
         h = report.headline
         print(
-            f"  [{i+1}/{n}] {status} terminal={h.get('terminal_verdict')} "
+            f"  [{i + 1}/{n}] {status} terminal={h.get('terminal_verdict')} "
             f"cli_review={h.get('cli_review_verdict_key')} "
             f"rounds={h.get('review_rounds')} files={h.get('files_changed')} "
             f"dir={run_dir}",
@@ -1495,7 +1550,7 @@ def _infer_case_and_config(run_dir_name: str, project_root: Path) -> tuple[str, 
     for case_dir in list_cases(project_root):
         cid = case_dir.name
         if tail_no_rep.startswith(cid + "-"):
-            config = tail_no_rep[len(cid) + 1:]
+            config = tail_no_rep[len(cid) + 1 :]
             return cid, config
     return None
 
@@ -1503,7 +1558,10 @@ def _infer_case_and_config(run_dir_name: str, project_root: Path) -> tuple[str, 
 def cmd_check(*, project_root: Path, run_dir: Path) -> int:
     inferred = _infer_case_and_config(run_dir.name, project_root)
     if inferred is None:
-        print(f"contremaitre eval: cannot infer (case, config) from run dir name {run_dir.name}", file=sys.stderr)
+        print(
+            f"contremaitre eval: cannot infer (case, config) from run dir name {run_dir.name}",
+            file=sys.stderr,
+        )
         return 2
     case_id, config_name = inferred
     case_dir = case_dir_for(project_root, case_id)
@@ -1516,7 +1574,15 @@ def cmd_check(*, project_root: Path, run_dir: Path) -> int:
     return 0 if report.ok else 1
 
 
-def cmd_compare(*, project_root: Path, case_id: str, config_name: str, runs_root: Path, n: int, as_json: bool = False) -> int:
+def cmd_compare(
+    *,
+    project_root: Path,
+    case_id: str,
+    config_name: str,
+    runs_root: Path,
+    n: int,
+    as_json: bool = False,
+) -> int:
     case_dir = case_dir_for(project_root, case_id)
     case = load_case(case_dir)
     config = load_config(case_dir, config_name)
@@ -1566,7 +1632,9 @@ def cmd_compare(*, project_root: Path, case_id: str, config_name: str, runs_root
     return 0
 
 
-def cmd_promote(*, project_root: Path, case_id: str, config_name: str, runs_root: Path, n: int) -> int:
+def cmd_promote(
+    *, project_root: Path, case_id: str, config_name: str, runs_root: Path, n: int
+) -> int:
     case_dir = case_dir_for(project_root, case_id)
     case = load_case(case_dir)
     config = load_config(case_dir, config_name)
@@ -1598,7 +1666,10 @@ def cmd_all(*, project_root: Path, config_name: str, runs_root: Path, n: int) ->
 
     cases = list_cases(project_root)
     if not cases:
-        print(f"contremaitre eval: no cases under {project_root / GOLDEN_CASES_DIRNAME}", file=sys.stderr)
+        print(
+            f"contremaitre eval: no cases under {project_root / GOLDEN_CASES_DIRNAME}",
+            file=sys.stderr,
+        )
         return 2
     any_regression = False
     for case_dir in cases:
@@ -1682,7 +1753,9 @@ def _short(digest: str | None) -> str:
     return digest[:12]
 
 
-def format_cell_report(cell: Cell, baseline: Cell | None, compare: CompareResult, *, config_name: str | None = None) -> str:
+def format_cell_report(
+    cell: Cell, baseline: Cell | None, compare: CompareResult, *, config_name: str | None = None
+) -> str:
     """Compact human-readable scorecard. ~40 lines."""
 
     h = cell.headline
@@ -1701,14 +1774,18 @@ def format_cell_report(cell: Cell, baseline: Cell | None, compare: CompareResult
     lines.append("Headline — LLM judge (cli_reviewer):")
     lines.append(f"  cli_review_score        {_fmt_range(h.get('cli_review_score'), prec=2)}")
     lines.append(f"    verdict_mix           {_fmt_mix(h.get('cli_review_verdict_mix'))}")
-    lines.append(f"  cli_findings_weighted   {_fmt_range(h.get('cli_findings_weighted'), prec=1)}   (issue×3 + suggestion×2 + nit×1)")
+    lines.append(
+        f"  cli_findings_weighted   {_fmt_range(h.get('cli_findings_weighted'), prec=1)}   (issue×3 + suggestion×2 + nit×1)"
+    )
     lines.append(f"    issue_count           {_fmt_range(h.get('cli_issue_count'))}")
     lines.append(f"    suggestion_count      {_fmt_range(h.get('cli_suggestion_count'))}")
     lines.append(f"    nit_count             {_fmt_range(h.get('cli_nit_count'))}")
     lines.append(f"  cli_citation_density    {_fmt_range(h.get('cli_citation_density'), prec=2)}")
     lines.append("")
     lines.append("Headline — orchestrator-side (process, not artifact):")
-    lines.append(f"  agent_discipline_score  {_fmt_range(h.get('agent_discipline_score'), prec=2)}   (exploration + sim_useful + self_verified)")
+    lines.append(
+        f"  agent_discipline_score  {_fmt_range(h.get('agent_discipline_score'), prec=2)}   (exploration + sim_useful + self_verified)"
+    )
     lines.append(f"  terminal_score          {_fmt_range(h.get('terminal_score'), prec=2)}")
     lines.append(f"    terminal_mix          {_fmt_mix(h.get('terminal_verdict_mix'))}")
     lines.append(f"  files_changed           {_fmt_range(h.get('files_changed'))}")
@@ -1716,7 +1793,9 @@ def format_cell_report(cell: Cell, baseline: Cell | None, compare: CompareResult
     lines.append(f"  review_rounds           {_fmt_range(h.get('review_rounds'))}")
     lines.append(f"  cost_usd                {_fmt_range(h.get('cost_usd'), prec=3)}")
     lines.append(f"  wall_seconds            {_fmt_range(h.get('wall_seconds'), prec=0)}")
-    lines.append(f"  cross_family_agreement  rate={_fmt_rate(h.get('cross_family_agreement_rate'))}")
+    lines.append(
+        f"  cross_family_agreement  rate={_fmt_rate(h.get('cross_family_agreement_rate'))}"
+    )
     lines.append("")
 
     fc = d.get("format_compliance", {})
@@ -1724,28 +1803,50 @@ def format_cell_report(cell: Cell, baseline: Cell | None, compare: CompareResult
     lines.append(f"  sim_verdicts_parse_ok       {_fmt_rate(fc.get('sim_verdicts_parse_ok_rate'))}")
     lines.append(f"  cli_review_parse_ok         {_fmt_rate(fc.get('cli_review_parse_ok_rate'))}")
     lines.append(f"  hard_gates_passed           {_fmt_rate(fc.get('hard_gates_passed_rate'))}")
-    lines.append(f"  implementation_complete     {_fmt_rate(fc.get('implementation_complete_written_rate'))}")
+    lines.append(
+        f"  implementation_complete     {_fmt_rate(fc.get('implementation_complete_written_rate'))}"
+    )
     lines.append("")
 
     disc = d.get("discipline", {})
     lines.append("Discipline:")
-    lines.append(f"  settled_before_code         rate={_fmt_rate(disc.get('settled_before_code_rate'))}")
+    lines.append(
+        f"  settled_before_code         rate={_fmt_rate(disc.get('settled_before_code_rate'))}"
+    )
     lines.append(f"  self_verified               rate={_fmt_rate(disc.get('self_verified_rate'))}")
-    lines.append(f"  runtime_install_required    rate={_fmt_rate(disc.get('runtime_install_required_rate'))}")
-    lines.append(f"  context_pollution           {_fmt_range(disc.get('context_pollution_events'))}")
-    lines.append(f"  exploration_convergence     {_fmt_mix(disc.get('exploration_convergence_mix'))}")
-    lines.append(f"  time_to_settled (s)         {_fmt_range(disc.get('time_to_settled_design_seconds'), prec=0)}")
-    lines.append(f"  tokens_to_settled           {_fmt_range(disc.get('tokens_to_settled_design'))}")
-    lines.append(f"  sim_useful_call_ratio       {_fmt_range(disc.get('sim_useful_call_ratio'), prec=2)}")
+    lines.append(
+        f"  runtime_install_required    rate={_fmt_rate(disc.get('runtime_install_required_rate'))}"
+    )
+    lines.append(
+        f"  context_pollution           {_fmt_range(disc.get('context_pollution_events'))}"
+    )
+    lines.append(
+        f"  exploration_convergence     {_fmt_mix(disc.get('exploration_convergence_mix'))}"
+    )
+    lines.append(
+        f"  time_to_settled (s)         {_fmt_range(disc.get('time_to_settled_design_seconds'), prec=0)}"
+    )
+    lines.append(
+        f"  tokens_to_settled           {_fmt_range(disc.get('tokens_to_settled_design'))}"
+    )
+    lines.append(
+        f"  sim_useful_call_ratio       {_fmt_range(disc.get('sim_useful_call_ratio'), prec=2)}"
+    )
     lines.append("")
 
     rev = d.get("review_depth", {})
     lines.append("Review depth:")
     lines.append(f"  total_checks_performed      {_fmt_range(rev.get('total_checks_performed'))}")
     lines.append(f"  total_required_changes      {_fmt_range(rev.get('total_required_changes'))}")
-    lines.append(f"  sim_review_confidence       {_fmt_range(rev.get('sim_review_confidence'), prec=2)}")
-    lines.append(f"  extra_reviewer_confidence   {_fmt_range(rev.get('extra_reviewer_confidence'), prec=2)}")
-    lines.append(f"  process_reliability         {_fmt_range(rev.get('process_reliability'), prec=2)}")
+    lines.append(
+        f"  sim_review_confidence       {_fmt_range(rev.get('sim_review_confidence'), prec=2)}"
+    )
+    lines.append(
+        f"  extra_reviewer_confidence   {_fmt_range(rev.get('extra_reviewer_confidence'), prec=2)}"
+    )
+    lines.append(
+        f"  process_reliability         {_fmt_range(rev.get('process_reliability'), prec=2)}"
+    )
     lines.append("")
 
     cli = d.get("cli_review_breakdown", {})

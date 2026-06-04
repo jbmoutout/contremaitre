@@ -132,10 +132,14 @@ class FakeActorRunner:
         return self._fake(
             [
                 "sim-review",
-                "--diff-file", str(diff_file),
-                "--settled-file", str(settled_file),
-                "--scenario", scenario,
-                "--attempt", str(attempt),
+                "--diff-file",
+                str(diff_file),
+                "--settled-file",
+                str(settled_file),
+                "--scenario",
+                scenario,
+                "--attempt",
+                str(attempt),
             ],
             role="sim",
             phase="REVIEW",
@@ -158,7 +162,9 @@ class FakeActorRunner:
             timeout=120,
         )
         if proc.returncode != 0:
-            raise ActorError(f"fake actor failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}")
+            raise ActorError(
+                f"fake actor failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}"
+            )
         text = proc.stdout.strip()
         # Wrap in opencode's text-event shape so downstream readers see uniform JSONL.
         append_text_event(raw_export, role=role, phase=phase, text=text)
@@ -235,7 +241,9 @@ class OpencodeActorRunner:
         (review_dir / "SETTLED_DESIGN.md").write_text(
             settled_file.read_text(encoding="utf-8"), encoding="utf-8"
         )
-        (review_dir / "diff.patch").write_text(diff_file.read_text(encoding="utf-8"), encoding="utf-8")
+        (review_dir / "diff.patch").write_text(
+            diff_file.read_text(encoding="utf-8"), encoding="utf-8"
+        )
         # Fresh session every review attempt so the SIM has clean context.
         # Separate state dirs per reviewer so SIM and extra reviewer can't
         # collide on opencode.db when called back-to-back in one round.
@@ -458,9 +466,7 @@ class OpencodeActorRunner:
                 self._append_transcript(role=role, text=recovered)
                 self._harvest_step_finishes(role=role, state_dir=state_dir, raw_export=raw_export)
                 return ActorOutput(text=recovered, stderr=stderr, returncode=returncode)
-            raise ActorError(
-                f"{role} opencode emitted no text and sqlite recovery found nothing"
-            )
+            raise ActorError(f"{role} opencode emitted no text and sqlite recovery found nothing")
         latest = _latest_text(raw_export)
         self._append_transcript(role=role, text=latest)
         self._harvest_step_finishes(role=role, state_dir=state_dir, raw_export=raw_export)

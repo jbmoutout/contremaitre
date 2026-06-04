@@ -28,10 +28,12 @@ docker_image    := ""   # e.g. "contremaitre-agent-rust:latest"; empty → CLI d
 default:
     @just --list
 
-# Run ruff (lint + auto-fix). Catches trailing whitespace / missing EOF
-# newlines so `git diff --check` doesn't fail in review.
+# Run ruff (lint + auto-fix, then format). Catches trailing whitespace /
+# missing EOF newlines and PEP 8 blank-line spacing so `git diff --check`
+# and the CI format gate don't fail in review.
 lint:
     uvx ruff check --fix .
+    uvx ruff format .
 
 # Install the local git pre-commit hook (runs ruff before each commit).
 # One-time per clone.

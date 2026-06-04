@@ -95,9 +95,7 @@ class FastFailDetectorTest(unittest.TestCase):
             self.stream,
             [{"type": "text", "part": {"text": "hello"}}],
         )
-        self.assertIsNone(
-            _detect_provider_fast_fail(self.stream, 0, state_dir=self.state_dir)
-        )
+        self.assertIsNone(_detect_provider_fast_fail(self.stream, 0, state_dir=self.state_dir))
 
     def test_new_text_after_baseline_cancels_subsequent_match(self) -> None:
         # A real reply lands after baseline → any later error is stale
@@ -109,9 +107,7 @@ class FastFailDetectorTest(unittest.TestCase):
                 {"type": "error", "error": "Provider returned error"},
             ],
         )
-        self.assertIsNone(
-            _detect_provider_fast_fail(self.stream, 0, state_dir=self.state_dir)
-        )
+        self.assertIsNone(_detect_provider_fast_fail(self.stream, 0, state_dir=self.state_dir))
 
     def test_events_offset_skips_prior_attempt_error(self) -> None:
         # Simulates: attempt 1 wrote an error event (index 0), attempt 2
@@ -123,15 +119,11 @@ class FastFailDetectorTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            _detect_provider_fast_fail(
-                self.stream, 0, state_dir=self.state_dir, events_offset=0
-            ),
+            _detect_provider_fast_fail(self.stream, 0, state_dir=self.state_dir, events_offset=0),
             "Provider returned error",
         )
         self.assertIsNone(
-            _detect_provider_fast_fail(
-                self.stream, 0, state_dir=self.state_dir, events_offset=1
-            )
+            _detect_provider_fast_fail(self.stream, 0, state_dir=self.state_dir, events_offset=1)
         )
 
 
@@ -154,9 +146,7 @@ class LatestErrorOffsetTest(unittest.TestCase):
         # Without offset: finds the error after the prior-turn text.
         self.assertIsNotNone(_latest_error_after_text_count(stream, 1))
         # With offset past the error: no error in scan range.
-        self.assertIsNone(
-            _latest_error_after_text_count(stream, 1, events_offset=2)
-        )
+        self.assertIsNone(_latest_error_after_text_count(stream, 1, events_offset=2))
 
 
 class CountJsonlEventsTest(unittest.TestCase):
@@ -188,9 +178,7 @@ class RetryWrapperTest(unittest.TestCase):
         runs_root = root / "runs"
         self.paths = build_run_paths(runs_root, run_id)
         self.paths.run_dir.mkdir(parents=True)
-        self.paths = self.paths.__class__(
-            **{**self.paths.__dict__, "worktree": repo}
-        )
+        self.paths = self.paths.__class__(**{**self.paths.__dict__, "worktree": repo})
         self.config = RunConfig(
             repo=repo,
             base="main",
