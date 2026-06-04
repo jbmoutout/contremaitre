@@ -655,11 +655,16 @@ def _run_detached_container(
             )
             deadline = time.monotonic() + timeout_seconds
             poll_interval = 2.0
-            # Stall detection: track when stdout_path last grew. If the
-            # subprocess streams nothing for stdout_stall_seconds we kill it
-            # instead of waiting for the full timeout — catches the silent
-            # mid-turn agent pathology.
-            stall_last_size = stdout_path.stat().st_size if stdout_path.exists() else 0
+            # Stall detection: kill the subprocess if BOTH the stdout
+            # stream AND opencode's internal log have been silent for
+            # `stdout_stall_seconds`. Watching only stdout would
+            # false-positive on subagent dispatches: a `Task` subagent's
+            # tool calls and LLM streams stay scoped to the subagent's
+            # session and never surface to the parent's `raw_export`.
+            # The internal log still records them, so a growing log =
+            # opencode is doing something even when stdout looks frozen.
+            stall_last_stdout = stdout_path.stat().st_size if stdout_path.exists() else 0
+            stall_last_internal = _latest_internal_log_size(state_dir)
             stall_last_growth_at = time.monotonic()
             try:
                 while True:
@@ -680,10 +685,16 @@ def _run_detached_container(
                         except subprocess.TimeoutExpired:
                             wait_proc.kill()
                         raise ActorError(f"{role} opencode timed out after {timeout_seconds}s")
-                    if stdout_stall_seconds is not None and stdout_path.exists():
-                        cur_size = stdout_path.stat().st_size
-                        if cur_size > stall_last_size:
-                            stall_last_size = cur_size
+                    if stdout_stall_seconds is not None:
+                        cur_stdout = stdout_path.stat().st_size if stdout_path.exists() else stall_last_stdout
+                        cur_internal = _latest_internal_log_size(state_dir)
+                        grew = (
+                            cur_stdout > stall_last_stdout
+                            or cur_internal > stall_last_internal
+                        )
+                        if grew:
+                            stall_last_stdout = cur_stdout
+                            stall_last_internal = cur_internal
                             stall_last_growth_at = time.monotonic()
                         elif time.monotonic() - stall_last_growth_at > stdout_stall_seconds:
                             subprocess.run(
@@ -697,8 +708,8 @@ def _run_detached_container(
                             except subprocess.TimeoutExpired:
                                 wait_proc.kill()
                             raise ActorError(
-                                f"{role} opencode stdout stalled for {stdout_stall_seconds}s "
-                                f"(no event output)"
+                                f"{role} opencode stalled for {stdout_stall_seconds}s "
+                                f"(no stdout or internal-log activity)"
                             )
                     fast_fail_reason = _detect_provider_fast_fail(
                         stdout_path,
@@ -761,6 +772,35 @@ def _classify_fast_fail_marker(marker: str) -> str:
     if any(m in marker for m in _QUOTA_ERROR_MARKERS):
         return events.PROVIDER_QUOTA_EXHAUSTED
     return events.PROVIDER_TRANSIENT_ERROR
+
+
+def _latest_internal_log_size(state_dir: Path | None) -> int:
+    """Bytes of `state_dir`'s latest opencode log file, or 0 if absent.
+
+    Used by the stall detector as a second "is opencode doing anything?"
+    signal. opencode delegates `Task` calls to subagents that run in
+    their own internal session — their tool calls and LLM streams DO
+    NOT surface to the parent's stdout (`raw_export.jsonl`). They do
+    land in the parent process's opencode log. Watching the log lets us
+    distinguish "model is dead" from "subagent is grinding silently".
+    """
+
+    if state_dir is None:
+        return 0
+    log_dir = state_dir / "log"
+    if not log_dir.exists():
+        return 0
+    try:
+        candidates = [p for p in log_dir.iterdir() if p.is_file()]
+    except OSError:
+        return 0
+    if not candidates:
+        return 0
+    try:
+        latest = max(candidates, key=lambda p: p.stat().st_mtime)
+        return latest.stat().st_size
+    except OSError:
+        return 0
 
 
 def _detect_provider_fast_fail(

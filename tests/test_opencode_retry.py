@@ -30,6 +30,7 @@ from contremaitre.actors import (
     _count_jsonl_events,
     _detect_provider_fast_fail,
     _latest_error_after_text_count,
+    _latest_internal_log_size,
 )
 from contremaitre.fixture import init_fixture
 from contremaitre.models import ActorMode, RunConfig
@@ -147,6 +148,48 @@ class LatestErrorOffsetTest(unittest.TestCase):
         self.assertIsNotNone(_latest_error_after_text_count(stream, 1))
         # With offset past the error: no error in scan range.
         self.assertIsNone(_latest_error_after_text_count(stream, 1, events_offset=2))
+
+
+class LatestInternalLogSizeTest(unittest.TestCase):
+    """Stall detector's "is opencode doing anything internally?" signal."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name)
+
+    def test_no_state_dir_returns_zero(self) -> None:
+        self.assertEqual(_latest_internal_log_size(None), 0)
+
+    def test_missing_log_dir_returns_zero(self) -> None:
+        self.assertEqual(_latest_internal_log_size(self.state_dir), 0)
+
+    def test_empty_log_dir_returns_zero(self) -> None:
+        (self.state_dir / "log").mkdir()
+        self.assertEqual(_latest_internal_log_size(self.state_dir), 0)
+
+    def test_latest_by_mtime_is_used(self) -> None:
+        # Two log files; the newer (larger mtime) should dictate the size.
+        log_dir = self.state_dir / "log"
+        log_dir.mkdir()
+        older = log_dir / "2026-06-04T100000.log"
+        newer = log_dir / "2026-06-04T120000.log"
+        older.write_text("x" * 9999, encoding="utf-8")
+        newer.write_text("y" * 42, encoding="utf-8")
+        # Force older mtime to be in the past so max(...) picks newer.
+        import os
+        os.utime(older, (1, 1))
+        self.assertEqual(_latest_internal_log_size(self.state_dir), 42)
+
+    def test_size_reflects_growth(self) -> None:
+        log_dir = self.state_dir / "log"
+        log_dir.mkdir()
+        log = log_dir / "2026-06-04T120000.log"
+        log.write_text("initial", encoding="utf-8")
+        size_before = _latest_internal_log_size(self.state_dir)
+        log.write_text("initial + more bytes", encoding="utf-8")
+        size_after = _latest_internal_log_size(self.state_dir)
+        self.assertGreater(size_after, size_before)
 
 
 class CountJsonlEventsTest(unittest.TestCase):
