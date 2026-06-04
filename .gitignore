@@ -24,6 +24,9 @@ skills-lock.json
 # Claude Code: symlinks into .agents/skills (gitignored above)
 .claude/
 
+# Spark HUD: local hooks state
+.spark/
+
 DUMP.md
 EVAL_ROADMAP.md
 docs/eval_systems.md
