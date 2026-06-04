@@ -600,7 +600,7 @@ def _current_phase_label(
     cli_review_tool: str = "",
     cli_review_verdict: str | None = None,
     cli_review_states: list[tuple[str, str, str | None]] | None = None,
-    quota_failure: dict | None = None,
+    provider_failure: dict | None = None,
 ) -> Text:
     """Phase name + sub-info (right of the trail).
 
@@ -617,20 +617,20 @@ def _current_phase_label(
         return text
     if phase == "exploring":
         if color_state == "error":
-            text.append(_infra_failure_label("Exploring", quota_failure), style=f"bold {_PAL_ERROR}")
+            text.append(_infra_failure_label("Exploring", provider_failure), style=f"bold {_PAL_ERROR}")
             return text
         text.append("Exploring", style=f"bold {_PAL_BRIGHT}")
         return text
     if phase == "grilling":
         if color_state == "error":
-            text.append(_infra_failure_label("Grilling", quota_failure), style=f"bold {_PAL_ERROR}")
+            text.append(_infra_failure_label("Grilling", provider_failure), style=f"bold {_PAL_ERROR}")
             return text
         text.append("Grilling", style=f"bold {_PAL_BRIGHT}")
         text.append(f" (exchange {grilling_exchanges})", style=_PAL_TEXT)
         return text
     if phase == "implementing":
         if color_state == "error":
-            text.append(_infra_failure_label("Implementing", quota_failure), style=f"bold {_PAL_ERROR}")
+            text.append(_infra_failure_label("Implementing", provider_failure), style=f"bold {_PAL_ERROR}")
             return text
         text.append("Implementing", style=f"bold {_PAL_BRIGHT}")
         if impl_complete:
@@ -646,7 +646,7 @@ def _current_phase_label(
         return text
     if phase == "reviewing":
         if color_state == "error":
-            text.append(_infra_failure_label("Reviewing", quota_failure), style=f"bold {_PAL_ERROR}")
+            text.append(_infra_failure_label("Reviewing", provider_failure), style=f"bold {_PAL_ERROR}")
             return text
         text.append("Reviewing", style=f"bold {_PAL_BRIGHT}")
         # Show the round number from the count of actor-starts, not from
@@ -669,7 +669,7 @@ def _current_phase_label(
         return text
     if phase == "cli_review":
         if color_state == "error":
-            text.append(_infra_failure_label("CLI review", quota_failure), style=f"bold {_PAL_ERROR}")
+            text.append(_infra_failure_label("CLI review", provider_failure), style=f"bold {_PAL_ERROR}")
             return text
         if color_state == "warn":
             text.append("CLI review — failed", style=f"bold {_PAL_WARN}")
@@ -726,12 +726,13 @@ def _current_phase_label(
     elif terminal_verdict == "NO_PR_NEEDS_HUMAN":
         text.append("Reviewing — needs human", style=f"bold {_PAL_WARN}")
     elif terminal_verdict == "FAILED_INFRA":
-        if quota_failure is not None:
-            model = _short_quota_model(quota_failure.get("model"))
-            text.append(
-                f"Failed — free-tier quota exhausted ({model})",
-                style=f"bold {_PAL_ERROR}",
-            )
+        if provider_failure is not None:
+            model = _short_quota_model(provider_failure.get("model"))
+            if provider_failure.get("kind") == "transient":
+                msg = f"Failed — transient provider error ({model})"
+            else:
+                msg = f"Failed — free-tier quota exhausted ({model})"
+            text.append(msg, style=f"bold {_PAL_ERROR}")
         else:
             text.append("Failed — infrastructure error", style=f"bold {_PAL_ERROR}")
     else:
@@ -811,11 +812,11 @@ def _warnings_token(
 def _terminal_badge(
     verdict: str | None,
     pr_number: int | None,
-    quota_failure: dict | None = None,
+    provider_failure: dict | None = None,
 ) -> tuple[str, str]:
     """`(text, style)` for the rightmost verdict badge at terminal state.
 
-    `quota_failure` upgrades the generic `FAILED · infra` badge to the
+    `provider_failure` upgrades the generic `FAILED · infra` badge to the
     more specific `FAILED · quota` so the operator can tell at-a-glance
     that the run died on a free-tier quota rather than e.g. a docker hiccup.
     """
@@ -828,23 +829,36 @@ def _terminal_badge(
     if verdict == "NO_PR_NEEDS_HUMAN":
         return "NO_PR · needs human", f"bold {_PAL_WARN}"
     if verdict == "FAILED_INFRA":
-        if quota_failure is not None:
-            return "FAILED · quota", f"bold {_PAL_ERROR}"
+        if provider_failure is not None:
+            tag = "transient" if provider_failure.get("kind") == "transient" else "quota"
+            return f"FAILED · {tag}", f"bold {_PAL_ERROR}"
         return "FAILED · infra", f"bold {_PAL_ERROR}"
     return verdict or "?", f"bold {_PAL_TEXT}"
 
 
-def _quota_failure(guardrails: list[dict[str, Any]]) -> dict | None:
-    """Return the latest provider-quota-exhausted event, or None.
+def _provider_fast_fail(guardrails: list[dict[str, Any]]) -> dict | None:
+    """Return the latest provider fast-fail event, or None.
 
-    Used to swap the generic "infra failure" labels for the more
-    informative "free-tier quota exhausted ({model})" so the operator
-    can tell which model to swap before retrying.
+    Covers both quota exhaustion (terminal: retry can't help) and
+    transient upstream errors (retried then exhausted). Used to swap
+    the generic "infra failure" labels for the more informative
+    "free-tier quota exhausted ({model})" / "transient provider error
+    ({model})" so the operator can tell which model to swap before
+    retrying.
     """
 
     for event in reversed(guardrails):
-        if event.get("event") == "provider_quota_exhausted":
+        kind = event.get("event")
+        if kind == "provider_quota_exhausted":
             return {
+                "kind": "quota",
+                "role": event.get("role"),
+                "model": event.get("model"),
+                "marker": event.get("marker"),
+            }
+        if kind == "provider_transient_error":
+            return {
+                "kind": "transient",
                 "role": event.get("role"),
                 "model": event.get("model"),
                 "marker": event.get("marker"),
@@ -858,16 +872,19 @@ def _short_quota_model(model: str | None) -> str:
     return model.rsplit("/", 1)[-1]
 
 
-def _infra_failure_label(phase_name: str, quota_failure: dict | None) -> str:
+def _infra_failure_label(phase_name: str, provider_failure: dict | None) -> str:
     """Customize the `<phase> — infra failure` label when we know the cause.
 
-    Provider-quota errors get a specific tag so the operator can tell
-    "free-tier quota exhausted on {model}" from a generic docker hiccup
-    without having to scan the activity feed.
+    Provider fast-fail errors get a specific tag so the operator can
+    tell "free-tier quota exhausted on {model}" or "transient provider
+    error on {model}" from a generic docker hiccup without scanning the
+    activity feed.
     """
 
-    if quota_failure is not None:
-        model = _short_quota_model(quota_failure.get("model"))
+    if provider_failure is not None:
+        model = _short_quota_model(provider_failure.get("model"))
+        if provider_failure.get("kind") == "transient":
+            return f"{phase_name} — transient provider error ({model})"
         return f"{phase_name} — free-tier quota exhausted ({model})"
     return f"{phase_name} — infra failure"
 
@@ -1493,8 +1510,21 @@ def _render_guardrail(event: dict[str, Any]):
 
     # Semantic style — most events are dim scaffolding; only actionable
     # signals get color so the operator's eye goes straight to what matters.
-    if any(k in kind for k in ("infra_failure", "blocked", "malformed", "quota_exhausted")):
+    if any(
+        k in kind
+        for k in (
+            "infra_failure",
+            "blocked",
+            "malformed",
+            "quota_exhausted",
+            "provider_transient_error",
+        )
+    ) and not kind.endswith("_retry"):
         style = f"bold {_PAL_ERROR}"
+    elif kind == "provider_transient_error_retry":
+        # Each retry attempt is a "we're trying again" cue — warn-style
+        # so the operator notices but knows the run hasn't given up.
+        style = f"bold {_PAL_WARN}"
     elif any(k in kind for k in ("recovery", "orphan", "sqlite", "cap")):
         style = f"bold {_PAL_WARN}"
     elif kind == "published":
@@ -2319,7 +2349,7 @@ if _TEXTUAL_AVAILABLE:
                     pass
 
             tv: str | None = stats_data.get("verdict") if terminal else None
-            quota_failure = _quota_failure(guardrails)
+            provider_failure = _provider_fast_fail(guardrails)
             pr_data = _read_pr_json(self.run_dir) or {}
             pr_url = pr_data.get("url") if pr_data.get("kind") == "PUBLISHED" else None
             pr_number = _pr_number_from_url(pr_url)
@@ -2361,7 +2391,7 @@ if _TEXTUAL_AVAILABLE:
             # yet (race) — fall back to a neutral label.
             rc = self.proc.poll() if self.proc else None
             if terminal and tv:
-                status_text, status_style = _terminal_badge(tv, pr_number, quota_failure)
+                status_text, status_style = _terminal_badge(tv, pr_number, provider_failure)
             elif self.proc is None:
                 status_text, status_style = "attached", _PAL_TEXT
             elif rc is None:
@@ -2445,7 +2475,7 @@ if _TEXTUAL_AVAILABLE:
                     or (self.cli_reviewer if self.cli_reviewer in ("codex", "claude") else ""),
                     cli_review_verdict=cli_review_verdict,
                     cli_review_states=cli_review_states if cli_review_states else None,
-                    quota_failure=quota_failure,
+                    provider_failure=provider_failure,
                 )
             )
             rev_token = _persistent_review_token(phase=phase, review_cycles=review_cycles)

@@ -127,7 +127,20 @@ class RunConfig:
     allow_unlimited_openrouter_key: bool = False
     openrouter_key_url: str = "https://openrouter.ai/api/v1/key"
     agent_timeout_seconds: int = 1800
-    sim_timeout_seconds: int = 900
+    sim_timeout_seconds: int = 1500
+    # Kill an opencode subprocess if its stdout (raw event stream) has not
+    # grown for this many seconds. Catches the "silent agent" pathology
+    # where the model goes dark mid-turn and the process otherwise sits
+    # until the full {agent,sim}_timeout fires. Set to 0 to disable.
+    # Threshold sits above observed max inter-step gaps on healthy free-
+    # endpoint runs (~190s) with headroom.
+    opencode_stdout_stall_seconds: int = 300
+    # Re-invoke opencode this many times when a turn raises a transient
+    # provider error (e.g. upstream 5xx surfaced as `Provider returned
+    # error`). Quota errors, stalls, and wall-clock timeouts are NOT
+    # retried — those are terminal for the run. 0 disables retry.
+    opencode_transient_retry_max: int = 1
+    opencode_transient_retry_backoff_seconds: int = 30
     gh_repo: str | None = None
     pr_title: str | None = None
     pr_body: str | None = None

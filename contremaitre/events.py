@@ -81,6 +81,8 @@ WORKTREE_REMOVED = "worktree_removed"
 
 INFRA_FAILURE = "infra_failure"
 PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
+PROVIDER_TRANSIENT_ERROR = "provider_transient_error"
+PROVIDER_TRANSIENT_ERROR_RETRY = "provider_transient_error_retry"
 
 
 # ----- Recovery events (recoveries.jsonl, `kind` key) -----

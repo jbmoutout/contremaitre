@@ -207,7 +207,25 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--container-user", default=None, help="Optional docker --user value, e.g. $(id -u):$(id -g)")
     run_p.add_argument("--skip-preflight", action="store_true", help="Bypass operational preflight checks")
     run_p.add_argument("--agent-timeout-seconds", type=int, default=1800)
-    run_p.add_argument("--sim-timeout-seconds", type=int, default=900)
+    run_p.add_argument("--sim-timeout-seconds", type=int, default=1500)
+    run_p.add_argument(
+        "--opencode-stdout-stall-seconds",
+        type=int,
+        default=300,
+        help="Kill opencode if its stdout has not grown for this many seconds. 0 to disable.",
+    )
+    run_p.add_argument(
+        "--opencode-transient-retry-max",
+        type=int,
+        default=1,
+        help="Retry an opencode turn this many times on transient provider errors. 0 disables.",
+    )
+    run_p.add_argument(
+        "--opencode-transient-retry-backoff-seconds",
+        type=int,
+        default=30,
+        help="Sleep this many seconds before retrying after a transient provider error.",
+    )
     run_p.add_argument("--gh-repo", default=None, help="Optional owner/repo for gh pr create --repo")
     run_p.add_argument("--pr-title", default=None)
     run_p.add_argument("--pr-body", default=None)
@@ -1543,7 +1561,12 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         allow_unlimited_openrouter_key=args.allow_unlimited_openrouter_key,
         openrouter_key_url=args.openrouter_key_url,
         agent_timeout_seconds=getattr(args, "agent_timeout_seconds", 1800),
-        sim_timeout_seconds=getattr(args, "sim_timeout_seconds", 900),
+        sim_timeout_seconds=getattr(args, "sim_timeout_seconds", 1500),
+        opencode_stdout_stall_seconds=getattr(args, "opencode_stdout_stall_seconds", 300),
+        opencode_transient_retry_max=getattr(args, "opencode_transient_retry_max", 1),
+        opencode_transient_retry_backoff_seconds=getattr(
+            args, "opencode_transient_retry_backoff_seconds", 30
+        ),
         gh_repo=getattr(args, "gh_repo", None),
         pr_title=getattr(args, "pr_title", None),
         pr_body=getattr(args, "pr_body", None),

@@ -273,6 +273,66 @@ class OpencodeActorRunner:
         extra_mounts: list[tuple[Path, str, str]] | None = None,
         reviewer_id: str | None = None,
     ) -> ActorOutput:
+        # Retry wrapper: on a transient provider error (e.g. upstream 5xx
+        # surfaced as `Provider returned error`), kill the failed attempt
+        # and re-run the turn. Quota errors, stalls, and timeouts bypass
+        # this — those are terminal.
+        max_retries = self.config.opencode_transient_retry_max
+        backoff = self.config.opencode_transient_retry_backoff_seconds
+        attempt = 1
+        while True:
+            events_offset = _count_jsonl_events(raw_export)
+            try:
+                return self._opencode_turn_attempt(
+                    role=role,
+                    prompt=prompt,
+                    raw_export=raw_export,
+                    state_dir=state_dir,
+                    mount_mode=mount_mode,
+                    model=model,
+                    timeout_seconds=timeout_seconds,
+                    session_attr=session_attr,
+                    extra_mounts=extra_mounts,
+                    reviewer_id=reviewer_id,
+                    events_offset=events_offset,
+                )
+            except ActorError as exc:
+                if exc.kind != events.PROVIDER_TRANSIENT_ERROR:
+                    raise
+                if attempt > max_retries:
+                    raise ActorError(
+                        f"{exc} (after {max_retries} retries)",
+                        kind=exc.kind,
+                    )
+                append_jsonl(
+                    self.paths.guardrail_events,
+                    {
+                        "event": events.PROVIDER_TRANSIENT_ERROR_RETRY,
+                        "role": role,
+                        "model": model,
+                        "attempt": attempt,
+                        "backoff_seconds": backoff,
+                        "reason": str(exc),
+                    },
+                )
+                time.sleep(backoff)
+                attempt += 1
+
+    def _opencode_turn_attempt(
+        self,
+        *,
+        role: str,
+        prompt: str,
+        raw_export: Path,
+        state_dir: Path,
+        mount_mode: str,
+        model: str,
+        timeout_seconds: int,
+        session_attr: str | None,
+        extra_mounts: list[tuple[Path, str, str]] | None,
+        reviewer_id: str | None,
+        events_offset: int,
+    ) -> ActorOutput:
         pre_text_count = _count_text_events(raw_export)
         session_id = getattr(self, session_attr) if session_attr else None
         cmd, env = build_docker_command(
@@ -310,21 +370,30 @@ class OpencodeActorRunner:
             role=role,
             baseline_text_count=pre_text_count,
             state_dir=state_dir,
+            stdout_stall_seconds=self.config.opencode_stdout_stall_seconds or None,
+            events_offset=events_offset,
         )
         if fast_fail_reason is not None:
+            kind = _classify_fast_fail_marker(fast_fail_reason)
             append_jsonl(
                 self.paths.guardrail_events,
                 {
-                    "event": events.PROVIDER_QUOTA_EXHAUSTED,
+                    "event": kind,
                     "role": role,
                     "model": model,
                     "marker": fast_fail_reason,
                 },
             )
+            if kind == events.PROVIDER_QUOTA_EXHAUSTED:
+                raise ActorError(
+                    f"{role} opencode aborted early — provider quota exhausted "
+                    f"({fast_fail_reason}) on model {model}",
+                    kind=kind,
+                )
             raise ActorError(
-                f"{role} opencode aborted early — provider quota exhausted "
+                f"{role} opencode aborted early — transient provider error "
                 f"({fast_fail_reason}) on model {model}",
-                kind=events.PROVIDER_QUOTA_EXHAUSTED,
+                kind=kind,
             )
         if returncode != 0:
             raise ActorError(f"{role} opencode exited {returncode}: {stderr[:500]}")
@@ -336,22 +405,35 @@ class OpencodeActorRunner:
             # Provider/API error scoped to events emitted DURING this turn
             # (after pre_text_count). Avoids tripping on stale errors from
             # earlier turns left in the multi-turn stream.
-            error = _latest_error_after_text_count(raw_export, pre_text_count)
+            error = _latest_error_after_text_count(
+                raw_export, pre_text_count, events_offset=events_offset
+            )
             if error:
-                if any(marker in error for marker in _QUOTA_ERROR_MARKERS):
+                matched = next(
+                    (m for m in _FAST_FAIL_MARKERS if m in error),
+                    None,
+                )
+                if matched is not None:
+                    kind = _classify_fast_fail_marker(matched)
                     append_jsonl(
                         self.paths.guardrail_events,
                         {
-                            "event": events.PROVIDER_QUOTA_EXHAUSTED,
+                            "event": kind,
                             "role": role,
                             "model": model,
-                            "marker": "FreeUsageLimitError",
+                            "marker": matched,
                         },
                     )
+                    if kind == events.PROVIDER_QUOTA_EXHAUSTED:
+                        raise ActorError(
+                            f"{role} opencode emitted free-tier quota error on {model}: "
+                            f"{error[:300]}",
+                            kind=kind,
+                        )
                     raise ActorError(
-                        f"{role} opencode emitted free-tier quota error on {model}: "
+                        f"{role} opencode emitted transient provider error on {model}: "
                         f"{error[:300]}",
-                        kind=events.PROVIDER_QUOTA_EXHAUSTED,
+                        kind=kind,
                     )
                 raise ActorError(f"{role} opencode emitted error without text: {error[:500]}")
             # opencode silent-stall: the text part landed in opencode's sqlite
@@ -520,6 +602,8 @@ def _run_detached_container(
     role: str,
     baseline_text_count: int = 0,
     state_dir: Path | None = None,
+    stdout_stall_seconds: int | None = None,
+    events_offset: int = 0,
 ) -> tuple[int, str, str | None]:
     """Start the detached container, stream its logs, wait for exit.
 
@@ -565,6 +649,12 @@ def _run_detached_container(
             )
             deadline = time.monotonic() + timeout_seconds
             poll_interval = 2.0
+            # Stall detection: track when stdout_path last grew. If the
+            # subprocess streams nothing for stdout_stall_seconds we kill it
+            # instead of waiting for the full timeout — catches the silent
+            # mid-turn agent pathology.
+            stall_last_size = stdout_path.stat().st_size if stdout_path.exists() else 0
+            stall_last_growth_at = time.monotonic()
             try:
                 while True:
                     try:
@@ -584,8 +674,31 @@ def _run_detached_container(
                         except subprocess.TimeoutExpired:
                             wait_proc.kill()
                         raise ActorError(f"{role} opencode timed out after {timeout_seconds}s")
-                    fast_fail_reason = _detect_provider_quota_exhausted(
-                        stdout_path, baseline_text_count, state_dir=state_dir
+                    if stdout_stall_seconds is not None and stdout_path.exists():
+                        cur_size = stdout_path.stat().st_size
+                        if cur_size > stall_last_size:
+                            stall_last_size = cur_size
+                            stall_last_growth_at = time.monotonic()
+                        elif time.monotonic() - stall_last_growth_at > stdout_stall_seconds:
+                            subprocess.run(
+                                ["docker", "stop", "-t", "5", container_id],
+                                capture_output=True,
+                                timeout=15,
+                            )
+                            log_proc.kill()
+                            try:
+                                wait_proc.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                wait_proc.kill()
+                            raise ActorError(
+                                f"{role} opencode stdout stalled for {stdout_stall_seconds}s "
+                                f"(no event output)"
+                            )
+                    fast_fail_reason = _detect_provider_fast_fail(
+                        stdout_path,
+                        baseline_text_count,
+                        state_dir=state_dir,
+                        events_offset=events_offset,
                     )
                     if fast_fail_reason is not None:
                         subprocess.run(
@@ -616,12 +729,29 @@ def _run_detached_container(
 
 
 _QUOTA_ERROR_MARKERS = ("FreeUsageLimitError",)
+# Generic upstream-provider errors (5xx surfaced as a stream error). Distinct
+# from quota markers: retry MAY succeed on a different request, so the caller
+# raises a transient-error kind that a retry layer can catch.
+_PROVIDER_TRANSIENT_ERROR_MARKERS = ("Provider returned error",)
+_FAST_FAIL_MARKERS = _QUOTA_ERROR_MARKERS + _PROVIDER_TRANSIENT_ERROR_MARKERS
 
 
-def _detect_provider_quota_exhausted(
-    path: Path, baseline_text_count: int, *, state_dir: Path | None = None
+def _classify_fast_fail_marker(marker: str) -> str:
+    """Return the events.* kind for a marker matched by _detect_provider_fast_fail."""
+
+    if any(m in marker for m in _QUOTA_ERROR_MARKERS):
+        return events.PROVIDER_QUOTA_EXHAUSTED
+    return events.PROVIDER_TRANSIENT_ERROR
+
+
+def _detect_provider_fast_fail(
+    path: Path,
+    baseline_text_count: int,
+    *,
+    state_dir: Path | None = None,
+    events_offset: int = 0,
 ) -> str | None:
-    """Detect free-tier quota markers in two places per call.
+    """Detect fast-fail markers in two places per call.
 
     1. `path` (raw_export.jsonl) — error events opencode surfaced to stdout.
        Gated by `baseline_text_count` so a recovered transient burst from
@@ -630,18 +760,21 @@ def _detect_provider_quota_exhausted(
 
     2. `state_dir/log/*.log` (opencode's internal log; the latest file by
        mtime is this turn's). Catches errors opencode marks `isRetryable`
-       and silently retries — `FreeUsageLimitError` is the canonical case
-       (per-day/per-hour user quota; retry can't change the outcome but
-       opencode hammers until the docker timeout fires).
+       and silently retries — `FreeUsageLimitError` (quota; retry can't
+       help) and `Provider returned error` (generic upstream 5xx) are the
+       canonical cases. Without this, opencode hammers until the docker
+       timeout fires.
 
-    Returns a short tag suitable for logging, or None.
+    Returns the matched marker string (caller passes it to
+    `_classify_fast_fail_marker` to decide quota-vs-transient handling), or
+    None.
     """
 
     # Layer 1 — surfaced errors in the JSONL stream.
     if path.exists():
-        events = read_jsonl(path)
+        stream = read_jsonl(path)
         seen_text = 0
-        for event in events:
+        for i, event in enumerate(stream):
             if event.get("type") == "text":
                 seen_text += 1
                 if seen_text > baseline_text_count:
@@ -651,8 +784,14 @@ def _detect_provider_quota_exhausted(
                 continue
             if seen_text < baseline_text_count:
                 continue
+            if i < events_offset:
+                # Error came from an earlier retry attempt of this same
+                # turn — its outcome has already been handled. Ignore it
+                # so attempt N+1 can run without immediately re-detecting
+                # attempt N's failure.
+                continue
             serialized = json.dumps(event, sort_keys=True)
-            for marker in _QUOTA_ERROR_MARKERS:
+            for marker in _FAST_FAIL_MARKERS:
                 if marker in serialized:
                     return marker
 
@@ -666,7 +805,7 @@ def _detect_provider_quota_exhausted(
 
 
 def _scan_opencode_log_for_marker(state_dir: Path) -> str | None:
-    """Scan the latest opencode log file for any quota marker.
+    """Scan the latest opencode log file for any fast-fail marker.
 
     Each opencode container invocation creates a new log file at
     `state_dir/log/<ISO-timestamp>.log`. We pick the newest by mtime so a
@@ -690,7 +829,7 @@ def _scan_opencode_log_for_marker(state_dir: Path) -> str | None:
         text = latest.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    for marker in _QUOTA_ERROR_MARKERS:
+    for marker in _FAST_FAIL_MARKERS:
         if marker in text:
             return marker
     return None
@@ -707,6 +846,18 @@ def redact_command(cmd: list[str]) -> list[str]:
 
 def _count_text_events(path: Path) -> int:
     return sum(1 for event in read_jsonl(path) if event.get("type") == "text")
+
+
+def _count_jsonl_events(path: Path) -> int:
+    """Return the number of newline-delimited records in `path` (0 if absent)."""
+
+    if not path.exists():
+        return 0
+    try:
+        with path.open("rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
 
 
 def _latest_text(path: Path) -> str:
@@ -728,11 +879,16 @@ def _latest_session_id(path: Path) -> str | None:
     return None
 
 
-def _latest_error_after_text_count(path: Path, baseline_text_count: int) -> str | None:
+def _latest_error_after_text_count(
+    path: Path, baseline_text_count: int, *, events_offset: int = 0
+) -> str | None:
     """Return the latest error event that arrived AFTER the Nth text event.
 
     Multi-turn streams accumulate errors from old turns. When checking
     whether the *current* turn failed, ignore errors from prior turns.
+    `events_offset` further narrows the scan to events at or after a
+    given index — used by the retry wrapper so attempt N+1 does not pick
+    up attempt N's error from earlier in the same turn.
     """
 
     events = read_jsonl(path)
@@ -754,6 +910,7 @@ def _latest_error_after_text_count(path: Path, baseline_text_count: int) -> str 
             if seen_text >= baseline_text_count:
                 cutoff_idx = i + 1
                 break
+    cutoff_idx = max(cutoff_idx, events_offset)
     for event in reversed(events[cutoff_idx:]):
         if event.get("type") == "error":
             return json.dumps(event, sort_keys=True)

@@ -902,6 +902,25 @@ def test_terminal_badge_failed_infra():
     assert "FAILED" in text
 
 
+def test_terminal_badge_failed_infra_quota():
+    quota = {"kind": "quota", "role": "agent", "model": "x/y", "marker": "FreeUsageLimitError"}
+    text, _ = _terminal_badge("FAILED_INFRA", None, provider_failure=quota)
+    assert "quota" in text
+    assert "transient" not in text
+
+
+def test_terminal_badge_failed_infra_transient():
+    transient = {
+        "kind": "transient",
+        "role": "sim",
+        "model": "x/y",
+        "marker": "Provider returned error",
+    }
+    text, _ = _terminal_badge("FAILED_INFRA", None, provider_failure=transient)
+    assert "transient" in text
+    assert "quota" not in text
+
+
 # ===== _pr_number_from_url =====
 
 
