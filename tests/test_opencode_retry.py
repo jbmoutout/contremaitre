@@ -178,6 +178,7 @@ class LatestInternalLogSizeTest(unittest.TestCase):
         newer.write_text("y" * 42, encoding="utf-8")
         # Force older mtime to be in the past so max(...) picks newer.
         import os
+
         os.utime(older, (1, 1))
         self.assertEqual(_latest_internal_log_size(self.state_dir), 42)
 

@@ -686,12 +686,13 @@ def _run_detached_container(
                             wait_proc.kill()
                         raise ActorError(f"{role} opencode timed out after {timeout_seconds}s")
                     if stdout_stall_seconds is not None:
-                        cur_stdout = stdout_path.stat().st_size if stdout_path.exists() else stall_last_stdout
-                        cur_internal = _latest_internal_log_size(state_dir)
-                        grew = (
-                            cur_stdout > stall_last_stdout
-                            or cur_internal > stall_last_internal
+                        cur_stdout = (
+                            stdout_path.stat().st_size
+                            if stdout_path.exists()
+                            else stall_last_stdout
                         )
+                        cur_internal = _latest_internal_log_size(state_dir)
+                        grew = cur_stdout > stall_last_stdout or cur_internal > stall_last_internal
                         if grew:
                             stall_last_stdout = cur_stdout
                             stall_last_internal = cur_internal
