@@ -725,6 +725,19 @@ def _run_detached_container(
             stderr_bytes = log_proc.stderr.read() if log_proc.stderr else b""
             wait_stdout = wait_proc.stdout.read() if wait_proc.stdout else ""
         returncode = int((wait_stdout or "").strip() or "1")
+        # Final fast-fail scan: opencode can write a stream error to its
+        # internal log then exit cleanly (returncode 0) within one poll
+        # interval, so the in-loop detector may not have had a chance to
+        # fire on the post-error state. The detector's "new text landed
+        # after baseline → return None" gate keeps a successful turn from
+        # tripping on a recovered-from internal retry marker.
+        if fast_fail_reason is None:
+            fast_fail_reason = _detect_provider_fast_fail(
+                stdout_path,
+                baseline_text_count,
+                state_dir=state_dir,
+                events_offset=events_offset,
+            )
         return returncode, stderr_bytes.decode("utf-8", errors="replace"), fast_fail_reason
     finally:
         subprocess.run(
