@@ -290,6 +290,23 @@ class RetryWrapperTest(unittest.TestCase):
             session_attr=None,
         )
 
+    def test_stall_retries_and_succeeds(self) -> None:
+        # Mirrors `test_transient_error_retries_and_succeeds` but for the
+        # dual-signal stall kind: same wrapper, different retryable kind.
+        success = ActorOutput(text="ok", stderr="", returncode=0)
+        calls = self._replace_attempt(
+            [
+                ActorError(
+                    "sim opencode stalled for 300s (no stdout or internal-log activity)",
+                    kind=events.OPENCODE_STALL,
+                ),
+                success,
+            ]
+        )
+        result = self._invoke()
+        self.assertEqual(result.text, "ok")
+        self.assertEqual(calls, [1, 2])
+
     def test_transient_error_retries_and_succeeds(self) -> None:
         success = ActorOutput(text="ok", stderr="", returncode=0)
         calls = self._replace_attempt(

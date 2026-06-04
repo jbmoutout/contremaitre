@@ -281,10 +281,12 @@ class OpencodeActorRunner:
         extra_mounts: list[tuple[Path, str, str]] | None = None,
         reviewer_id: str | None = None,
     ) -> ActorOutput:
-        # Retry wrapper: on a transient provider error (e.g. upstream 5xx
-        # surfaced as `Provider returned error`), kill the failed attempt
-        # and re-run the turn. Quota errors, stalls, and timeouts bypass
-        # this — those are terminal.
+        # Retry wrapper: on transient upstream symptoms (a provider error
+        # surfaced into the stream, or a dual-signal stdout+log stall),
+        # kill the failed attempt and re-run the turn. Quota errors,
+        # wall-clock timeouts, and bare `exited N` failures bypass this
+        # — those are terminal.
+        retryable_kinds = (events.PROVIDER_TRANSIENT_ERROR, events.OPENCODE_STALL)
         max_retries = self.config.opencode_transient_retry_max
         backoff = self.config.opencode_transient_retry_backoff_seconds
         attempt = 1
@@ -305,7 +307,7 @@ class OpencodeActorRunner:
                     events_offset=events_offset,
                 )
             except ActorError as exc:
-                if exc.kind != events.PROVIDER_TRANSIENT_ERROR:
+                if exc.kind not in retryable_kinds:
                     raise
                 if attempt > max_retries:
                     raise ActorError(
@@ -710,7 +712,8 @@ def _run_detached_container(
                                 wait_proc.kill()
                             raise ActorError(
                                 f"{role} opencode stalled for {stdout_stall_seconds}s "
-                                f"(no stdout or internal-log activity)"
+                                f"(no stdout or internal-log activity)",
+                                kind=events.OPENCODE_STALL,
                             )
                     fast_fail_reason = _detect_provider_fast_fail(
                         stdout_path,
