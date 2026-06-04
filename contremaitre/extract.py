@@ -1,14 +1,15 @@
 """Post-run extractor for agent/SIM JSONL streams.
 
-Reads `raw_export.jsonl` and `sim_raw_export.jsonl` and produces:
+Reads ``raw_export.jsonl`` and ``sim_raw_export.jsonl`` (via the shared
+``event_stream`` module) and produces:
 
-  - `subagents/agent_<NN>_<slug>.md` — one file per `task` tool_use, with
+  - ``subagents/agent_<NN>_<slug>.md`` — one file per ``task`` tool_use, with
     the subagent's prompt + output + status + subagent_type.
-  - `extracted_files/<host_name>` — every file the agent wrote via `write`,
-    `edit`, or `apply_patch`. Edits accumulate in `<host_name>.edits.md`.
+  - ``extracted_files/<host_name>`` — every file the agent wrote via ``write``,
+    ``edit``, or ``apply_patch``. Edits accumulate in ``<host_name>.edits.md``.
   - Counts/sizes in the return value for the orchestrator's stats.json.
 
-Called from the orchestrator's `finally` so artifacts land even on failure.
+Called from the orchestrator's ``finally`` so artifacts land even on failure.
 The orchestrator owns git/worktree; this module only reads JSONL.
 """
 
@@ -17,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .jsonlog import read_jsonl
+from .event_stream import parse_events
 from .models import RunPaths
 
 
@@ -68,40 +69,36 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
     Returns counts suitable for inclusion in stats.json.
     """
 
-    events = read_jsonl(paths.raw_export) + read_jsonl(paths.sim_raw_export)
+    agent_tool_calls = parse_events(paths.raw_export).tool_calls
+    sim_tool_calls = parse_events(paths.sim_raw_export).tool_calls
+    tool_calls = agent_tool_calls + sim_tool_calls
 
     paths.extracted_files_dir.mkdir(parents=True, exist_ok=True)
     paths.subagents_dir.mkdir(parents=True, exist_ok=True)
 
     written: list[dict[str, Any]] = []
-    for event in events:
-        if event.get("type") != "tool_use":
+    for tc in tool_calls:
+        if tc.tool not in ("write", "edit", "apply_patch"):
             continue
-        part = event.get("part") or {}
-        tool = part.get("tool")
-        if tool not in ("write", "edit", "apply_patch"):
-            continue
-        state = part.get("state") or {}
-        input_ = state.get("input") or {}
-        if tool == "write":
-            fp = input_.get("filePath") or input_.get("path")
+        if tc.tool == "write":
+            fp = tc.file_path
             if not fp:
                 continue
-            content = input_.get("content") or ""
+            content = tc.content or ""
             out = paths.extracted_files_dir / _host_name(fp)
             out.write_text(content, encoding="utf-8")
             written.append(
-                {"original_path": fp, "host_file": str(out), "len": len(content), "tool": tool}
+                {"original_path": fp, "host_file": str(out), "len": len(content), "tool": "write"}
             )
-        elif tool == "edit":
-            fp = input_.get("filePath") or input_.get("path")
+        elif tc.tool == "edit":
+            fp = tc.file_path
             if not fp:
                 continue
-            old_s = input_.get("oldString") or ""
-            new_s = input_.get("newString") or ""
+            old_s = tc.old_string or ""
+            new_s = tc.new_string or ""
             out = paths.extracted_files_dir / f"{_host_name(fp)}.edits.md"
             block = (
-                "\n---\n## edit (oldString → newString)\n\n"
+                "\n---\n## edit (oldString -> newString)\n\n"
                 f"### old\n```\n{old_s}\n```\n\n"
                 f"### new\n```\n{new_s}\n```\n"
             )
@@ -113,11 +110,11 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
                     "host_file": str(out),
                     "len": len(new_s),
                     "old_len": len(old_s),
-                    "tool": tool,
+                    "tool": "edit",
                 }
             )
         else:  # apply_patch
-            patch_text = input_.get("patchText") or input_.get("patch") or ""
+            patch_text = tc.patch_text or ""
             for op, fp, body in parse_apply_patch(patch_text):
                 if op == "Add":
                     out = paths.extracted_files_dir / _host_name(fp)
@@ -127,7 +124,7 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
                             "original_path": fp,
                             "host_file": str(out),
                             "len": len(body),
-                            "tool": f"{tool}:Add",
+                            "tool": "apply_patch:Add",
                         }
                     )
                 elif op == "Update":
@@ -139,30 +136,30 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
                             "original_path": fp,
                             "host_file": str(out),
                             "len": len(body),
-                            "tool": f"{tool}:Update",
+                            "tool": "apply_patch:Update",
                         }
                     )
                 else:  # Delete
                     written.append(
-                        {"original_path": fp, "host_file": None, "len": 0, "tool": f"{tool}:Delete"}
+                        {
+                            "original_path": fp,
+                            "host_file": None,
+                            "len": 0,
+                            "tool": "apply_patch:Delete",
+                        }
                     )
 
     subagents: list[dict[str, Any]] = []
     n = 0
-    for event in events:
-        if event.get("type") != "tool_use":
-            continue
-        part = event.get("part") or {}
-        if part.get("tool") != "task":
+    for tc in tool_calls:
+        if tc.tool != "task":
             continue
         n += 1
-        state = part.get("state") or {}
-        input_ = state.get("input") or {}
-        desc = input_.get("description") or f"task_{n}"
-        prompt = input_.get("prompt") or ""
-        subagent_type = input_.get("subagent_type") or ""
-        output = state.get("output") or ""
-        status = state.get("status") or ""
+        desc = tc.description or f"task_{n}"
+        prompt = tc.prompt or ""
+        subagent_type = tc.subagent_type or ""
+        output = tc.output or ""
+        status = tc.status or ""
         slug = slugify(desc)
         fname = paths.subagents_dir / f"agent_{n:02d}_{slug}.md"
         body = "\n".join(
@@ -199,7 +196,7 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
             }
         )
 
-    # Belt-and-suspenders: capture everything in the worktree's `.contremaitre/`
+    # Belt-and-suspenders: capture everything in the worktree's ``.contremaitre/``
     # directory directly. The event-based scan above only catches files written
     # via opencode's write/edit/apply_patch tools; files written via bash
     # heredoc (the skill's architecture-review HTML report is the classic
