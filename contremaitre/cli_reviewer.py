@@ -16,6 +16,13 @@ Boundaries:
   - Comment posting shells out to `gh pr comment <url> --body-file <path>`.
     Any failure is logged but does NOT raise — the PR is already published
     and a missed review comment is recoverable by the human reviewer.
+  - The worst-of-N verdict is also projected onto a GitHub commit status on
+    the published HEAD (`gh api .../statuses/{sha}`, context
+    `contremaitre/cli-review`): MUST_FIX → failure, else success. This puts a
+    ✓/✗ in the PR's merge box so a draft that earned MUST_FIX is glanceably
+    dead instead of silently rotting. PAT-viable (unlike the App-only Checks
+    API). Informational until the operator requires the context in branch
+    protection, which then gates merge. Best-effort, same as comment posting.
 """
 
 from __future__ import annotations
@@ -505,6 +512,144 @@ def parse_verdict(markdown: str) -> str | None:
             if key in line:
                 return key
     return None
+
+
+# ---------- commit-status projection ----------
+#
+# The cli_review verdict is otherwise only visible as line 1 of a PR comment
+# (easy to miss in a long conversation) and as a run-local TUI glyph. Projecting
+# it onto a GitHub *commit status* puts a ✓/✗ in the PR's merge box, so a draft
+# that earned MUST_FIX is glanceably dead instead of silently rotting.
+#
+# The status is purely informational UNTIL the operator requires the context in
+# branch protection — at which point a MUST_FIX `failure` actually gates merge.
+# That makes GitHub branch protection the on/off switch; contremaitre always
+# reports, the repo decides whether the report blocks.
+
+# Stable context string so branch protection can require exactly this check.
+CLI_REVIEW_STATUS_CONTEXT = "contremaitre/cli-review"
+
+# Severity order: a higher rank is a worse verdict. Used for worst-of-N across
+# multiple reviewers (`cli_reviewer="both"`) — any MUST_FIX wins.
+_VERDICT_RANK = {"LOOKS_GOOD": 0, "NEEDS_ATTENTION": 1, "MUST_FIX": 2}
+
+
+def worst_verdict(verdicts: list[str | None]) -> str | None:
+    """Return the highest-severity verdict among `verdicts`.
+
+    Ignores `None` (a reviewer that failed or produced an unparseable
+    verdict). Returns `None` only when nothing parseable is present.
+    `MUST_FIX` > `NEEDS_ATTENTION` > `LOOKS_GOOD`.
+    """
+
+    ranked = [v for v in verdicts if v in _VERDICT_RANK]
+    if not ranked:
+        return None
+    return max(ranked, key=lambda v: _VERDICT_RANK[v])
+
+
+def verdict_commit_state(verdict: str | None) -> str:
+    """Map a verdict to a GitHub commit-status `state`.
+
+    Only `MUST_FIX` blocks (`failure`). `NEEDS_ATTENTION` is non-blocking by
+    definition, `LOOKS_GOOD` is clean, and an unparseable/missing verdict
+    (`None`) passes too — we never deadlock a required check on a reviewer
+    that crashed or drifted from the format. The nuance for the non-failure
+    cases lives in the status `description`, not the state.
+    """
+
+    return "failure" if verdict == "MUST_FIX" else "success"
+
+
+def _owner_repo_from_url(pr_url: str) -> str | None:
+    """Extract `owner/repo` from a GitHub PR URL.
+
+    `https://github.com/OWNER/REPO/pull/N` → `"OWNER/REPO"`. Returns `None`
+    if the URL doesn't have the expected shape (the caller then skips the
+    status — best-effort, like every other cli_review side effect).
+    """
+
+    marker = "github.com/"
+    idx = pr_url.find(marker)
+    if idx == -1:
+        return None
+    tail = pr_url[idx + len(marker) :].strip("/")
+    parts = tail.split("/")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
+def post_commit_status(
+    *,
+    pr_url: str,
+    sha: str,
+    verdict: str | None,
+    description: str,
+    git_log: Path,
+    target_url: str | None = None,
+) -> tuple[bool, str]:
+    """Publish a commit status reflecting the cli_review verdict.
+
+    Uses `gh api .../statuses/{sha}` (POST is implied by the `-f` fields),
+    which a plain PAT with repo scope can do — unlike the Checks API, which
+    needs a GitHub App. Best-effort: logs the command + outcome into
+    `git_log` and returns `(success, message)`; never raises, since the PR
+    is already published and a missed status is recoverable.
+    """
+
+    owner_repo = _owner_repo_from_url(pr_url)
+    if owner_repo is None:
+        return False, f"could not derive owner/repo from {pr_url!r}"
+
+    state = verdict_commit_state(verdict)
+    cmd = [
+        "gh",
+        "api",
+        f"repos/{owner_repo}/statuses/{sha}",
+        "-f",
+        f"state={state}",
+        "-f",
+        f"context={CLI_REVIEW_STATUS_CONTEXT}",
+        # GitHub caps the status description at 140 chars.
+        "-f",
+        f"description={description[:140]}",
+    ]
+    if target_url:
+        cmd.extend(["-f", f"target_url={target_url}"])
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=os.environ.copy(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        append_jsonl(
+            git_log,
+            {
+                "cmd": cmd,
+                "returncode": None,
+                "stdout": "",
+                "stderr": str(exc),
+                "publisher": "cli_reviewer",
+            },
+        )
+        return False, str(exc)
+    append_jsonl(
+        git_log,
+        {
+            "cmd": cmd,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout[-4000:],
+            "stderr": proc.stderr[-4000:],
+            "publisher": "cli_reviewer",
+        },
+    )
+    if proc.returncode != 0:
+        return False, proc.stderr.strip() or f"exit {proc.returncode}"
+    return True, state
 
 
 def extract_model(tool: str, jsonl_path: Path) -> str | None:

@@ -72,6 +72,8 @@ PUBLISHED = "published"
 CLI_REVIEW_STARTED = "cli_review_started"
 CLI_REVIEW_COMPLETED = "cli_review_completed"
 CLI_REVIEW_FAILED = "cli_review_failed"
+# Worst-of-N verdict projected onto a GitHub commit status on the published HEAD.
+CLI_REVIEW_STATUS = "cli_review_status"
 
 # ----- Cleanup -----
 

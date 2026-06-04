@@ -575,7 +575,7 @@ class Orchestrator:
         tool: str,
         outcome: PublishOutcome,
         approved_hash: str,
-    ) -> None:
+    ) -> str | None:
         """Run `claude -p` / `codex exec` against the PR, post the result.
 
         Streams subprocess stdout into `<tool>_review_raw_export.jsonl` so
@@ -658,6 +658,58 @@ class Orchestrator:
             review_chars=len(result.markdown),
             approved_hash=approved_hash,
             verdict=verdict,
+        )
+        return verdict
+
+    def _post_cli_review_status(
+        self,
+        *,
+        worktree_git: GitRepo,
+        outcome: PublishOutcome,
+        verdicts: list[tuple[str, str | None]],
+    ) -> None:
+        """Project the cli_review verdict onto a GitHub commit status.
+
+        Posts exactly one status per run on the published HEAD, using the
+        worst verdict across all reviewers (`both` → any MUST_FIX wins). The
+        status is informational until the operator requires the
+        `contremaitre/cli-review` context in branch protection, at which
+        point a MUST_FIX `failure` gates merge. Best-effort: a failure here
+        never disturbs the already-published PR.
+        """
+
+        from . import cli_reviewer as _cli_reviewer
+
+        worst = _cli_reviewer.worst_verdict([v for _, v in verdicts])
+        if worst is None:
+            # No reviewer produced a parseable verdict (all failed/drifted).
+            # Skip rather than post a misleading success — branch protection
+            # treats a never-posted context as not-applicable for this SHA.
+            return
+        try:
+            sha = worktree_git.output("rev-parse", "HEAD").strip()
+        except Exception:
+            return
+        # e.g. "claude MUST_FIX · codex LOOKS_GOOD" — the per-tool split, so
+        # the merge box shows which reviewer objected even though the state
+        # is worst-of-N.
+        description = " · ".join(f"{tool} {v or 'unparsed'}" for tool, v in verdicts)
+        posted, message = _cli_reviewer.post_commit_status(
+            pr_url=outcome.url,
+            sha=sha,
+            verdict=worst,
+            description=description,
+            git_log=self.paths.git_log,
+            target_url=outcome.url,
+        )
+        self._emit(
+            events.CLI_REVIEW_STATUS,
+            url=outcome.url,
+            sha=sha,
+            verdict=worst,
+            state=message if posted else None,
+            posted=posted,
+            reason=None if posted else message,
         )
 
     # ----- publication gate -----
@@ -757,9 +809,17 @@ class Orchestrator:
         # PR comment via its own JSONL sink.
         from . import cli_reviewer as _cli_reviewer
 
+        verdicts: list[tuple[str, str | None]] = []
         for tool in _cli_reviewer.expand_choice(self.config.cli_reviewer):
             if outcome.url:
-                self._run_cli_review(tool=tool, outcome=outcome, approved_hash=approved_hash)
+                verdict = self._run_cli_review(
+                    tool=tool, outcome=outcome, approved_hash=approved_hash
+                )
+                verdicts.append((tool, verdict))
+        if outcome.url and verdicts:
+            self._post_cli_review_status(
+                worktree_git=worktree_git, outcome=outcome, verdicts=verdicts
+            )
         self._write_final_stats(State.APPROVED, TerminalVerdict.READY_FOR_DRAFT_PR, outcome.reason)
         return RunResult(
             run_id=self.run_id,

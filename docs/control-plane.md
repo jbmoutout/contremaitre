@@ -181,12 +181,19 @@ POST-PUBLISH CLI REVIEW  (only when --cli-reviewer != none)
            in the subprocess env (forces OAuth subscription, never billed API)
     - timeout: 600s per tool
     - post: `gh pr comment <pr_url> --body-file <tool>_review.md`
+    - status: after all tools run, the worst-of-N verdict is projected onto a
+        GitHub commit status on the published HEAD via
+        `gh api .../statuses/{sha}` (context `contremaitre/cli-review`).
+        MUST_FIX → state=failure; everything else → success. PAT-viable (the
+        Checks API would need a GitHub App). Informational until the operator
+        requires the context in branch protection, which then gates merge.
     - failures: logged, NEVER block the run — the PR is already published
 
   Verdict glyph (parsed from line 1 of the review):
-    🟢 LOOKS_GOOD   → 1.0    cli_review_score
-    🟠 NEEDS_ATTENTION → 0.5
-    🔴 MUST_FIX     → 0.0
+    🟢 LOOKS_GOOD   → 1.0    cli_review_score   → status success
+    🟠 NEEDS_ATTENTION → 0.5                     → status success
+    🔴 MUST_FIX     → 0.0                        → status failure (gates merge
+                                                   if context is required)
 ```
 
 ## State machine reference
@@ -292,7 +299,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`checks.py`](../contremaitre/checks.py) — `--check-cmd` runner. OPENCODE mode: sidecar container with the run's worktree + deps volume, 600s timeout. FAKE mode: runs on the host.
 - [`cli.py`](../contremaitre/cli.py) — argparse, subcommand dispatch, auto-derived clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/`, launch-screen banners + pickers, image staleness rebuild (compares `contremaitre.dockerfile-sha256` label).
 - [`cli_review_extra.py`](../contremaitre/cli_review_extra.py) — utility for re-judging a finished run with a different CLI reviewer.
-- [`cli_reviewer.py`](../contremaitre/cli_reviewer.py) — post-publish CLI reviewer: detection, prompt assembly, `claude` / `codex` subprocess, API-key scrubbing, `gh pr comment` posting, verdict + model extraction, H3 metadata header.
+- [`cli_reviewer.py`](../contremaitre/cli_reviewer.py) — post-publish CLI reviewer: detection, prompt assembly, `claude` / `codex` subprocess, API-key scrubbing, `gh pr comment` posting, verdict + model extraction, H3 metadata header, worst-of-N verdict → `gh api` commit-status projection (context `contremaitre/cli-review`).
 - [`costs.py`](../contremaitre/costs.py) — recorded-cost extraction from JSONL streams; provider-side limits remain the real guardrail.
 - [`defaults.py`](../contremaitre/defaults.py) — operator picker prefills from `.contremaitre/defaults.toml` (cwd-local) or XDG fallback. Hand-edited TOML; missing or malformed → empty defaults.
 - [`diffscan.py`](../contremaitre/diffscan.py) — deterministic forbidden-path scanner against the working diff.
@@ -309,7 +316,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`manifest.py`](../contremaitre/manifest.py) — provenance manifest: model IDs, image digest, dockerfile-sha256, skills-lock hash, prompt hashes, contremaitre git SHA + dirty flag, python + contremaitre versions. Tolerates missing tools (returns `None`, never raises). `manifest_digest()` hashes the fields that define "the system under test".
 - [`model_family.py`](../contremaitre/model_family.py) — coarse family classification (deepseek / qwen / glm / anthropic / openai / nemotron / minimax / etc.) for picker suggestions and TUI labels.
 - [`models.py`](../contremaitre/models.py) — `State`, `ReviewVerdict`, `CliReviewVerdict`, `TerminalVerdict`, `ActorMode`, `PublishMode` enums; `RunConfig`, `RunPaths`, `Caps`, `DepsVolume`, `ParsedVerdict`, `RunResult` dataclasses. The stable seam between CLI, orchestrator, and actors.
-- [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook.
+- [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
 - [`paths.py`](../contremaitre/paths.py) — slug validation, run-id generation, contained-path builder (prevents escape outside `run_dir`).
 - [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode runs (see above).
 - [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
@@ -343,7 +350,7 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 - `test_runs.jsonl` — `--check-cmd` results
 - `review_cycles.jsonl` — one entry per review round
 - `worktree_state.jsonl` — git-status snapshots
-- `guardrail_events.jsonl` — per-turn lifecycle + `check_started`/`_completed`, `host_commit_created`, `review_verdict`, `hard_gates_checked`, `published`/`publication_blocked`, `cli_review_started`/`_completed`/`_failed`, `worktree_removed`
+- `guardrail_events.jsonl` — per-turn lifecycle + `check_started`/`_completed`, `host_commit_created`, `review_verdict`, `hard_gates_checked`, `published`/`publication_blocked`, `cli_review_started`/`_completed`/`_failed`/`_status`, `worktree_removed`
 - `recoveries.jsonl` — sqlite-recovery / SIGTERM-emergency events
 - `pr.json` — publication outcome
 

@@ -54,7 +54,7 @@ The launcher takes the same flags whether you call `just tui-run …` or `python
 - `--fork git@github.com:<you>/<repo>.git` *(required for real PRs)* — push remote for the run branch.
 - `--upstream …` + `--gh-repo <owner>/<repo>` — when `--fork` is *your* fork and you want the PR opened on the upstream repo.
 - `--agent-model` / `--sim-model` — OpenRouter model slug, or an OpenCode Zen model. Omit to pick interactively.
-- `--cli-reviewer auto|codex|claude|both|none` — after the draft PR opens, run a code review on your host via `claude -p` or `codex exec` and post the result as a PR comment. Uses your Claude Pro/Max or ChatGPT Plus subscription (NOT API). `auto` detects what's installed; `both` runs claude then codex (two comments); `none` skips.
+- `--cli-reviewer auto|codex|claude|both|none` — after the draft PR opens, run a code review on your host via `claude -p` or `codex exec` and post the result as a PR comment. Uses your Claude Pro/Max or ChatGPT Plus subscription (NOT API). `auto` detects what's installed; `both` runs claude then codex (two comments); `none` skips. Also posts a commit status (context `contremaitre/cli-review`): worst verdict `MUST_FIX` → `failure`, else `success` — require the context in branch protection to gate merge on it.
 - `--check-cmd "<command>"` *(repeatable)* — fast deterministic check the post-implementation worktree must pass before publishing (e.g. `"npx tsc --noEmit"`, `"uv run pytest -q"`).
 - `--publish-mode stub|gh` — `stub` (default) is a full dry-run with no `git push` or `gh pr create`; `gh` opens the draft PR.
 - `--max-turns 30` / `--max-wall-minutes 180` / `--max-cost-usd 30` — per-run budgets; the orchestrator aborts cleanly on cap.

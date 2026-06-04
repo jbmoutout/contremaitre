@@ -570,6 +570,135 @@ class PostCommentTest(unittest.TestCase):
             self.assertIn("auth failed", msg)
 
 
+class WorstVerdictTest(unittest.TestCase):
+    def test_empty_is_none(self):
+        self.assertIsNone(cli_reviewer.worst_verdict([]))
+
+    def test_all_none_is_none(self):
+        # Every reviewer failed/drifted — nothing to project.
+        self.assertIsNone(cli_reviewer.worst_verdict([None, None]))
+
+    def test_single(self):
+        self.assertEqual(cli_reviewer.worst_verdict(["LOOKS_GOOD"]), "LOOKS_GOOD")
+
+    def test_must_fix_beats_looks_good(self):
+        # `both`: one reviewer clean, one blocking → the block wins.
+        self.assertEqual(cli_reviewer.worst_verdict(["LOOKS_GOOD", "MUST_FIX"]), "MUST_FIX")
+
+    def test_needs_attention_beats_looks_good(self):
+        self.assertEqual(
+            cli_reviewer.worst_verdict(["NEEDS_ATTENTION", "LOOKS_GOOD"]),
+            "NEEDS_ATTENTION",
+        )
+
+    def test_ignores_none_among_real(self):
+        self.assertEqual(cli_reviewer.worst_verdict([None, "MUST_FIX"]), "MUST_FIX")
+
+
+class VerdictCommitStateTest(unittest.TestCase):
+    def test_must_fix_blocks(self):
+        self.assertEqual(cli_reviewer.verdict_commit_state("MUST_FIX"), "failure")
+
+    def test_needs_attention_passes(self):
+        # Non-blocking by definition — must not gate merge.
+        self.assertEqual(cli_reviewer.verdict_commit_state("NEEDS_ATTENTION"), "success")
+
+    def test_looks_good_passes(self):
+        self.assertEqual(cli_reviewer.verdict_commit_state("LOOKS_GOOD"), "success")
+
+    def test_none_passes(self):
+        # An unparseable verdict must never deadlock a required check.
+        self.assertEqual(cli_reviewer.verdict_commit_state(None), "success")
+
+
+class OwnerRepoFromUrlTest(unittest.TestCase):
+    def test_extracts_owner_repo(self):
+        self.assertEqual(
+            cli_reviewer._owner_repo_from_url("https://github.com/octo/widget/pull/42"),
+            "octo/widget",
+        )
+
+    def test_rejects_non_github(self):
+        self.assertIsNone(cli_reviewer._owner_repo_from_url("https://example.com/x/y"))
+
+    def test_rejects_incomplete(self):
+        self.assertIsNone(cli_reviewer._owner_repo_from_url("https://github.com/octo"))
+
+
+class PostCommitStatusTest(unittest.TestCase):
+    def test_must_fix_posts_failure_state(self):
+        with TemporaryDirectory() as td:
+            log = Path(td) / "git_log.jsonl"
+            fake_proc = mock.Mock(returncode=0, stdout="{}", stderr="")
+            with mock.patch("subprocess.run", return_value=fake_proc) as srun:
+                ok, state = cli_reviewer.post_commit_status(
+                    pr_url="https://github.com/x/y/pull/1",
+                    sha="deadbeef",
+                    verdict="MUST_FIX",
+                    description="claude MUST_FIX",
+                    git_log=log,
+                    target_url="https://github.com/x/y/pull/1",
+                )
+            self.assertTrue(ok)
+            self.assertEqual(state, "failure")
+            # Lock the gh-api shape: a PAT-viable statuses POST on the right
+            # SHA, with the stable context branch protection keys on.
+            cmd = srun.call_args.args[0]
+            self.assertEqual(cmd[:2], ["gh", "api"])
+            self.assertIn("repos/x/y/statuses/deadbeef", cmd)
+            self.assertIn("state=failure", cmd)
+            self.assertIn(f"context={cli_reviewer.CLI_REVIEW_STATUS_CONTEXT}", cmd)
+            self.assertIn("target_url=https://github.com/x/y/pull/1", cmd)
+            entries = [json.loads(ln) for ln in log.read_text().splitlines() if ln.strip()]
+            self.assertEqual(entries[0]["publisher"], "cli_reviewer")
+
+    def test_looks_good_posts_success_state(self):
+        with TemporaryDirectory() as td:
+            log = Path(td) / "git_log.jsonl"
+            fake_proc = mock.Mock(returncode=0, stdout="{}", stderr="")
+            with mock.patch("subprocess.run", return_value=fake_proc) as srun:
+                ok, state = cli_reviewer.post_commit_status(
+                    pr_url="https://github.com/x/y/pull/1",
+                    sha="cafe",
+                    verdict="LOOKS_GOOD",
+                    description="claude LOOKS_GOOD",
+                    git_log=log,
+                )
+            self.assertTrue(ok)
+            self.assertEqual(state, "success")
+            self.assertIn("state=success", srun.call_args.args[0])
+
+    def test_bad_url_returns_false_without_calling_gh(self):
+        with TemporaryDirectory() as td:
+            log = Path(td) / "git_log.jsonl"
+            with mock.patch("subprocess.run") as srun:
+                ok, _ = cli_reviewer.post_commit_status(
+                    pr_url="https://example.com/nope",
+                    sha="cafe",
+                    verdict="MUST_FIX",
+                    description="x",
+                    git_log=log,
+                )
+            self.assertFalse(ok)
+            srun.assert_not_called()
+
+    def test_description_truncated_to_github_limit(self):
+        with TemporaryDirectory() as td:
+            log = Path(td) / "git_log.jsonl"
+            fake_proc = mock.Mock(returncode=0, stdout="{}", stderr="")
+            with mock.patch("subprocess.run", return_value=fake_proc) as srun:
+                cli_reviewer.post_commit_status(
+                    pr_url="https://github.com/x/y/pull/1",
+                    sha="cafe",
+                    verdict="LOOKS_GOOD",
+                    description="z" * 500,
+                    git_log=log,
+                )
+            cmd = srun.call_args.args[0]
+            desc_arg = next(c for c in cmd if c.startswith("description="))
+            self.assertLessEqual(len(desc_arg[len("description=") :]), 140)
+
+
 class ParseVerdictTest(unittest.TestCase):
     """Verdict key drives the TUI footer color — must reflect what the
     agent wrote (line 1 per the prompt), not the subprocess exit code."""
