@@ -763,7 +763,15 @@ _QUOTA_ERROR_MARKERS = ("FreeUsageLimitError",)
 # Generic upstream-provider errors (5xx surfaced as a stream error). Distinct
 # from quota markers: retry MAY succeed on a different request, so the caller
 # raises a transient-error kind that a retry layer can catch.
-_PROVIDER_TRANSIENT_ERROR_MARKERS = ("Provider returned error",)
+# Known transient upstream-error messages. Opencode wraps them in its
+# `{name: "UnknownError", data: {message: ...}}` envelope and surfaces
+# them either as `{type: error}` events in raw_export.jsonl or as ERROR
+# lines in its internal log. Substring match against the serialized
+# error keeps it cheap; add new strings here as new variants surface.
+_PROVIDER_TRANSIENT_ERROR_MARKERS = (
+    "Provider returned error",
+    "Upstream idle timeout exceeded",
+)
 _FAST_FAIL_MARKERS = _QUOTA_ERROR_MARKERS + _PROVIDER_TRANSIENT_ERROR_MARKERS
 
 

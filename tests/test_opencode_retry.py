@@ -81,6 +81,28 @@ class FastFailDetectorTest(unittest.TestCase):
             events.PROVIDER_TRANSIENT_ERROR,
         )
 
+    def test_upstream_idle_timeout_marker_detected(self) -> None:
+        # Opencode wraps generic upstream errors in `{name: "UnknownError",
+        # data: {message: "..."}}` — observed in run 20260604-173438.
+        _write_jsonl(
+            self.stream,
+            [
+                {
+                    "type": "error",
+                    "error": {
+                        "name": "UnknownError",
+                        "data": {"message": '"Upstream idle timeout exceeded"'},
+                    },
+                },
+            ],
+        )
+        marker = _detect_provider_fast_fail(self.stream, 0, state_dir=self.state_dir)
+        self.assertEqual(marker, "Upstream idle timeout exceeded")
+        self.assertEqual(
+            _classify_fast_fail_marker(marker),
+            events.PROVIDER_TRANSIENT_ERROR,
+        )
+
     def test_marker_in_internal_log_detected(self) -> None:
         # Empty stream — marker is only in the opencode log.
         _write_jsonl(self.stream, [])
