@@ -29,7 +29,8 @@ AUTH (subscription, hard-minimised — read before touching `prepare_codex_home`
 EGRESS (the load-bearing control — `_assert_egress_locked`)
   The access token is a ~10-DAY JWT, so the in-container credential outlives any
   single run. Exfiltration is prevented by a two-layer lock the runner REFUSES
-  to launch without (unless `allow_open_egress`):
+  to launch without — the lock is MANDATORY (`allow_open_egress` is not honored
+  for codex; a failed auto-provision refuses rather than running open):
     1. an `--internal` `docker_network` — kills direct egress AND external DNS,
     2. an allowlisting `https_proxy` (provider domains only) as the sole exit.
 
@@ -62,20 +63,30 @@ _NEUTERED_REFRESH_TOKEN = "x"
 _REFRESH_MARGIN_SECONDS = 24 * 3600
 
 
-def _codex_model_arg(model: str) -> list[str]:
-    """`["-m", model]`, or `[]` when codex should use its subscription default.
+def _codex_model_arg(model: str, default: str = "") -> list[str]:
+    """`-m` for a codex turn: the per-role model if codex-native, else `default`.
 
     RunConfig.agent_model/sim_model are provider-namespaced for opencode
     (`openrouter/...`, `opencode/...`); codex on a ChatGPT account rejects those
-    ("model is not supported when using Codex with a ChatGPT account"), so we
-    omit -m and let codex pick its account default. Codex-native names are bare
-    (`gpt-5.5`, `o3`, `gpt-5-codex`) — no provider prefix — and pass through.
-    Hence: any name carrying a `/` namespace is an opencode model, not codex's.
+    ("model is not supported when using Codex with a ChatGPT account"). So a
+    namespaced (or empty) per-role model falls back to `default` — a codex-native
+    name like "gpt-5.5" (config.codex_model). A bare per-role name (no `/`,
+    e.g. "gpt-5-codex") is itself codex-native and is honored as-is. Returns []
+    only when neither yields a name (codex then uses its account default).
     """
 
-    if not model or "/" in model:
-        return []
-    return ["-m", model]
+    chosen = model if (model and "/" not in model) else default
+    return ["-m", chosen] if chosen else []
+
+
+def _codex_effort_arg(effort: str) -> list[str]:
+    """`-c model_reasoning_effort=<effort>`, or [] when unset.
+
+    Exec-level config override (applied before the `resume` subcommand), so it
+    pins reasoning effort on every turn, not just the first.
+    """
+
+    return ["-c", f"model_reasoning_effort={effort}"] if effort else []
 
 
 def _access_token_exp(auth_path: Path) -> int | None:
@@ -264,17 +275,19 @@ class CliActorRunner:
         the only thing standing between an injected `cat auth.json` and an
         attacker is the egress lock. Require an `--internal` docker_network
         (no route, no external DNS) AND an allowlisting https_proxy (the sole
-        exit). `allow_open_egress` is the explicit, logged escape hatch.
+        exit). This is the hard backstop: `allow_open_egress` is NOT honored for
+        codex — the lock is mandatory, so a failed auto-provision refuses to
+        launch rather than running open.
         """
 
-        if self.config.allow_open_egress:
-            return
         if not (self.config.docker_network and self.config.https_proxy):
             raise ActorError(
                 "CLI actor refuses to launch without BOTH an --internal "
                 "docker_network and an allowlisting https_proxy (provider-only "
-                "egress); pass allow_open_egress to override. The in-container "
-                "subscription token is long-lived, so open egress is exfiltratable."
+                "egress). The in-container subscription token is long-lived, so "
+                "open egress is exfiltratable; --allow-open-egress is not honored "
+                "for codex. Egress auto-provisioning normally sets this — check "
+                "Docker is running."
             )
 
     def _ensure_fresh_access_token(self) -> None:
@@ -430,13 +443,17 @@ class CliActorRunner:
 
         # PROVEN flag order: exec-level opts BEFORE the `resume` subcommand.
         inner = ["codex", "exec", "-s", "danger-full-access", "--skip-git-repo-check", "--json"]
+        # Reasoning effort is an exec-level `-c` override → pin it on EVERY turn
+        # (resume included). Model is set only on the first turn; a resumed
+        # session carries its own.
+        inner += _codex_effort_arg(self.config.codex_effort)
         if session_id:
             inner += ["resume", session_id, prompt]
         else:
-            # OpenRouter-namespaced models (the opencode default) are rejected
-            # by codex on a ChatGPT account; omit -m so codex uses its
-            # subscription default. A codex-native model name passes through.
-            inner += _codex_model_arg(model) + [prompt]
+            # agent_model/sim_model are opencode-namespaced and codex rejects
+            # them on a ChatGPT account; fall back to the codex-native
+            # config.codex_model (a bare per-role model is honored as-is).
+            inner += _codex_model_arg(model, self.config.codex_model) + [prompt]
 
         cmd = [
             "docker",

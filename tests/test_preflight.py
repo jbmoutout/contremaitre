@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from contremaitre.fixture import init_fixture
 from contremaitre.models import ActorMode, Caps, RunConfig
-from contremaitre.preflight import run_preflight
+from contremaitre.preflight import _check_network_policy, run_preflight
 
 
 class PreflightTest(unittest.TestCase):
@@ -127,6 +127,35 @@ class PreflightTest(unittest.TestCase):
 
         self.assertTrue(report.passed, report.failure_summary())
         self.assertEqual("WARN", self._status_by_name(report)["openrouter_key"])
+
+    def test_codex_role_refuses_open_egress(self):
+        # --allow-open-egress is NOT honored for codex: with no explicit
+        # network/proxy the network-policy check must FAIL (not WARN-pass).
+        config = self._config(actor_mode=ActorMode.CLI, allow_open_egress=True)
+        check = _check_network_policy(config)
+        self.assertEqual(check.status, "FAIL")
+
+    def test_codex_sim_role_refuses_open_egress(self):
+        # Reverse mix: opencode agent + codex SIM still refuses open egress.
+        config = self._config(
+            actor_mode=ActorMode.OPENCODE,
+            sim_actor_mode=ActorMode.CLI,
+            allow_open_egress=True,
+        )
+        self.assertEqual(_check_network_policy(config).status, "FAIL")
+
+    def test_codex_role_passes_with_explicit_lock(self):
+        config = self._config(
+            actor_mode=ActorMode.CLI,
+            docker_network="contremaitre-cli-egress",
+            https_proxy="http://contremaitre-egress-proxy:3128",
+        )
+        self.assertEqual(_check_network_policy(config).status, "PASS")
+
+    def test_pure_opencode_still_allows_open_egress(self):
+        # The flag remains a valid opt-in for a non-codex run (WARN, not FAIL).
+        config = self._config(actor_mode=ActorMode.OPENCODE, allow_open_egress=True)
+        self.assertEqual(_check_network_policy(config).status, "WARN")
 
     def _config(self, **overrides):
         tmp = tempfile.TemporaryDirectory()

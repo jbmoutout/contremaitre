@@ -6,8 +6,9 @@ two-layer lock so the operator doesn't hand-roll it:
 
   1. an `--internal` docker network — no route to the outside, and no external
      DNS resolution (so DNS-tunnel exfil is closed too),
-  2. a squid proxy, dual-homed (internal net + bridge), that allowlists only
-     OpenAI-owned domains and is the network's sole exit.
+  2. a squid proxy, dual-homed (internal net + bridge), that allowlists only the
+     model providers' domains (OpenAI for codex; OpenRouter for a paired opencode
+     SIM in a mixed run) and is the network's sole exit.
 
 The agent container joins the internal network with HTTPS_PROXY pointed at the
 proxy. Idempotent and shared across runs — the allowlist is static and
@@ -16,6 +17,7 @@ secret-free, so one long-lived proxy serves every CLI run.
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import time
 from pathlib import Path
@@ -25,6 +27,7 @@ PROXY_NAME = "contremaitre-egress-proxy"
 PROXY_IMAGE = "ubuntu/squid:latest"
 PROXY_PORT = 3128
 _SQUID_CONF = Path(__file__).resolve().parent / "cli_egress_squid.conf"
+_SQUID_HASH_LABEL = "contremaitre.squid-sha256"
 _READY_TIMEOUT_S = 20
 
 
@@ -63,20 +66,38 @@ def _ensure_network(runner) -> None:
         )
 
 
+def _squid_conf_hash() -> str:
+    return hashlib.sha256(_SQUID_CONF.read_bytes()).hexdigest()
+
+
 def _ensure_proxy(runner, sleep) -> None:
+    if not _SQUID_CONF.exists():
+        raise EgressError(f"squid allowlist config missing: {_SQUID_CONF}")
+    want_hash = _squid_conf_hash()
     running = _docker(
         runner, ["ps", "-q", "-f", f"name=^{PROXY_NAME}$", "-f", "status=running"]
     )
     if running.stdout.strip():
-        return
-    # Clear any stale (exited) container of the same name before recreating.
+        # Recreate when the allowlist changed under a running proxy — squid bakes
+        # the config in at start, so an edited squid.conf would otherwise silently
+        # never take effect (e.g. a newly added provider domain). Mirrors the
+        # Dockerfile-hash image-staleness guard.
+        label = _docker(
+            runner,
+            [
+                "inspect", PROXY_NAME, "--format",
+                '{{ index .Config.Labels "' + _SQUID_HASH_LABEL + '" }}',
+            ],
+        )
+        if label.stdout.strip() == want_hash:
+            return
+    # Clear any stale (exited or out-of-date) container before recreating.
     _docker(runner, ["rm", "-f", PROXY_NAME])
-    if not _SQUID_CONF.exists():
-        raise EgressError(f"squid allowlist config missing: {_SQUID_CONF}")
     created = _docker(
         runner,
         [
             "run", "-d", "--name", PROXY_NAME, "--network", NETWORK_NAME,
+            "--label", f"{_SQUID_HASH_LABEL}={want_hash}",
             "-v", f"{_SQUID_CONF}:/etc/squid/squid.conf:ro", PROXY_IMAGE,
         ],
     )

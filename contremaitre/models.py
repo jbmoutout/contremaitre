@@ -109,6 +109,12 @@ class RunConfig:
     # Which frontier CLI to drive AS the agent/SIM when actor_mode is CLI.
     # Only "codex" is implemented today (claude pending a headless OAuth token).
     cli_tool: str = "codex"
+    # codex-native model + reasoning effort for a codex role. agent_model/
+    # sim_model are opencode-namespaced and codex rejects them, so a codex role
+    # uses `codex_model` (the per-role model wins only if it is codex-native).
+    # `codex_effort` is pinned via `-c model_reasoning_effort=<effort>`.
+    codex_model: str = "gpt-5.5"
+    codex_effort: str = "high"
     # Per-role actor override: the agent uses `actor_mode`; when this is set the
     # SIM uses it instead, so a run can MIX runtimes (e.g. a codex agent with an
     # opencode SIM, or vice versa). None means the SIM shares `actor_mode`.

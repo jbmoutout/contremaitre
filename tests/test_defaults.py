@@ -51,6 +51,42 @@ def test_load_reads_all_fields(tmp_path: Path):
     )
 
 
+def test_load_normalizes_codex_actor_alias(tmp_path: Path):
+    # "codex" is the operator-facing name; it normalizes to the "cli" runtime.
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "codex"\nsim_actor = "opencode"\n')
+    out = defaults.load(path)
+    assert out.actor == "cli"
+    assert out.sim_actor == "opencode"
+
+
+def test_load_passes_through_opencode_and_fake_actor(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "opencode"\n')
+    assert defaults.load(path).actor == "opencode"
+
+
+def test_load_drops_invalid_actor(tmp_path: Path):
+    # A typo / future value drops to None → falls through to the picker default.
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "claudette"\n')
+    assert defaults.load(path).actor is None
+
+
+def test_load_reads_codex_model_and_effort(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('codex_model = "gpt-5.5"\ncodex_effort = "high"\n')
+    out = defaults.load(path)
+    assert out.codex_model == "gpt-5.5"
+    assert out.codex_effort == "high"
+
+
+def test_load_drops_invalid_codex_effort(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('codex_effort = "ludicrous"\n')
+    assert defaults.load(path).codex_effort is None
+
+
 def test_load_strips_whitespace(tmp_path: Path):
     path = tmp_path / "defaults.toml"
     path.write_text('agent_model = "  opencode/big-pickle  "\n')

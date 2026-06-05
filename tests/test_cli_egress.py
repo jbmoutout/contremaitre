@@ -7,6 +7,7 @@ from contremaitre.cli import _cli_egress_is_auto
 from contremaitre.cli_egress import (
     NETWORK_NAME,
     EgressError,
+    _squid_conf_hash,
     ensure_egress_proxy,
     proxy_url,
 )
@@ -35,6 +36,8 @@ def _make_runner(plan: dict):
             return plan.get("connect", _Resp(0))
         if sub == "ps":
             return plan.get("ps", _Resp(0, ""))
+        if sub == "inspect":
+            return plan.get("inspect", _Resp(0, ""))
         if sub == "run":
             return plan.get("run", _Resp(0, "cid"))
         if sub == "logs":
@@ -50,16 +53,37 @@ def _subs(calls):
 
 
 class EnsureEgressProxyTest(unittest.TestCase):
-    def test_idempotent_when_already_up(self):
+    def test_idempotent_when_already_up_and_config_current(self):
+        # Running AND the squid-conf hash label matches → no recreate.
         runner = _make_runner(
-            {"network_inspect": _Resp(0), "ps": _Resp(0, "running-cid\n")}
+            {
+                "network_inspect": _Resp(0),
+                "ps": _Resp(0, "running-cid\n"),
+                "inspect": _Resp(0, _squid_conf_hash() + "\n"),
+            }
         )
         net, url = ensure_egress_proxy(runner=runner, sleep=lambda *_: None)
         self.assertEqual(net, NETWORK_NAME)
         self.assertEqual(url, proxy_url())
-        # Already running → must NOT (re)create network or run a proxy.
+        # Already running with current config → must NOT (re)create.
         self.assertNotIn(("network", "create"), _subs(runner.calls))
         self.assertNotIn(("run",), [(c[1],) for c in runner.calls])
+
+    def test_recreates_when_allowlist_changed(self):
+        # Running but the label is a stale hash (allowlist edited) → recreate so
+        # the new squid.conf takes effect (squid bakes config in at start).
+        runner = _make_runner(
+            {
+                "network_inspect": _Resp(0),
+                "ps": _Resp(0, "running-cid\n"),
+                "inspect": _Resp(0, "stale-hash-from-prior-allowlist\n"),
+                "run": _Resp(0, "cid"),
+                "logs": _Resp(0, "Accepting HTTP Socket connections"),
+            }
+        )
+        ensure_egress_proxy(runner=runner, sleep=lambda *_: None)
+        self.assertIn(("rm",), [(c[1],) for c in runner.calls])
+        self.assertIn(("run",), [(c[1],) for c in runner.calls])
 
     def test_provisions_when_absent(self):
         runner = _make_runner(
@@ -90,7 +114,11 @@ class EnsureEgressProxyTest(unittest.TestCase):
 class CliEgressIsAutoTest(unittest.TestCase):
     def _args(self, **kw):
         ns = argparse.Namespace(
-            actor="cli", allow_open_egress=False, docker_network=None, https_proxy=None
+            actor="cli",
+            sim_actor=None,
+            allow_open_egress=False,
+            docker_network=None,
+            https_proxy=None,
         )
         for k, v in kw.items():
             setattr(ns, k, v)
@@ -99,13 +127,20 @@ class CliEgressIsAutoTest(unittest.TestCase):
     def test_auto_for_cli_without_egress(self):
         self.assertTrue(_cli_egress_is_auto(self._args()))
 
-    def test_not_auto_for_opencode(self):
+    def test_not_auto_for_pure_opencode(self):
         self.assertFalse(_cli_egress_is_auto(self._args(actor="opencode")))
 
-    def test_not_auto_when_open_egress(self):
-        self.assertFalse(_cli_egress_is_auto(self._args(allow_open_egress=True)))
+    def test_auto_for_codex_sim_with_opencode_agent(self):
+        # Reverse mix: opencode agent + codex SIM still needs the lock (the codex
+        # token rides in the SIM container).
+        self.assertTrue(_cli_egress_is_auto(self._args(actor="opencode", sim_actor="cli")))
+
+    def test_auto_even_when_open_egress(self):
+        # --allow-open-egress is NOT honored for codex: it always auto-locks.
+        self.assertTrue(_cli_egress_is_auto(self._args(allow_open_egress=True)))
 
     def test_not_auto_when_explicit_network(self):
+        # An explicit operator-supplied policy wins (their own locked egress).
         self.assertFalse(_cli_egress_is_auto(self._args(docker_network="x")))
 
 

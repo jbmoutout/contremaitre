@@ -14,6 +14,7 @@ from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
     CliActorRunner,
     _access_token_exp,
+    _codex_effort_arg,
     _codex_model_arg,
     _parse_codex_events,
 )
@@ -150,10 +151,14 @@ class EgressLockTest(unittest.TestCase):
             )
             runner._assert_egress_locked()  # no raise
 
-    def test_allow_open_egress_overrides(self):
+    def test_allow_open_egress_does_not_override_codex(self):
+        # The lock is mandatory for codex: --allow-open-egress is NOT an escape
+        # hatch (the in-container token is exfiltratable). Without both layers
+        # it still refuses, even with the flag set.
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(Path(tmp), allow_open_egress=True)
-            runner._assert_egress_locked()  # no raise
+            with self.assertRaises(Exception):
+                runner._assert_egress_locked()
 
 
 class BuildCommandTest(unittest.TestCase):
@@ -195,19 +200,23 @@ class BuildCommandTest(unittest.TestCase):
             # -m model is omitted on resume (the session carries it).
             self.assertNotIn("-m", cmd[cmd.index("resume"):])
 
-    def test_first_turn_omits_m_for_openrouter_model(self):
+    def test_first_turn_falls_back_to_codex_model_for_namespaced(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(
-                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
+                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128",
+                codex_model="gpt-5.5", codex_effort="high",
             )
             cmd = runner._build_codex_command(
                 prompt="do it", codex_home=runner.agent_home,
                 session_id=None, model="openrouter/deepseek/deepseek-v4-flash",
                 mount_mode="rw", role="agent", extra_mounts=(),
             )
-            # codex rejects OpenRouter models on a ChatGPT account → no -m,
-            # codex falls back to its subscription default.
-            self.assertNotIn("-m", cmd)
+            # codex rejects opencode/openrouter names on a ChatGPT account → fall
+            # back to the codex-native config.codex_model, not the namespaced name.
+            self.assertEqual(cmd[cmd.index("-m") + 1], "gpt-5.5")
+            self.assertNotIn("openrouter/deepseek/deepseek-v4-flash", cmd)
+            # Reasoning effort is pinned via an exec-level -c override.
+            self.assertIn("model_reasoning_effort=high", cmd)
 
     def test_review_mounts_worktree_readonly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -237,6 +246,18 @@ class CodexModelArgTest(unittest.TestCase):
     def test_passes_codex_native_model(self):
         self.assertEqual(_codex_model_arg("gpt-5.5"), ["-m", "gpt-5.5"])
         self.assertEqual(_codex_model_arg("gpt-5-codex"), ["-m", "gpt-5-codex"])
+
+    def test_falls_back_to_codex_default_for_namespaced(self):
+        # A namespaced/empty per-role model uses the configured codex default…
+        self.assertEqual(_codex_model_arg("opencode/x", "gpt-5.5"), ["-m", "gpt-5.5"])
+        self.assertEqual(_codex_model_arg("", "gpt-5.5"), ["-m", "gpt-5.5"])
+        # …but a codex-native per-role model still wins over the default.
+        self.assertEqual(_codex_model_arg("gpt-5-codex", "gpt-5.5"), ["-m", "gpt-5-codex"])
+
+    def test_effort_arg(self):
+        self.assertEqual(_codex_effort_arg("high"), ["-c", "model_reasoning_effort=high"])
+        self.assertEqual(_codex_effort_arg("xhigh"), ["-c", "model_reasoning_effort=xhigh"])
+        self.assertEqual(_codex_effort_arg(""), [])
 
 
 def _cli_config(root: Path, **over) -> RunConfig:
@@ -400,6 +421,10 @@ class TuiRunForwardsRuntimeTest(unittest.TestCase):
             extra_reviewer_model=None,
             cli_reviewer=None,
             extra_reviewer_skip=False,
+            actor=None,
+            sim_actor=None,
+            codex_model=None,
+            codex_effort=None,
         )
         ns = argparse.Namespace(run_args=run_args, refresh_hz=4, discover_timeout=10)
         with (

@@ -190,6 +190,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Frontier CLI to drive as agent/SIM when --actor cli (claude pending OAuth token)",
     )
     run_p.add_argument(
+        "--codex-model",
+        default="gpt-5.5",
+        help="codex-native model for a codex role (opencode-namespaced --agent/sim-model "
+        "are rejected by codex and fall back to this)",
+    )
+    run_p.add_argument(
+        "--codex-effort",
+        choices=["minimal", "low", "medium", "high", "xhigh"],
+        default="high",
+        help="codex reasoning effort (-c model_reasoning_effort) for a codex role",
+    )
+    run_p.add_argument(
         "--sim-actor",
         choices=[mode.value for mode in ActorMode],
         default=None,
@@ -945,11 +957,18 @@ def _pick_models_interactive(
 
 
 def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
-    """True when CLI mode should auto-provision egress (no explicit egress config)."""
+    """True when a codex (CLI) role is active and no explicit egress was given.
 
-    if getattr(args, "actor", None) != ActorMode.CLI.value:
-        return False
-    if getattr(args, "allow_open_egress", False):
+    Checks BOTH roles (agent + SIM): a codex role in either position carries the
+    exfiltratable in-container JWT, so it must lock. `--allow-open-egress` is
+    deliberately NOT honored here — codex always auto-provisions the locked
+    allowlist proxy; the flag only relaxes a pure-opencode run (see
+    preflight `_check_network_policy`). Explicit --docker-network/--https-proxy
+    still win (the operator's own locked policy).
+    """
+
+    modes = {getattr(args, "actor", None), getattr(args, "sim_actor", None)}
+    if ActorMode.CLI.value not in modes:
         return False
     return not (getattr(args, "docker_network", None) or getattr(args, "https_proxy", None))
 
@@ -957,11 +976,12 @@ def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
 def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
     """Stand up the shared allowlist egress proxy and point the run at it.
 
-    Only for `--actor cli` with no explicit `--docker-network`/`--https-proxy`
-    and without `--allow-open-egress`. Mutates `args` so the resolved config
-    (and the runner) see a locked egress. Failure is non-fatal here — preflight
-    and the runner still enforce the egress requirement, so a provision failure
-    surfaces as a clean "egress not configured" refusal rather than a crash.
+    Fires whenever a codex (CLI) role is active with no explicit
+    `--docker-network`/`--https-proxy`. `--allow-open-egress` does NOT suppress
+    it — codex always locks. Mutates `args` so the resolved config (and the
+    runner) see a locked egress. Failure is non-fatal here — preflight and the
+    runner still enforce the egress requirement, so a provision failure surfaces
+    as a clean "egress not configured" refusal rather than a crash.
     """
 
     if not _cli_egress_is_auto(args):
@@ -994,14 +1014,17 @@ def _codex_status_lines(args: argparse.Namespace) -> tuple[str, str]:
     else:
         token_line = "codex token: MISSING — run codex once to log in"
 
-    if getattr(args, "allow_open_egress", False):
-        egress_line = "egress: OPEN (--allow-open-egress) — token is exfiltratable"
-    elif getattr(args, "docker_network", None) or getattr(args, "https_proxy", None):
+    if getattr(args, "docker_network", None) or getattr(args, "https_proxy", None):
         net = getattr(args, "docker_network", None) or "(none)"
         proxy = "yes" if getattr(args, "https_proxy", None) else "no"
         egress_line = f"egress: locked (network={net}, proxy={proxy})"
+    elif getattr(args, "allow_open_egress", False):
+        egress_line = (
+            "egress: --allow-open-egress IGNORED for codex — auto-locking "
+            "allowlist proxy on launch (token is exfiltratable)"
+        )
     else:
-        egress_line = "egress: auto-provision allowlist proxy on launch (OpenAI-only)"
+        egress_line = "egress: auto-provision allowlist proxy on launch (OpenAI/OpenRouter only)"
     return token_line, egress_line
 
 
@@ -1805,6 +1828,8 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         cli_reviewer=getattr(args, "cli_reviewer", "none"),
         actor_mode=ActorMode(args.actor),
         cli_tool=getattr(args, "cli_tool", "codex"),
+        codex_model=getattr(args, "codex_model", "gpt-5.5"),
+        codex_effort=getattr(args, "codex_effort", "high"),
         sim_actor_mode=(
             ActorMode(args.sim_actor) if getattr(args, "sim_actor", None) else None
         ),
@@ -1902,6 +1927,21 @@ def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
         # (treated as explicit) and never ask the operator.
         args.cli_reviewer = saved.cli_reviewer
         args._defaults_cli_reviewer_prefill = saved.cli_reviewer
+    # Runtime selection: a saved `actor`/`sim_actor` seeds the launch-screen
+    # runtime picker (and the non-interactive default). Already normalized to
+    # runtime values by `_defaults.load` ("codex" → "cli").
+    if saved.actor and not _has_flag_in(argv, "--actor") and hasattr(args, "actor"):
+        args.actor = saved.actor
+    if saved.sim_actor and not _has_flag_in(argv, "--sim-actor") and hasattr(args, "sim_actor"):
+        args.sim_actor = saved.sim_actor
+    if saved.codex_model and not _has_flag_in(argv, "--codex-model") and hasattr(args, "codex_model"):
+        args.codex_model = saved.codex_model
+    if (
+        saved.codex_effort
+        and not _has_flag_in(argv, "--codex-effort")
+        and hasattr(args, "codex_effort")
+    ):
+        args.codex_effort = saved.codex_effort
 
 
 def _extract_flag_value(args: list[str], flag: str, default: str) -> str:
@@ -2046,8 +2086,8 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     # per-role runtime picker actually appears on a bare `tui run` (the picker
     # early-returns on a `fake` default). An explicit `--actor fake` still
     # forces a fixture run.
-    actor = _extract_flag_value(forwarded, "--actor", ActorMode.OPENCODE.value)
-    sim_actor = _extract_flag_value(forwarded, "--sim-actor", "") or None
+    actor = _extract_flag_value(forwarded, "--actor", _saved.actor or ActorMode.OPENCODE.value)
+    sim_actor = _extract_flag_value(forwarded, "--sim-actor", _saved.sim_actor or "") or None
     # Confirmation has to happen BEFORE the subprocess spawn, because once
     # Textual attaches, stdin is owned by the TUI and an `input()` in the
     # subprocess would block invisibly. Pass --yes downstream so the

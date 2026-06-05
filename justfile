@@ -13,7 +13,6 @@ set shell := ["bash", "-uc"]
 # `origin/<base>` fresh, so the operator never needs a parallel local
 # checkout — only the URL.
 publish_mode    := "gh"
-actor           := "opencode"
 max_turns       := "20"
 max_wall_min    := "45"
 max_cost_usd    := "5"
@@ -45,9 +44,13 @@ install-hooks:
 #   just tui-run main git@github.com:me/foo.git "npx tsc --noEmit"
 #   just tui-run main git@github.com:me/foo.git "poetry run pytest -q"
 #   just tui-run main git@github.com:me/foo.git   # no check
+#
+# Runtime (codex / opencode), models, and reasoning effort come from the
+# launch-screen pickers and ~/.config|.contremaitre/defaults.toml — not flags
+# here. `--allow-open-egress` only relaxes a pure-opencode run; codex always
+# auto-locks its egress and ignores this flag.
 tui-run base fork check_cmd="":
     GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
-        --actor {{actor}} \
         --base {{base}} \
         --fork {{fork}} \
         {{ if check_cmd != "" { "--check-cmd " + quote(check_cmd) } else { "" } }} \

@@ -21,7 +21,13 @@ without raising — a broken defaults file must not block a run that
 would otherwise launch with hardcoded fallbacks.
 
 Schema (all keys optional):
-    agent_model = "opencode/big-pickle"
+    actor = "codex"         # opencode | codex | cli | fake — agent (and SIM
+                            # unless sim_actor) runtime. "codex" aliases the
+                            # "cli" runtime.
+    sim_actor = "opencode"  # override the SIM runtime (mix: codex agent + SIM)
+    codex_model = "gpt-5.5" # codex-native model name used when a role is codex
+    codex_effort = "high"   # minimal | low | medium | high | xhigh
+    agent_model = "opencode/big-pickle"   # used when a role is opencode
     sim_model = "opencode/big-pickle"
     extra_reviewer_model = "opencode/nemotron-3-super-free"  # or "skip"
     cli_reviewer = "both"   # auto | codex | claude | both | none
@@ -41,6 +47,11 @@ from pathlib import Path
 
 _FILENAME = "defaults.toml"
 _VALID_CLI_REVIEWER = ("auto", "codex", "claude", "both", "none")
+# Friendly actor aliases → the runtime value the CLI/`ActorMode` understands.
+# "codex" is the operator-facing name for the `cli` runtime (codex is the only
+# CLI tool wired today), so the file can read `actor = "codex"`.
+_ACTOR_ALIASES = {"opencode": "opencode", "codex": "cli", "cli": "cli", "fake": "fake"}
+_VALID_CODEX_EFFORT = ("minimal", "low", "medium", "high", "xhigh")
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,8 @@ class Defaults:
     `extra_reviewer_skip` is the parsed form of `extra_reviewer_model =
     "skip"` in the file — the slug field stays `None` and this boolean
     signals "don't even ask in the picker."
+
+    `actor` / `sim_actor` are normalized to runtime values ("codex" → "cli").
     """
 
     agent_model: str | None = None
@@ -57,6 +70,10 @@ class Defaults:
     extra_reviewer_model: str | None = None
     extra_reviewer_skip: bool = False
     cli_reviewer: str | None = None
+    actor: str | None = None
+    sim_actor: str | None = None
+    codex_model: str | None = None
+    codex_effort: str | None = None
 
 
 def defaults_path() -> Path:
@@ -113,6 +130,10 @@ def load(path: Path | None = None) -> Defaults:
         extra_reviewer_model=None if extra_skip else extra_raw,
         extra_reviewer_skip=extra_skip,
         cli_reviewer=_clean_cli_reviewer(data.get("cli_reviewer")),
+        actor=_clean_actor(data.get("actor")),
+        sim_actor=_clean_actor(data.get("sim_actor")),
+        codex_model=_clean_str(data.get("codex_model")),
+        codex_effort=_clean_codex_effort(data.get("codex_effort")),
     )
 
 
@@ -128,3 +149,23 @@ def _clean_cli_reviewer(value: object) -> str | None:
     if cleaned is None:
         return None
     return cleaned if cleaned in _VALID_CLI_REVIEWER else None
+
+
+def _clean_actor(value: object) -> str | None:
+    """Normalize a friendly actor name to its runtime value, or None if invalid.
+
+    "codex" → "cli" (the runtime the CLI understands); unknown values drop to
+    None so a typo falls through to the picker default rather than crashing.
+    """
+
+    cleaned = _clean_str(value)
+    if cleaned is None:
+        return None
+    return _ACTOR_ALIASES.get(cleaned.lower())
+
+
+def _clean_codex_effort(value: object) -> str | None:
+    cleaned = _clean_str(value)
+    if cleaned is None:
+        return None
+    return cleaned if cleaned.lower() in _VALID_CODEX_EFFORT else None
