@@ -20,6 +20,10 @@ from pathlib import Path
 
 from .jsonlog import append_jsonl, write_json
 from .models import PublishMode, RunConfig, RunPaths
+from .scaffolds import (
+    IMPLEMENTATION_COMPLETE_RELPATH,
+    _derive_commit_message,
+)
 
 
 class PublishOutcomeKind(str, Enum):
@@ -220,10 +224,6 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     import json as _json
     import re as _re
     from .flow_use import compute_phases
-    from .orchestrator import (
-        IMPLEMENTATION_COMPLETE_RELPATH,
-        _derive_commit_message,
-    )
 
     def _read_jsonl(p: Path) -> list[dict]:
         if not p.exists():
