@@ -978,25 +978,12 @@ def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
     print(f"[info] CLI egress: {network} + allowlist proxy ({proxy})")
 
 
-def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
-    """Launch screen for `--actor cli` (codex/claude on the operator's plan).
-
-    Subscription-driven, so there's no OpenRouter key probe or model picker —
-    instead a concise status: which tool, whether the codex token is valid, and
-    whether egress is locked (the CLI actor refuses to run on open egress unless
-    --allow-open-egress). yes/non-TTY mode collapses to one info line.
-    """
+def _codex_status_lines(args: argparse.Namespace) -> tuple[str, str]:
+    """(token_line, egress_line) describing the codex CLI run's posture."""
 
     import time as _time
 
     from .cli_actor import _access_token_exp
-
-    tool = getattr(args, "cli_tool", "codex")
-    yes_mode = (
-        getattr(args, "yes", False)
-        or getattr(args, "no_prompt", False)
-        or not sys.stdin.isatty()
-    )
 
     auth = Path.home() / ".codex" / "auth.json"
     exp = _access_token_exp(auth) if auth.exists() else None
@@ -1015,6 +1002,70 @@ def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
         egress_line = f"egress: locked (network={net}, proxy={proxy})"
     else:
         egress_line = "egress: auto-provision allowlist proxy on launch (OpenAI-only)"
+    return token_line, egress_line
+
+
+def _pick_runtimes_interactive(args: argparse.Namespace) -> None:
+    """Prompt for the agent and SIM runtimes; set args.actor / args.sim_actor.
+
+    Runtime is per role: `opencode` (OpenRouter models) or `cli` (the codex
+    subscription CLI). They can differ — a codex agent can pair with an
+    opencode SIM, or the reverse. Enter keeps the current flag value. Skipped
+    for a `fake` default (fixture runs) so the picker only shows for real runs.
+    """
+
+    current_agent = getattr(args, "actor", ActorMode.FAKE.value)
+    if current_agent == ActorMode.FAKE.value:
+        return  # fixture/smoke run — don't surface the runtime picker
+
+    # (value, label). claude is pending a headless OAuth token, so only codex
+    # is offered under the `cli` runtime today.
+    choices = [
+        (ActorMode.OPENCODE.value, "opencode  (OpenRouter models)"),
+        (ActorMode.CLI.value, "codex     (subscription CLI)"),
+    ]
+
+    def _pick(role: str, current: str) -> str:
+        print()
+        print(f"  {role} runtime:")
+        for i, (val, label) in enumerate(choices, start=1):
+            marker = "  ← current" if val == current else ""
+            print(f"    {i}  {label}{marker}")
+        try:
+            reply = input(f"  pick (Enter={current}): ").strip().lower()
+        except EOFError:
+            return current
+        if reply == "":
+            return current
+        if reply.isdigit():
+            idx = int(reply) - 1
+            if 0 <= idx < len(choices):
+                return choices[idx][0]
+        return current
+
+    agent = _pick("agent", current_agent)
+    sim = _pick("SIM", getattr(args, "sim_actor", None) or agent)
+    args.actor = agent
+    # Only record a SIM override when it actually differs from the agent.
+    args.sim_actor = None if sim == agent else sim
+
+
+def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
+    """Launch screen for `--actor cli` (codex/claude on the operator's plan).
+
+    Subscription-driven, so there's no OpenRouter key probe or model picker —
+    instead a concise status: which tool, whether the codex token is valid, and
+    whether egress is locked (the CLI actor refuses to run on open egress unless
+    --allow-open-egress). yes/non-TTY mode collapses to one info line.
+    """
+
+    tool = getattr(args, "cli_tool", "codex")
+    yes_mode = (
+        getattr(args, "yes", False)
+        or getattr(args, "no_prompt", False)
+        or not sys.stdin.isatty()
+    )
+    token_line, egress_line = _codex_status_lines(args)
 
     if yes_mode:
         print(f"[info] actor=cli tool={tool}; {token_line}; {egress_line}")
@@ -1055,11 +1106,6 @@ def _launch_screen(
 
     from . import cli_reviewer
 
-    # CLI actor mode is subscription-driven, not OpenRouter — its launch screen
-    # is a separate, smaller flow (no key probe, no OpenRouter model picker).
-    if getattr(args, "actor", ActorMode.FAKE.value) == ActorMode.CLI.value:
-        return _cli_launch_screen(args=args)
-
     env_var = getattr(args, "openrouter_env_var", "OPENROUTER_API_KEY")
     key_url = getattr(args, "openrouter_key_url", "https://openrouter.ai/api/v1/key")
     cli_reviewer_explicit = _has_flag_in(argv_for_explicit_check, "--cli-reviewer")
@@ -1070,6 +1116,20 @@ def _launch_screen(
     # `contremaitre init`) or hardcoded values flow through unchanged.
     no_prompt = getattr(args, "no_prompt", False)
     yes_mode = getattr(args, "yes", False) or no_prompt or not sys.stdin.isatty()
+
+    # Per-role runtime selection (interactive only): agent and SIM can each run
+    # opencode or codex. Sets args.actor / args.sim_actor; flags are the
+    # non-interactive defaults.
+    if not yes_mode:
+        _pick_runtimes_interactive(args)
+    agent_mode = getattr(args, "actor", ActorMode.FAKE.value)
+    sim_mode = getattr(args, "sim_actor", None) or agent_mode
+
+    # No opencode role → a pure CLI run (codex/claude): the smaller CLI status
+    # screen, no OpenRouter probe or model picker.
+    if ActorMode.OPENCODE.value not in (agent_mode, sim_mode):
+        return _cli_launch_screen(args=args)
+    any_cli = ActorMode.CLI.value in (agent_mode, sim_mode)
 
     if yes_mode:
         # Skip the network probe in non-TTY mode — we only need presence
@@ -1099,6 +1159,13 @@ def _launch_screen(
     # context.
     _print_key_banner(env_var, key_state)
 
+    # When one role is codex (mixed run), surface its token + egress posture
+    # alongside the OpenRouter banner so the operator sees both constraints.
+    if any_cli:
+        token_line, egress_line = _codex_status_lines(args)
+        cli_role = "agent" if agent_mode == ActorMode.CLI.value else "SIM"
+        print(f"  codex {cli_role}: {token_line}; {egress_line}")
+
     agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
     sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
     extra_explicit = _has_flag_in(argv_for_explicit_check, "--extra-reviewer-model")
@@ -1108,8 +1175,10 @@ def _launch_screen(
         current_agent=getattr(args, "agent_model", ""),
         current_sim=getattr(args, "sim_model", ""),
         current_extra=getattr(args, "extra_reviewer_model", None),
-        pick_agent=not agent_explicit,
-        pick_sim=not sim_explicit,
+        # Only pick an OpenRouter model for a role that actually runs opencode;
+        # a codex role ignores it.
+        pick_agent=(agent_mode == ActorMode.OPENCODE.value) and not agent_explicit,
+        pick_sim=(sim_mode == ActorMode.OPENCODE.value) and not sim_explicit,
         pick_extra=not extra_explicit,
         # `extra_reviewer_model = "skip"` in defaults.toml flips the
         # extra-reviewer Enter behavior from "accept the suggestion" to

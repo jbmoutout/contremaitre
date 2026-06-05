@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import os
@@ -311,6 +312,30 @@ class _StubRunner:
 
     def sim_review(self, **kwargs):
         self.calls.append("review")
+
+
+class RuntimeSelectorTest(unittest.TestCase):
+    def _pick(self, actor, sim_actor, inputs):
+        from contremaitre.cli import _pick_runtimes_interactive
+
+        ns = argparse.Namespace(actor=actor, sim_actor=sim_actor)
+        with patch("builtins.input", side_effect=inputs):
+            _pick_runtimes_interactive(ns)
+        return ns
+
+    def test_picks_mixed_codex_agent_opencode_sim(self):
+        ns = self._pick("opencode", None, ["2", "1"])  # agent=codex, SIM=opencode
+        self.assertEqual(ns.actor, "cli")
+        self.assertEqual(ns.sim_actor, "opencode")
+
+    def test_same_runtime_records_no_sim_override(self):
+        ns = self._pick("opencode", None, ["", ""])  # keep opencode for both
+        self.assertEqual(ns.actor, "opencode")
+        self.assertIsNone(ns.sim_actor)
+
+    def test_fake_default_skips_picker(self):
+        ns = self._pick("fake", None, [])  # no prompts consumed
+        self.assertEqual(ns.actor, "fake")
 
 
 class CompositeRunnerTest(unittest.TestCase):
