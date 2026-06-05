@@ -12,11 +12,10 @@ from unittest.mock import patch
 from contremaitre.cli_actor import (
     CliActorRunner,
     _access_token_exp,
-    _append_usage_step_finish,
     _codex_model_arg,
     _parse_codex_events,
 )
-from contremaitre.costs import sum_step_finish_tokens
+from contremaitre.costs import sum_token_usage
 from contremaitre.models import ActorMode, RunConfig
 from contremaitre.paths import build_run_paths
 from contremaitre.preflight import _check_codex_auth
@@ -263,30 +262,39 @@ class CodexAuthCheckTest(unittest.TestCase):
             self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "FAIL")
 
 
-class UsageStepFinishTest(unittest.TestCase):
-    def test_maps_codex_usage_to_opencode_step_finish_and_rolls_up(self):
+class TokenUsageRollupTest(unittest.TestCase):
+    def test_rolls_up_codex_turn_completed_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "raw.jsonl"
-            _append_usage_step_finish(
-                p,
-                {
-                    "input_tokens": 100,
-                    "output_tokens": 10,
-                    "cached_input_tokens": 80,
-                    "reasoning_output_tokens": 5,
-                },
+            p.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "turn.completed", "usage": {
+                            "input_tokens": 100, "output_tokens": 10,
+                            "cached_input_tokens": 80, "reasoning_output_tokens": 5}}),
+                        json.dumps({"type": "turn.completed", "usage": {
+                            "input_tokens": 40, "output_tokens": 4,
+                            "cached_input_tokens": 30, "reasoning_output_tokens": 1}}),
+                    ]
+                )
             )
-            ev = json.loads(p.read_text().strip())
-            self.assertEqual(ev["type"], "step_finish")
-            self.assertEqual(ev["part"]["tokens"]["input"], 100)
-            self.assertEqual(ev["part"]["tokens"]["output"], 10)
-            self.assertEqual(ev["part"]["tokens"]["cache"]["read"], 80)
-            # No cost key: codex on a subscription is not metered → honest $0.
-            self.assertNotIn("cost", ev["part"])
-            # The TUI/cost rollup reads it uniformly.
             self.assertEqual(
-                sum_step_finish_tokens(p),
-                {"input": 100, "output": 10, "reasoning": 5, "cache_read": 80},
+                sum_token_usage(p),
+                {"input": 140, "output": 14, "reasoning": 6, "cache_read": 110},
+            )
+
+    def test_still_rolls_up_opencode_step_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "raw.jsonl"
+            p.write_text(
+                json.dumps(
+                    {"type": "step_finish",
+                     "part": {"tokens": {"input": 7, "output": 2, "cache": {"read": 3}}}}
+                )
+            )
+            self.assertEqual(
+                sum_token_usage(p),
+                {"input": 7, "output": 2, "reasoning": 0, "cache_read": 3},
             )
 
 
@@ -312,6 +320,22 @@ class ParseEventsTest(unittest.TestCase):
             self.assertEqual(sid, "SID-9")
             self.assertEqual(usage, {"output_tokens": 6})
             self.assertIsNone(error)
+
+    def test_start_offset_scopes_to_one_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "events.jsonl"
+            p.write_text(
+                json.dumps({"type": "item.completed",
+                            "item": {"type": "agent_message", "text": "FIRST"}}) + "\n"
+            )
+            off = p.stat().st_size  # boundary between turn 1 and turn 2
+            with p.open("a") as f:
+                f.write(json.dumps({"type": "thread.started", "thread_id": "S2"}) + "\n")
+                f.write(json.dumps({"type": "item.completed",
+                                    "item": {"type": "agent_message", "text": "SECOND"}}) + "\n")
+            text, sid, _u, _e = _parse_codex_events(p, start_offset=off)
+            self.assertEqual(text, "SECOND")  # not "FIRST" from the prior turn
+            self.assertEqual(sid, "S2")
 
     def test_surfaces_turn_failed_error(self):
         with tempfile.TemporaryDirectory() as tmp:

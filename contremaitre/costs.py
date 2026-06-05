@@ -40,12 +40,13 @@ def sum_costs_in_events(*event_lists: list[dict[str, Any]]) -> float:
     return round(total, 6)
 
 
-def sum_step_finish_tokens(*paths: Path) -> dict[str, int]:
-    """Sum token counts across step_finish events (opencode + CLI-actor shape).
+def sum_token_usage(*paths: Path) -> dict[str, int]:
+    """Sum token counts across actor streams, both event shapes.
 
-    Returns input/output/reasoning/cache_read totals. Codex on a subscription
-    has no metered USD, so this token rollup — not a dollar figure — is the
-    usage signal surfaced for CLI runs.
+    Handles opencode `step_finish` (`part.tokens`) and codex `--json`
+    `turn.completed` (`usage`). Returns input/output/reasoning/cache_read
+    totals. Codex on a subscription has no metered USD, so this token rollup —
+    not a dollar figure — is the usage signal surfaced for CLI runs.
     """
 
     totals = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0}
@@ -57,14 +58,20 @@ def sum_step_finish_tokens(*paths: Path) -> dict[str, int]:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") != "step_finish":
-                continue
-            tok = (event.get("part") or {}).get("tokens") or {}
-            totals["input"] += int(tok.get("input", 0) or 0)
-            totals["output"] += int(tok.get("output", 0) or 0)
-            totals["reasoning"] += int(tok.get("reasoning", 0) or 0)
-            cache = tok.get("cache") or {}
-            totals["cache_read"] += int(cache.get("read", 0) or 0)
+            etype = event.get("type")
+            if etype == "step_finish":
+                tok = (event.get("part") or {}).get("tokens") or {}
+                totals["input"] += int(tok.get("input", 0) or 0)
+                totals["output"] += int(tok.get("output", 0) or 0)
+                totals["reasoning"] += int(tok.get("reasoning", 0) or 0)
+                cache = tok.get("cache") or {}
+                totals["cache_read"] += int(cache.get("read", 0) or 0)
+            elif etype == "turn.completed":
+                usage = event.get("usage") or {}
+                totals["input"] += int(usage.get("input_tokens", 0) or 0)
+                totals["output"] += int(usage.get("output_tokens", 0) or 0)
+                totals["reasoning"] += int(usage.get("reasoning_output_tokens", 0) or 0)
+                totals["cache_read"] += int(usage.get("cached_input_tokens", 0) or 0)
     return totals
 
 

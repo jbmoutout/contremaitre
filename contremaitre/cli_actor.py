@@ -48,7 +48,7 @@ import time
 from pathlib import Path
 
 from .actors import ActorError, ActorOutput, _run_detached_container
-from .jsonlog import append_text_event, append_transcript
+from .jsonlog import append_transcript
 from .models import RunConfig, RunPaths
 
 # codex REQUIRES tokens.refresh_token present and non-empty (parser + refresh
@@ -76,31 +76,6 @@ def _codex_model_arg(model: str) -> list[str]:
     return ["-m", model]
 
 
-def _append_usage_step_finish(raw_export: Path, usage: dict) -> None:
-    """Append a codex turn's token usage as an opencode-shaped step_finish event.
-
-    Routing usage through the SAME step_finish channel opencode uses means the
-    TUI renders per-turn tokens (in/out/cache-r) with no CLI-specific code, and
-    costs.* roll it up uniformly. No `cost` key: codex on a subscription is not
-    metered per token, so recorded USD stays an honest $0 while tokens show.
-    """
-
-    tokens = {
-        "input": usage.get("input_tokens", 0),
-        "output": usage.get("output_tokens", 0),
-        "reasoning": usage.get("reasoning_output_tokens", 0),
-        "cache": {"read": usage.get("cached_input_tokens", 0)},
-    }
-    event = {
-        "type": "step_finish",
-        "timestamp": int(time.time() * 1000),
-        "part": {"tokens": tokens},
-    }
-    raw_export.parent.mkdir(parents=True, exist_ok=True)
-    with raw_export.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event) + "\n")
-
-
 def _access_token_exp(auth_path: Path) -> int | None:
     """Return the access_token JWT's `exp` (unix seconds), or None.
 
@@ -125,13 +100,18 @@ def _access_token_exp(auth_path: Path) -> int | None:
     return exp if isinstance(exp, int) else None
 
 
-def _parse_codex_events(events_path: Path) -> tuple[str, str | None, dict | None, str | None]:
+def _parse_codex_events(
+    events_path: Path, *, start_offset: int = 0
+) -> tuple[str, str | None, dict | None, str | None]:
     """Extract (final_text, session_id, usage, error) from codex `--json` stdout.
 
     codex emits JSONL: `thread.started` (carries thread_id = session id),
     `item.completed` (the `agent_message` item carries the final text),
     `turn.completed` (carries a `usage` token breakdown), and on failure
     `turn.failed` / `error`. We take the LAST agent_message as the final reply.
+
+    `start_offset` (a byte offset) scopes parsing to a single turn's slice of a
+    multi-turn raw_export — the runner streams every turn into the same file.
     """
 
     final_text = ""
@@ -140,7 +120,10 @@ def _parse_codex_events(events_path: Path) -> tuple[str, str | None, dict | None
     error: str | None = None
     if not events_path.exists():
         return final_text, session_id, usage, error
-    for line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    with events_path.open("r", encoding="utf-8", errors="replace") as fh:
+        fh.seek(start_offset)
+        slice_text = fh.read()
+    for line in slice_text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -268,7 +251,6 @@ class CliActorRunner:
             phase="REVIEW",
             speaker="sim",
             extra_mounts=((review_dir, "/review", "ro"),),
-            events_basename=f"codex_review_{reviewer_id}_{attempt}_events.jsonl",
         )
 
     # ----- security-critical seams -----------------------------------------
@@ -374,20 +356,18 @@ class CliActorRunner:
         phase: str,
         speaker: str,
         extra_mounts: tuple[tuple[Path, str, str], ...] = (),
-        events_basename: str | None = None,
     ) -> ActorOutput:
         self._assert_egress_locked()
         codex_home = self.prepare_codex_home(home)
         session_id = getattr(self, session_attr) if session_attr else None
 
         # codex `--json` stdout IS the event stream; we point the detached
-        # runner's stdout at a per-turn sidecar (keeps raw_export pure: we
-        # append one opencode-shaped text event for the final reply, like the
-        # fake actor, so downstream JSONL readers stay uniform).
-        events_basename = events_basename or f"codex_{role}_events.jsonl"
-        events_path = self.paths.run_dir / events_basename
-        if events_path.exists():
-            events_path.unlink()
+        # runner's stdout straight at raw_export so the TUI tails codex's
+        # reasoning/command/message items LIVE as the turn runs (rather than
+        # only seeing the final reply at turn end). raw_export accumulates
+        # across turns; we parse only THIS turn's slice via the byte offset.
+        start_offset = raw_export.stat().st_size if raw_export.exists() else 0
+        raw_export.parent.mkdir(parents=True, exist_ok=True)
 
         cmd = self._build_codex_command(
             prompt=prompt,
@@ -402,13 +382,15 @@ class CliActorRunner:
         returncode, stderr, _fast_fail = _run_detached_container(
             cmd=cmd,
             env=env,
-            stdout_path=events_path,
+            stdout_path=raw_export,
             timeout_seconds=timeout_seconds,
             role=role,
             stdout_stall_seconds=self.config.opencode_stdout_stall_seconds or None,
         )
 
-        final_text, parsed_session, usage, error = _parse_codex_events(events_path)
+        final_text, parsed_session, _usage, error = _parse_codex_events(
+            raw_export, start_offset=start_offset
+        )
         if returncode != 0:
             raise ActorError(
                 f"{role} codex exited {returncode}: {error or stderr[:500]}"
@@ -418,10 +400,10 @@ class CliActorRunner:
 
         if session_attr and parsed_session:
             setattr(self, session_attr, parsed_session)
-        if usage is not None:
-            _append_usage_step_finish(raw_export, usage)
-
-        append_text_event(raw_export, role=role, phase=phase, text=final_text)
+        # No synthetic events: the codex stream in raw_export already carries
+        # the final agent_message (TUI renders it) and turn.completed usage
+        # (costs.sum_token_usage rolls it up). Transcript stays the curated,
+        # human-readable record of the final reply per turn.
         append_transcript(self.paths.transcript, speaker=speaker, phase=phase, text=final_text)
         return ActorOutput(text=final_text, stderr=stderr, returncode=returncode)
 

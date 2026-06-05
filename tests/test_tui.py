@@ -1434,3 +1434,56 @@ def test_cli_review_tool_header_renders_divider_with_tool_name():
     assert "──" in sep.plain
     sep_codex = _cli_review_tool_header("codex")
     assert "codex review" in sep_codex.plain
+
+
+# ----- codex --json event rendering (CLI actor streams these into raw_export) -----
+
+
+def _row_plain(ev):
+    _marker, _ts, typ, tool, body = _build_event_row(ev)
+    plain = lambda x: x.plain if hasattr(x, "plain") else str(x)  # noqa: E731
+    return plain(typ), plain(tool), plain(body)
+
+
+def test_codex_command_execution_renders_command_and_exit():
+    typ, tool, body = _row_plain(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "sed -n app.py",
+                "aggregated_output": "def f(): ...",
+                "exit_code": 0,
+            },
+        }
+    )
+    assert typ == "command"
+    assert tool == "bash"
+    assert "sed -n app.py" in body
+    assert "exit 0" in body
+
+
+def test_codex_agent_message_renders_as_text():
+    typ, _tool, body = _row_plain(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "hello world"}}
+    )
+    assert typ == "text"
+    assert "hello world" in body
+
+
+def test_codex_turn_completed_shows_tokens():
+    typ, _tool, body = _row_plain(
+        {"type": "turn.completed",
+         "usage": {"input_tokens": 5, "output_tokens": 2, "cached_input_tokens": 1}}
+    )
+    assert typ == "turn_done"
+    assert "in 5" in body and "out 2" in body
+
+
+def test_text_event_count_includes_codex_agent_message():
+    events_list = [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "x"}},
+        {"type": "text"},
+        {"type": "item.completed", "item": {"type": "command_execution"}},  # not a turn
+    ]
+    assert _text_event_count(events_list) == 2

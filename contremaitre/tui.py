@@ -946,7 +946,18 @@ def _truncate_pr_title(title: str | None, limit: int = 60) -> str | None:
 
 
 def _text_event_count(events: list[dict[str, Any]]) -> int:
-    return sum(1 for e in events if e.get("type") == "text")
+    # opencode emits `text`; the codex CLI actor emits the reply as an
+    # `item.completed` agent_message — both count as one actor turn.
+    return sum(
+        1
+        for e in events
+        if e.get("type") == "text"
+        or (
+            e.get("type") == "item.completed"
+            and isinstance(e.get("item"), dict)
+            and e["item"].get("type") == "agent_message"
+        )
+    )
 
 
 def _task_count(events: list[dict[str, Any]]) -> int:
@@ -1386,7 +1397,65 @@ def _build_event_row(event: dict[str, Any]):
             Text(msg, style="red"),
         )
 
+    # ----- codex --json shapes (CLI actor streams these into raw_export) -----
+    if t == "thread.started":
+        return ("", ts, Text("session", style="dim"), "", Text(event.get("thread_id", ""), style="dim"))
+
+    if t == "turn.started":
+        return ("", ts, Text("turn", style="dim"), "", "")
+
+    if t == "turn.completed":
+        u = event.get("usage") or {}
+        bits = [
+            f"in {u.get('input_tokens', 0):,}",
+            f"out {u.get('output_tokens', 0):,}",
+            f"cache-r {u.get('cached_input_tokens', 0):,}",
+        ]
+        return ("", ts, Text("turn_done", style="dim"), "", Text(" ".join(bits), style="dim"))
+
+    if t in ("item.started", "item.completed"):
+        return _codex_item_row(event, ts)
+
     return ("", ts, Text(t or "?", style="dim"), "", "")
+
+
+def _codex_item_row(event: dict[str, Any], ts: str):
+    """Row for a codex `item.started`/`item.completed` event.
+
+    Renders the agent's live work: command executions (with output + exit code),
+    the final agent_message (as a `text` row, like opencode), reasoning, and a
+    generic fallback for any other item type.
+    """
+
+    item = event.get("item") or {}
+    itype = item.get("type")
+    completed = event.get("type") == "item.completed"
+
+    if itype == "agent_message":
+        txt = item.get("text") or ""
+        body = Text()
+        body.append(f"{len(txt):,} chars\n", style="dim")
+        body.append(txt)
+        return (Text("▍", style="blue"), ts, Text("text", style="bold"), "", body)
+
+    if itype == "command_execution":
+        body = Text()
+        body.append((item.get("command") or "") + "\n", style="cyan")
+        if completed:
+            out = (item.get("aggregated_output") or "").rstrip()
+            if out:
+                body.append(out + "\n", style="dim")
+            body.append(f"exit {item.get('exit_code')}", style="dim")
+        else:
+            body.append("running…", style="dim")
+        return ("", ts, Text("command", style="bold"), Text("bash", style="bold cyan"), body)
+
+    if itype == "reasoning":
+        txt = item.get("text") or item.get("summary") or ""
+        return ("", ts, Text("reasoning", style="dim"), "", Text(str(txt), style="dim italic"))
+
+    summary = json.dumps({k: v for k, v in item.items() if k != "id"})[:200]
+    return ("", ts, Text(itype or "item", style="dim"), "", Text(summary, style="dim"))
 
 
 def _event_table() -> "Table":
