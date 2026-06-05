@@ -10,6 +10,7 @@ from pathlib import Path
 from contremaitre.cli_actor import (
     CliActorRunner,
     _access_token_exp,
+    _codex_model_arg,
     _parse_codex_events,
 )
 from contremaitre.models import ActorMode, RunConfig
@@ -168,6 +169,20 @@ class BuildCommandTest(unittest.TestCase):
             # -m model is omitted on resume (the session carries it).
             self.assertNotIn("-m", cmd[cmd.index("resume"):])
 
+    def test_first_turn_omits_m_for_openrouter_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, _ = _make_runner(
+                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
+            )
+            cmd = runner._build_codex_command(
+                prompt="do it", codex_home=runner.agent_home,
+                session_id=None, model="openrouter/deepseek/deepseek-v4-flash",
+                mount_mode="rw", role="agent", extra_mounts=(),
+            )
+            # codex rejects OpenRouter models on a ChatGPT account → no -m,
+            # codex falls back to its subscription default.
+            self.assertNotIn("-m", cmd)
+
     def test_review_mounts_worktree_readonly(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(
@@ -181,6 +196,15 @@ class BuildCommandTest(unittest.TestCase):
             joined = " ".join(cmd)
             self.assertIn(f"{runner.worktree}:/app:ro", joined)
             self.assertIn("/tmp/rev:/review:ro", joined)
+
+
+class CodexModelArgTest(unittest.TestCase):
+    def test_omits_openrouter_and_empty(self):
+        self.assertEqual(_codex_model_arg("openrouter/deepseek/deepseek-v4-flash"), [])
+        self.assertEqual(_codex_model_arg(""), [])
+
+    def test_passes_codex_native_model(self):
+        self.assertEqual(_codex_model_arg("gpt-5.5"), ["-m", "gpt-5.5"])
 
 
 class ParseEventsTest(unittest.TestCase):

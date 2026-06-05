@@ -61,6 +61,20 @@ _NEUTERED_REFRESH_TOKEN = "x"
 _REFRESH_MARGIN_SECONDS = 24 * 3600
 
 
+def _codex_model_arg(model: str) -> list[str]:
+    """`["-m", model]`, or `[]` when codex should use its subscription default.
+
+    RunConfig.agent_model/sim_model are OpenRouter-namespaced (for opencode);
+    codex on a ChatGPT account rejects those, so we omit -m and let codex pick
+    its account default. A codex-native model name (e.g. "gpt-5.5") passes
+    through.
+    """
+
+    if not model or model.startswith("openrouter/"):
+        return []
+    return ["-m", model]
+
+
 def _access_token_exp(auth_path: Path) -> int | None:
     """Return the access_token JWT's `exp` (unix seconds), or None.
 
@@ -389,7 +403,10 @@ class CliActorRunner:
         if session_id:
             inner += ["resume", session_id, prompt]
         else:
-            inner += ["-m", model, prompt]
+            # OpenRouter-namespaced models (the opencode default) are rejected
+            # by codex on a ChatGPT account; omit -m so codex uses its
+            # subscription default. A codex-native model name passes through.
+            inner += _codex_model_arg(model) + [prompt]
 
         cmd = [
             "docker",
