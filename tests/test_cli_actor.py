@@ -17,6 +17,7 @@ from contremaitre.cli_actor import (
     _codex_effort_arg,
     _codex_model_arg,
     _parse_codex_events,
+    _stamp_codex_slice,
 )
 from contremaitre.costs import sum_token_usage
 from contremaitre.models import ActorMode, RunConfig
@@ -630,6 +631,63 @@ class ParseEventsTest(unittest.TestCase):
             text, sid, usage, error = _parse_codex_events(p)
             self.assertEqual(text, "")
             self.assertIn("401", error)
+
+
+class StampCodexSliceTest(unittest.TestCase):
+    """codex events arrive clockless; we back-fill real per-turn timestamps so
+    the viewer / TUI-attach show measured times instead of guesses."""
+
+    def _turn(self):
+        return [
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}}
+            ),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "hi"}}),
+            json.dumps(
+                {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 2}}
+            ),
+        ]
+
+    def test_stamps_events_within_turn_window_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "raw.jsonl"
+            p.write_text("\n".join(self._turn()) + "\n")
+            _stamp_codex_slice(p, start_offset=0, t_start=1000.0, t_end=1002.0)
+            stamped = [json.loads(ln) for ln in p.read_text().splitlines()]
+            ts = [e["timestamp"] for e in stamped]
+            # Every event stamped, monotonic, inside [t_start, t_end] in ms.
+            self.assertEqual(len(ts), 4)
+            self.assertEqual(ts, sorted(ts))
+            self.assertGreaterEqual(ts[0], 1_000_000)
+            self.assertLessEqual(ts[-1], 1_002_000)
+            # The final reply lands at ~turn-end (what the chat orders bubbles by).
+            self.assertEqual(ts[-1], 1_002_000)
+            # Content survives the rewrite — the turn still parses.
+            text, _sid, usage, _err = _parse_codex_events(p)
+            self.assertEqual(text, "hi")
+            self.assertEqual(usage["input_tokens"], 5)
+
+    def test_only_rewrites_the_offset_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "raw.jsonl"
+            prior = json.dumps({"type": "turn.completed", "timestamp": 42}) + "\n"
+            p.write_text(prior)
+            off = len(prior.encode("utf-8"))
+            with p.open("a") as fh:
+                fh.write("\n".join(self._turn()) + "\n")
+            _stamp_codex_slice(p, start_offset=off, t_start=1000.0, t_end=1001.0)
+            lines = [json.loads(ln) for ln in p.read_text().splitlines()]
+            # Prior turn's existing timestamp is untouched; new slice is stamped.
+            self.assertEqual(lines[0]["timestamp"], 42)
+            self.assertTrue(all("timestamp" in e for e in lines[1:]))
+
+    def test_preserves_existing_timestamps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "raw.jsonl"
+            p.write_text(json.dumps({"type": "turn.started", "timestamp": 7}) + "\n")
+            _stamp_codex_slice(p, start_offset=0, t_start=1000.0, t_end=1001.0)
+            self.assertEqual(json.loads(p.read_text())["timestamp"], 7)
 
 
 if __name__ == "__main__":

@@ -167,6 +167,78 @@ def _parse_codex_events(
     return final_text, session_id, usage, error
 
 
+def _stamp_codex_slice(
+    events_path: Path,
+    *,
+    start_offset: int,
+    t_start: float,
+    t_end: float,
+) -> None:
+    """Back-fill real per-event `timestamp`s onto this turn's codex slice.
+
+    codex `exec --json` emits no per-event clock, so without this every codex
+    event lands timestamp-less on disk and any post-hoc reader (the viewer, a
+    TUI attach) can only guess at when things happened. We can't observe each
+    line's arrival (the runner pipes codex stdout straight to the file), but we
+    DO know the turn's real wall-clock window — so we interpolate evenly across
+    `[t_start, t_end]` in stream order. The final `agent_message` / `turn.completed`
+    thus land at ~turn-end, which is what the chat orders bubbles by.
+
+    Only this turn's slice (`start_offset` → EOF) is rewritten; earlier turns
+    were stamped by their own call. Events that already carry a `timestamp`
+    (defensive, in case codex starts emitting one) are left untouched, and the
+    line COUNT is preserved so the TUI's line-index tail is unaffected. Best
+    effort: any I/O or decode failure leaves the slice as-is.
+    """
+
+    try:
+        with events_path.open("r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(start_offset)
+            slice_text = fh.read()
+    except OSError:
+        return
+    if not slice_text.strip():
+        return
+
+    raw_lines = slice_text.splitlines()
+    content_positions = [i for i, ln in enumerate(raw_lines) if ln.strip()]
+    n = len(content_positions)
+    rank = {line_idx: k for k, line_idx in enumerate(content_positions)}
+
+    start_ms = int(t_start * 1000)
+    span_ms = max(int(t_end * 1000) - start_ms, 0)
+
+    out_lines: list[str] = []
+    changed = False
+    for i, ln in enumerate(raw_lines):
+        if not ln.strip():
+            out_lines.append(ln)
+            continue
+        try:
+            ev = json.loads(ln)
+        except json.JSONDecodeError:
+            out_lines.append(ln)
+            continue
+        if isinstance(ev, dict) and "timestamp" not in ev:
+            k = rank[i]
+            offset = int(k / (n - 1) * span_ms) if n > 1 else span_ms
+            ev["timestamp"] = start_ms + offset
+            out_lines.append(json.dumps(ev, ensure_ascii=False))
+            changed = True
+        else:
+            out_lines.append(ln)
+
+    if not changed:
+        return
+    try:
+        with events_path.open("r+", encoding="utf-8") as fh:
+            fh.seek(start_offset)
+            fh.truncate()
+            fh.write("\n".join(out_lines) + "\n")
+    except OSError:
+        return
+
+
 class CliActorRunner:
     """Drive codex headlessly in the per-run container as agent / SIM / reviewer.
 
@@ -395,6 +467,9 @@ class CliActorRunner:
             extra_mounts=extra_mounts,
         )
         env = self._docker_env()
+        # Bracket the container with wall-clock so we can back-fill real
+        # timestamps onto the (clockless) codex event slice it appends.
+        t_start = time.time()
         returncode, stderr, _fast_fail = _run_detached_container(
             cmd=cmd,
             env=env,
@@ -402,6 +477,9 @@ class CliActorRunner:
             timeout_seconds=timeout_seconds,
             role=role,
             stdout_stall_seconds=self.config.opencode_stdout_stall_seconds or None,
+        )
+        _stamp_codex_slice(
+            raw_export, start_offset=start_offset, t_start=t_start, t_end=time.time()
         )
 
         final_text, parsed_session, _usage, error = _parse_codex_events(

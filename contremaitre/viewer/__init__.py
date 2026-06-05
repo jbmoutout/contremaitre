@@ -66,9 +66,14 @@ def build_viewer(paths: RunPaths) -> Path:
 
 def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     stats_raw = _read_json(paths.stats, default={})
-    agent_events = _read_jsonl(paths.raw_export)
-    sim_events = _read_jsonl(paths.sim_raw_export)
-    extra_reviewer_events = _read_jsonl(paths.extra_reviewer_raw_export)
+    # Normalize every actor stream to opencode's event vocabulary up front so
+    # codex agent/SIM/reviewer turns are visible to all consumers below. Then
+    # back-fill synthetic timestamps on the clockless (codex) streams so their
+    # turns interleave with timestamped opencode turns instead of piling at t=0.
+    agent_events = _normalize_events(_read_jsonl(paths.raw_export))
+    sim_events = _normalize_events(_read_jsonl(paths.sim_raw_export))
+    extra_reviewer_events = _normalize_events(_read_jsonl(paths.extra_reviewer_raw_export))
+    _assign_synthetic_timestamps([agent_events, sim_events, extra_reviewer_events])
     extra_reviewer_enabled = bool(extra_reviewer_events) or bool(
         stats_raw.get("extra_reviewer_model")
     )
@@ -319,6 +324,244 @@ def _event_duration(
     return round(t1 - t0, 3)
 
 
+# ----- codex → opencode event normalization -----
+
+_CODEX_EVENT_TYPES = frozenset(
+    {"thread.started", "turn.started", "turn.completed", "item.started", "item.completed"}
+)
+
+
+def _is_codex_stream(events: list[dict[str, Any]]) -> bool:
+    """True when this stream is codex `exec --json` output, not opencode's.
+
+    codex speaks a thread/turn/item vocabulary and omits the `part`/`timestamp`
+    envelope opencode uses; a single codex-shaped event is enough to tell.
+    """
+
+    return any(ev.get("type") in _CODEX_EVENT_TYPES for ev in events)
+
+
+def _normalize_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate a codex stream into opencode's event shape; pass others through.
+
+    Every downstream consumer (`_summarize_events`, `_build_timeline`,
+    `_build_chat`) understands only opencode's vocabulary (`tool_use` / `text` /
+    `step_finish`, each wrapped in a `part`). codex emits a different one, so
+    without this adapter codex agent/SIM/reviewer turns are invisible in the
+    viewer. Token counting mirrors `costs.sum_token_usage` (raw
+    `input_tokens` / `output_tokens`, no cache subtraction) for consistency
+    with the orchestrator's own rollup.
+    """
+
+    if not _is_codex_stream(events):
+        return events
+    return _codex_to_opencode(events)
+
+
+def _codex_to_opencode(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten codex thread/turn/item events into opencode-shaped events.
+
+    Per codex turn we emit, in order: every non-message item as a `tool_use`,
+    one `step_finish` carrying the turn's token usage, then a closing `text`
+    event holding the `agent_message`. That order matches what `_stream_turns`
+    expects (tools + tokens accrue, then the text flushes the turn), so a codex
+    turn renders as one chat bubble with its command trace attached.
+    """
+
+    out: list[dict[str, Any]] = []
+    tools: list[dict[str, Any]] = []
+    text = ""
+    text_ts: int | float | None = None
+    usage: dict[str, Any] | None = None
+    usage_ts: int | float | None = None
+    open_turn = False
+
+    def flush() -> None:
+        nonlocal tools, text, text_ts, usage, usage_ts, open_turn
+        if not open_turn:
+            return
+        out.extend(tools)
+        if usage:
+            out.append(
+                {
+                    "type": "step_finish",
+                    "timestamp": usage_ts,
+                    "part": {
+                        "tokens": {
+                            "input": int(usage.get("input_tokens") or 0),
+                            "output": int(usage.get("output_tokens") or 0),
+                        },
+                        "cost": 0,
+                    },
+                }
+            )
+        # Always close with a text event so `_stream_turns` flushes the turn,
+        # even when codex produced no agent_message (a tools-only turn). The
+        # bubble's timestamp drives chat ordering, so fall back to the turn's
+        # usage clock when the message itself carried none.
+        out.append(
+            {
+                "type": "text",
+                "timestamp": text_ts if text_ts is not None else usage_ts,
+                "part": {"text": text},
+            }
+        )
+        tools = []
+        text = ""
+        text_ts = None
+        usage = None
+        usage_ts = None
+        open_turn = False
+
+    for ev in events:
+        etype = ev.get("type")
+        # codex events are clockless on disk for legacy runs, but newer runs
+        # carry a real `timestamp` (back-filled in cli_actor._stamp_codex_slice);
+        # propagate it so the chat shows measured times, not synthetic ones.
+        ts = ev.get("timestamp")
+        if etype in ("turn.started", "thread.started"):
+            flush()  # close any turn left open by a missing turn.completed
+            open_turn = etype == "turn.started"
+        elif etype == "item.completed":
+            open_turn = True
+            item = ev.get("item")
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "agent_message":
+                t = item.get("text")
+                if isinstance(t, str):
+                    text = t
+                    text_ts = ts
+            else:
+                tools.append(_codex_item_tool(item, ts=ts))
+        elif etype == "turn.completed":
+            u = ev.get("usage")
+            if isinstance(u, dict):
+                usage = u
+                usage_ts = ts
+            flush()
+    flush()
+    return out
+
+
+def _codex_item_tool(item: dict[str, Any], *, ts: int | float | None = None) -> dict[str, Any]:
+    """One codex non-message item → an opencode `tool_use` event.
+
+    `command_execution` maps to a bash card (command + aggregated output, status
+    from the exit code); `reasoning` to a card whose body is the thought; any
+    other item type dumps its remaining fields generically so it still renders.
+    `ts` carries the source event's clock through when present.
+    """
+
+    itype = item.get("type") or "item"
+    if itype == "command_execution":
+        cmd = item.get("command") or ""
+        exit_code = item.get("exit_code")
+        failed = isinstance(exit_code, int) and exit_code != 0
+        return _tool_event(
+            "bash",
+            status="error" if failed else "completed",
+            title=_first_line(cmd),
+            inp={"command": cmd},
+            output=item.get("aggregated_output") or "",
+            metadata={"exit_code": exit_code} if exit_code is not None else {},
+            ts=ts,
+        )
+    if itype == "reasoning":
+        return _tool_event(
+            "reasoning",
+            status="completed",
+            title="reasoning",
+            inp={},
+            output=item.get("text") or "",
+            ts=ts,
+        )
+    body = {k: v for k, v in item.items() if k not in ("id", "type")}
+    return _tool_event(
+        itype,
+        status=item.get("status") or "completed",
+        title=itype,
+        inp=body,
+        output="",
+        ts=ts,
+    )
+
+
+def _tool_event(
+    tool: str,
+    *,
+    status: str,
+    title: str,
+    inp: dict[str, Any],
+    output: str,
+    metadata: dict[str, Any] | None = None,
+    ts: int | float | None = None,
+) -> dict[str, Any]:
+    return {
+        "type": "tool_use",
+        "timestamp": ts,
+        "part": {
+            "tool": tool,
+            "state": {
+                "status": status,
+                "title": title,
+                "input": inp,
+                "output": output,
+                "metadata": metadata or {},
+            },
+        },
+    }
+
+
+def _first_line(text: str) -> str:
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    return stripped.splitlines()[0][:200]
+
+
+def _assign_synthetic_timestamps(streams: list[list[dict[str, Any]]]) -> None:
+    """Back-fill `timestamp` on clockless (codex) events, in place.
+
+    codex carries no per-event clock. Two regimes:
+
+      * Some stream has a real clock (e.g. opencode agent + codex SIM): spread
+        each clockless stream's events evenly across the real `[tmin, tmax]`
+        window, preserving file order, so codex turns interleave through the run
+        instead of piling up at t=0. Approximate — flagged `ts_synthetic` so the
+        chat can render the offset as `~` rather than `+`.
+
+      * No real clock anywhere (all-codex run): assign a per-stream running
+        index, staggered by stream position, so round N of each stream sorts
+        together (agent N before SIM N before EXTRA N).
+    """
+
+    real = [
+        ev["timestamp"]
+        for stream in streams
+        for ev in stream
+        if isinstance(ev.get("timestamp"), (int, float))
+    ]
+    if real:
+        tmin, tmax = min(real), max(real)
+        span = (tmax - tmin) or 1
+        for stream in streams:
+            missing = [ev for ev in stream if not isinstance(ev.get("timestamp"), (int, float))]
+            n = len(missing)
+            if not n:
+                continue
+            for i, ev in enumerate(missing):
+                ev["timestamp"] = tmin + int((i + 0.5) / n * span)
+                ev["ts_synthetic"] = True
+    else:
+        width = len(streams) or 1
+        for offset, stream in enumerate(streams):
+            for i, ev in enumerate(stream):
+                if not isinstance(ev.get("timestamp"), (int, float)):
+                    ev["timestamp"] = i * width + offset
+                    ev["ts_synthetic"] = True
+
+
 def _summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     tool_counts: dict[str, int] = {}
     n_tool_uses = 0
@@ -426,7 +669,7 @@ def _stream_turns(events: list[dict[str, Any]], role: str) -> list[dict[str, Any
     pending_tokens = 0
     pending_cost = 0.0
 
-    def _flush(ts: int | None, text: str) -> None:
+    def _flush(ts: int | None, text: str, synthetic: bool = False) -> None:
         nonlocal pending_tools, pending_tokens, pending_cost
         if not pending_tools and not text.strip():
             return
@@ -438,6 +681,7 @@ def _stream_turns(events: list[dict[str, Any]], role: str) -> list[dict[str, Any
             {
                 "who": role,
                 "ts": ts,
+                "ts_synthetic": synthetic,
                 "text": text,
                 "tools": pending_tools,
                 "summary": summary,
@@ -478,7 +722,7 @@ def _stream_turns(events: list[dict[str, Any]], role: str) -> list[dict[str, Any
             pending_cost += float(part.get("cost") or 0)
         elif t == "text":
             text = part.get("text") or ev.get("text") or ""
-            _flush(ts, text)
+            _flush(ts, text, bool(ev.get("ts_synthetic")))
 
     # Trailing tools with no closing text — still worth surfacing.
     if pending_tools:
@@ -646,7 +890,6 @@ def _render_html(data: dict[str, Any], *, run_id: str) -> str:
 <nav class="viewer-nav" id="nav"></nav>
 
 <section id="overview" class="active"></section>
-<section id="chat"></section>
 <section id="conversation"></section>
 <section id="timeline"></section>
 <section id="subagents"></section>

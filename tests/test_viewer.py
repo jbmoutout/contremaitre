@@ -1,8 +1,9 @@
 """Tests for the run-viewer assembler.
 
-The viewer is observability — it must build at every run terminus, and it
-must not let agent-written content break out of the DATA payload. Two
-tests, one for each invariant.
+The viewer is observability — it must build at every run terminus, must not
+let agent-written content break out of the DATA payload, and must surface
+codex `exec --json` streams (a foreign event vocabulary with no clock) as
+chat turns alongside opencode's.
 """
 
 from __future__ import annotations
@@ -18,7 +19,40 @@ from contremaitre.jsonlog import write_json
 from contremaitre.models import Caps, RunConfig
 from contremaitre.orchestrator import run
 from contremaitre.paths import build_run_paths, new_run_id
-from contremaitre.viewer import VIEWER_FILENAME, build_viewer
+from contremaitre.viewer import (
+    VIEWER_FILENAME,
+    _assign_synthetic_timestamps,
+    _build_chat,
+    _normalize_events,
+    build_viewer,
+)
+
+
+def _codex_turn_events(command, output, message, *, input_tokens=100, output_tokens=20):
+    """One codex `exec --json` turn: a command, its result, and a final reply."""
+
+    return [
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_0",
+                "type": "command_execution",
+                "command": command,
+                "aggregated_output": output,
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "item_1", "type": "agent_message", "text": message},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        },
+    ]
 
 
 def _extract_data_payload(html: str) -> dict:
@@ -92,6 +126,96 @@ class ViewerTest(unittest.TestCase):
         # The escaped payload is still parseable as JSON — escaping must
         # not corrupt the data the renderer reads.
         _extract_data_payload(html)
+
+
+class CodexNormalizationTest(unittest.TestCase):
+    """codex `exec --json` streams must surface in the chat like opencode's.
+
+    codex speaks a thread/turn/item vocabulary with no per-event clock, so
+    without normalization its agent/SIM turns are invisible in the viewer.
+    """
+
+    def test_codex_stream_becomes_chat_turns(self):
+        events = _normalize_events(
+            _codex_turn_events("ls -la", "total 0", "First reply.")
+            + _codex_turn_events("cat x.py", "print(1)", "Second reply.")
+        )
+        _assign_synthetic_timestamps([events])
+        chat = _build_chat(events, [])
+        turns = chat["turns"]
+        self.assertEqual([t["text"] for t in turns], ["First reply.", "Second reply."])
+        # The command became a bash tool card on its turn.
+        self.assertEqual(turns[0]["tools"][0]["tool"], "bash")
+        self.assertEqual(turns[0]["tools"][0]["input"]["command"], "ls -la")
+        self.assertEqual(turns[0]["tools"][0]["output"], "total 0")
+        # turn.completed usage rolled into the turn's token total.
+        self.assertEqual(chat["totals"]["AGENT"]["tokens"], 240)
+        self.assertEqual(chat["totals"]["AGENT"]["msgs"], 2)
+
+    def test_opencode_stream_passes_through_untouched(self):
+        opencode = [
+            {"type": "text", "timestamp": 1000, "part": {"text": "hi"}},
+            {
+                "type": "step_finish",
+                "timestamp": 1001,
+                "part": {"tokens": {"input": 5, "output": 3}},
+            },
+        ]
+        self.assertIs(_normalize_events(opencode), opencode)
+
+    def test_real_codex_timestamps_are_preserved_not_synthesized(self):
+        """Newer codex runs back-fill real timestamps at the source
+        (cli_actor._stamp_codex_slice); the viewer must use them verbatim and
+        NOT overwrite them with the synthetic spread reserved for legacy runs."""
+
+        events = _codex_turn_events("ls", "out", "the reply")
+        for i, ev in enumerate(events):  # as the source stamper would
+            ev["timestamp"] = 5000 + i
+        norm = _normalize_events(events)
+        _assign_synthetic_timestamps([norm])
+        turn = _build_chat(norm, [])["turns"][0]
+        self.assertFalse(turn["ts_synthetic"])
+        # The bubble carries the agent_message's real clock, not a guess.
+        self.assertEqual(turn["ts"], 5002)
+
+    def test_synthetic_timestamps_interleave_codex_into_real_clock(self):
+        """A codex SIM turn must sort between the opencode agent turns, not at t=0."""
+
+        agent = [
+            {"type": "text", "timestamp": 1000, "part": {"text": "agent early"}},
+            {"type": "text", "timestamp": 3000, "part": {"text": "agent late"}},
+        ]
+        sim = _normalize_events(_codex_turn_events("grep x", "found", "sim middle"))
+        _assign_synthetic_timestamps([agent, sim])
+        chat = _build_chat(agent, sim)
+        order = [(t["who"], t["text"]) for t in chat["turns"]]
+        self.assertEqual(
+            order,
+            [("AGENT", "agent early"), ("SIM", "sim middle"), ("AGENT", "agent late")],
+        )
+        sim_turn = next(t for t in chat["turns"] if t["who"] == "SIM")
+        self.assertTrue(sim_turn["ts_synthetic"])
+
+    def test_all_codex_run_alternates_by_round(self):
+        """No real clock anywhere: agent N and SIM N stagger in round order."""
+
+        agent = _normalize_events(
+            _codex_turn_events("a1", "o1", "agent r1") + _codex_turn_events("a2", "o2", "agent r2")
+        )
+        sim = _normalize_events(
+            _codex_turn_events("s1", "o1", "sim r1") + _codex_turn_events("s2", "o2", "sim r2")
+        )
+        _assign_synthetic_timestamps([agent, sim])
+        chat = _build_chat(agent, sim)
+        self.assertEqual(
+            [(t["who"], t["text"]) for t in chat["turns"]],
+            [
+                ("AGENT", "agent r1"),
+                ("SIM", "sim r1"),
+                ("AGENT", "agent r2"),
+                ("SIM", "sim r2"),
+            ],
+        )
 
 
 if __name__ == "__main__":
