@@ -515,6 +515,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("aborted", file=sys.stderr)
         return 130
+    _maybe_provision_cli_egress(args)
     config = _config_from_args(args, repo=cache_path)
     rc = _ensure_default_image_built(config)
     if rc != 0:
@@ -936,6 +937,40 @@ def _pick_models_interactive(
     return agent, sim, extra, picker_args
 
 
+def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
+    """True when CLI mode should auto-provision egress (no explicit egress config)."""
+
+    if getattr(args, "actor", None) != ActorMode.CLI.value:
+        return False
+    if getattr(args, "allow_open_egress", False):
+        return False
+    return not (getattr(args, "docker_network", None) or getattr(args, "https_proxy", None))
+
+
+def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
+    """Stand up the shared allowlist egress proxy and point the run at it.
+
+    Only for `--actor cli` with no explicit `--docker-network`/`--https-proxy`
+    and without `--allow-open-egress`. Mutates `args` so the resolved config
+    (and the runner) see a locked egress. Failure is non-fatal here — preflight
+    and the runner still enforce the egress requirement, so a provision failure
+    surfaces as a clean "egress not configured" refusal rather than a crash.
+    """
+
+    if not _cli_egress_is_auto(args):
+        return
+    from .cli_egress import ensure_egress_proxy
+
+    try:
+        network, proxy = ensure_egress_proxy()
+    except Exception as exc:  # noqa: BLE001 - degrade to the enforced refusal
+        print(f"[warn] CLI egress auto-provision failed: {exc}", file=sys.stderr)
+        return
+    args.docker_network = network
+    args.https_proxy = proxy
+    print(f"[info] CLI egress: {network} + allowlist proxy ({proxy})")
+
+
 def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
     """Launch screen for `--actor cli` (codex/claude on the operator's plan).
 
@@ -972,7 +1007,7 @@ def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
         proxy = "yes" if getattr(args, "https_proxy", None) else "no"
         egress_line = f"egress: locked (network={net}, proxy={proxy})"
     else:
-        egress_line = "egress: NOT set — CLI actor will REFUSE to launch (need network+proxy)"
+        egress_line = "egress: auto-provision allowlist proxy on launch (OpenAI-only)"
 
     if yes_mode:
         print(f"[info] actor=cli tool={tool}; {token_line}; {egress_line}")
