@@ -1445,15 +1445,14 @@ def _codex_item_row(event: dict[str, Any], ts: str):
         return (Text("▍", style="blue"), ts, Text("text", style="bold"), "", body)
 
     if itype == "command_execution":
+        # Just the command + exit status — the aggregated stdout/stderr is noise
+        # in the live pane (and still on disk in raw_export for forensics).
         body = Text()
-        body.append((item.get("command") or "") + "\n", style="cyan")
+        body.append((item.get("command") or "").rstrip(), style="cyan")
         if completed:
-            out = (item.get("aggregated_output") or "").rstrip()
-            if out:
-                body.append(out + "\n", style="dim")
-            body.append(f"exit {item.get('exit_code')}", style="dim")
+            body.append(f"  exit {item.get('exit_code')}", style="dim")
         else:
-            body.append("running…", style="dim")
+            body.append("  running…", style="dim")
         return ("", ts, Text("command", style="bold"), Text("bash", style="bold cyan"), body)
 
     if itype == "reasoning":
@@ -1475,6 +1474,12 @@ def _event_table() -> "Table":
 
 
 def _render_event(event: dict[str, Any]):
+    # codex `--json` events carry no timestamp; stamp first-render (≈ first-seen)
+    # wall-clock so codex rows show a time column too. opencode events already
+    # have `timestamp` and are left alone. Each event is rendered once (the panes
+    # are index-gated), so for a live tail this is the moment it arrived.
+    if not event.get("timestamp"):
+        event["timestamp"] = int(time.time() * 1000)
     marker, ts, typ, tool, body = _build_event_row(event)
     t = _event_table()
     t.add_row(marker, ts, typ, tool, body)

@@ -31,6 +31,7 @@ from contremaitre.tui import (
     _phase_trail,
     _pr_number_from_url,
     _read_jsonl,
+    _render_event,
     _render_guardrail,
     _reviewer_glyph,
     _reviewer_status,
@@ -1461,6 +1462,22 @@ def test_codex_command_execution_renders_command_and_exit():
     assert tool == "bash"
     assert "sed -n app.py" in body
     assert "exit 0" in body
+    # aggregated_output is intentionally NOT rendered (noise; still on disk).
+    assert "def f(): ..." not in body
+
+
+def test_render_event_stamps_codex_event_with_read_time():
+    # codex events carry no timestamp; _render_event stamps first-render
+    # wall-clock so the TUI shows a time column for them.
+    ev = {"type": "item.completed", "item": {"type": "agent_message", "text": "hi"}}
+    _render_event(ev)
+    assert isinstance(ev.get("timestamp"), int) and ev["timestamp"] > 0
+
+
+def test_render_event_preserves_existing_timestamp():
+    ev = {"type": "text", "part": {"text": "x"}, "timestamp": 123}
+    _render_event(ev)
+    assert ev["timestamp"] == 123
 
 
 def test_codex_agent_message_renders_as_text():
