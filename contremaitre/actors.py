@@ -504,22 +504,56 @@ class OpencodeActorRunner:
         append_transcript(self.paths.transcript, speaker=speaker, phase=phase, text=text)
 
 
-def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
-    if config.actor_mode == ActorMode.FAKE:
+class CompositeActorRunner:
+    """Route agent and SIM turns to DIFFERENT backing runtimes.
+
+    Lets a run mix actors per role — e.g. a codex agent paired with an opencode
+    SIM. `agent_turn` goes to the agent runner; `sim_turn` / `sim_review` go to
+    the SIM runner. Each sub-runner owns its own state (sessions, containers);
+    they only share the role-separated `RunPaths` sinks.
+    """
+
+    def __init__(self, *, agent_runner: ActorRunner, sim_runner: ActorRunner):
+        self._agent = agent_runner
+        self._sim = sim_runner
+
+    def agent_turn(self, message: str) -> ActorOutput:
+        return self._agent.agent_turn(message)
+
+    def sim_turn(self, message: str) -> ActorOutput:
+        return self._sim.sim_turn(message)
+
+    def sim_review(self, **kwargs) -> ActorOutput:
+        return self._sim.sim_review(**kwargs)
+
+
+def _make_single_runner(mode: ActorMode, *, config: RunConfig, paths: RunPaths) -> ActorRunner:
+    if mode == ActorMode.FAKE:
         return FakeActorRunner(
             paths=paths,
             agent_scenario=config.agent_scenario,
             sim_scenario=config.sim_scenario,
         )
-    if config.actor_mode == ActorMode.OPENCODE:
+    if mode == ActorMode.OPENCODE:
         return OpencodeActorRunner(config=config, paths=paths)
-    if config.actor_mode == ActorMode.CLI:
+    if mode == ActorMode.CLI:
         # Lazy import: cli_actor imports this module for the shared detached
         # runner, so a top-level import here would be a cycle.
         from .cli_actor import CliActorRunner
 
         return CliActorRunner(config=config, paths=paths, tool=config.cli_tool)
-    raise ActorError(f"unknown actor mode: {config.actor_mode}")
+    raise ActorError(f"unknown actor mode: {mode}")
+
+
+def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
+    agent_mode = config.actor_mode
+    sim_mode = config.sim_actor_mode or config.actor_mode
+    if sim_mode == agent_mode:
+        return _make_single_runner(agent_mode, config=config, paths=paths)
+    return CompositeActorRunner(
+        agent_runner=_make_single_runner(agent_mode, config=config, paths=paths),
+        sim_runner=_make_single_runner(sim_mode, config=config, paths=paths),
+    )
 
 
 def build_docker_command(

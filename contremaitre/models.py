@@ -109,6 +109,10 @@ class RunConfig:
     # Which frontier CLI to drive AS the agent/SIM when actor_mode is CLI.
     # Only "codex" is implemented today (claude pending a headless OAuth token).
     cli_tool: str = "codex"
+    # Per-role actor override: the agent uses `actor_mode`; when this is set the
+    # SIM uses it instead, so a run can MIX runtimes (e.g. a codex agent with an
+    # opencode SIM, or vice versa). None means the SIM shares `actor_mode`.
+    sim_actor_mode: ActorMode | None = None
     sim_scenario: str = "approved"
     extra_reviewer_scenario: str = "approved"
     agent_scenario: str = "normal"

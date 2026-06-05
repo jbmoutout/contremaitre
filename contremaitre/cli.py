@@ -189,6 +189,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Frontier CLI to drive as agent/SIM when --actor cli (claude pending OAuth token)",
     )
+    run_p.add_argument(
+        "--sim-actor",
+        choices=[mode.value for mode in ActorMode],
+        default=None,
+        help="Override the SIM's runtime (default: same as --actor); lets a codex "
+        "agent pair with an opencode SIM, or the reverse",
+    )
     run_p.add_argument("--run-slug", default="run")
     run_p.add_argument(
         "--check-cmd", action="append", default=[], help="Executable check command; repeatable"
@@ -1723,6 +1730,9 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         cli_reviewer=getattr(args, "cli_reviewer", "none"),
         actor_mode=ActorMode(args.actor),
         cli_tool=getattr(args, "cli_tool", "codex"),
+        sim_actor_mode=(
+            ActorMode(args.sim_actor) if getattr(args, "sim_actor", None) else None
+        ),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
         extra_reviewer_scenario=getattr(args, "extra_reviewer_scenario", "approved"),

@@ -59,30 +59,35 @@ class PreflightReport:
 
 
 def run_preflight(config: RunConfig) -> PreflightReport:
-    checks = [_check_repo(config)]
-    if config.actor_mode == ActorMode.OPENCODE:
-        checks.extend(
-            [
-                _check_opencode_config(config),
-                _check_docker_image(config),
-                _check_opencode_binary(config),
-                _check_readonly_mount(config),
-                _check_network_policy(config),
-                _check_openrouter_key(config),
-            ]
-        )
-    elif config.actor_mode == ActorMode.CLI:
+    # The agent uses actor_mode; the SIM may override it (per-role mixing), so
+    # we validate the UNION of both runtimes' requirements. OpenRouter is only
+    # checked if opencode is in play; codex auth only if the CLI actor is.
+    modes = {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    funcs = [_check_repo]
+    if ActorMode.OPENCODE in modes:
+        funcs += [
+            _check_opencode_config,
+            _check_docker_image,
+            _check_opencode_binary,
+            _check_readonly_mount,
+            _check_network_policy,
+            _check_openrouter_key,
+        ]
+    if ActorMode.CLI in modes:
         # CLI actor: no OpenRouter key (codex uses the operator's subscription),
         # but the SAME egress policy applies (the in-container token is a
         # long-lived JWT), plus a codex-auth source check.
-        checks.extend(
-            [
-                _check_docker_image(config),
-                _check_readonly_mount(config),
-                _check_network_policy(config),
-                _check_codex_auth(config),
-            ]
-        )
+        funcs += [
+            _check_docker_image,
+            _check_readonly_mount,
+            _check_network_policy,
+            _check_codex_auth,
+        ]
+    # Dedupe by function identity (image/readonly/network are shared) so each
+    # check runs once even when both runtimes are active.
+    seen: set = set()
+    ordered = [f for f in funcs if not (f in seen or seen.add(f))]
+    checks = [f(config) for f in ordered]
     passed = all(check.status != "FAIL" for check in checks)
     return PreflightReport(passed=passed, checks=checks)
 

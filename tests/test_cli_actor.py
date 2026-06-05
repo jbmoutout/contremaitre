@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
     CliActorRunner,
     _access_token_exp,
@@ -296,6 +297,49 @@ class TokenUsageRollupTest(unittest.TestCase):
                 sum_token_usage(p),
                 {"input": 7, "output": 2, "reasoning": 0, "cache_read": 3},
             )
+
+
+class _StubRunner:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def agent_turn(self, message):
+        self.calls.append("agent")
+
+    def sim_turn(self, message):
+        self.calls.append("sim")
+
+    def sim_review(self, **kwargs):
+        self.calls.append("review")
+
+
+class CompositeRunnerTest(unittest.TestCase):
+    def _runner(self, tmp, **over):
+        paths = build_run_paths(Path(tmp) / "runs", f"20260605-{Path(tmp).name}")
+        paths.run_dir.mkdir(parents=True, exist_ok=True)
+        cfg = RunConfig(
+            repo=Path(tmp), base="main", runs_root=Path(tmp) / "runs", run_slug="t",
+            actor_mode=ActorMode.FAKE, **over,
+        )
+        return make_actor_runner(config=cfg, paths=paths)
+
+    def test_single_runner_when_modes_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertNotIsInstance(self._runner(tmp), CompositeActorRunner)
+
+    def test_composite_when_modes_differ(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self._runner(tmp, sim_actor_mode=ActorMode.CLI)  # fake agent + codex SIM
+            self.assertIsInstance(r, CompositeActorRunner)
+
+    def test_routes_agent_and_sim_to_distinct_runners(self):
+        agent, sim = _StubRunner(), _StubRunner()
+        comp = CompositeActorRunner(agent_runner=agent, sim_runner=sim)
+        comp.agent_turn("x")
+        comp.sim_turn("y")
+        comp.sim_review(diff_file=None, settled_file=None, scenario="", attempt=1)
+        self.assertEqual(agent.calls, ["agent"])  # agent runner gets only the agent turn
+        self.assertEqual(sim.calls, ["sim", "review"])  # sim runner gets sim + review
 
 
 class ParseEventsTest(unittest.TestCase):
