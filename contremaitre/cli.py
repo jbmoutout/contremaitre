@@ -1446,21 +1446,27 @@ def _probe_zen_model(model: str, *, timeout: float = 10.0) -> tuple[str, str | N
 
 
 def _ensure_default_image_built(config: RunConfig) -> int:
-    """Auto-build a known contremaitre image before opencode-mode runs.
+    """Auto-build a known contremaitre image before any real (non-fake) run.
 
-    Fires for `--actor opencode` and any image name that matches a shipped
-    variant. Rebuilds when:
+    Fires whenever the agent OR the SIM needs a container — `--actor opencode`,
+    `--actor cli` (codex), or a mixed/composite pair — and the image name
+    matches a shipped variant. The image is shared by both roles, so a single
+    build covers the mix. Rebuilds when:
     - The image doesn't exist, OR
     - Its `contremaitre.dockerfile-sha256` label is missing or mismatches the
       current Dockerfile contents (catches "Dockerfile edited, image not
-      rebuilt" — the failure mode that left python3/uv missing in the live
-      image even after the Dockerfile was updated).
+      rebuilt" — the failure mode that left python3/uv missing, and would
+      otherwise leave codex missing from a stale pre-codex image).
 
     Custom / third-party images are the operator's responsibility — preflight
     will surface a clean failure with the build hint.
     """
 
-    if config.actor_mode != ActorMode.OPENCODE:
+    # Build whenever any active role needs a container; only a pure-fake run
+    # (no agent and no SIM container) skips. Mirrors preflight's union check
+    # in `preflight.run_preflight`.
+    modes = {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    if modes <= {ActorMode.FAKE}:
         return 0
     auto_build_map = {
         _DEFAULT_IMAGE: _VARIANT_DOCKERFILES["base"],
@@ -1917,6 +1923,33 @@ def _has_flag_in(argv: list[str], flag: str) -> bool:
     return any(item == flag or item.startswith(prefix) for item in argv)
 
 
+def _remove_flag(args: list[str], flag: str) -> None:
+    """Drop every `--flag value` / `--flag=value` occurrence from a passthrough
+    list, in place."""
+
+    prefix = f"{flag}="
+    i = 0
+    while i < len(args):
+        if args[i] == flag:
+            del args[i : i + 2]  # the flag and its separate value
+        elif args[i].startswith(prefix):
+            del args[i]
+        else:
+            i += 1
+
+
+def _set_flag_value(args: list[str], flag: str, value: str) -> None:
+    """Replace (or append) a `--flag value` pair in a passthrough list, in place.
+
+    Used to fold an interactive choice back into the flags forwarded to the
+    `contremaitre run` subprocess without leaving a duplicate the operator may
+    have passed explicitly.
+    """
+
+    _remove_flag(args, flag)
+    args.extend([flag, value])
+
+
 def _fetch_free_models() -> list[dict] | None:
     """Pull OpenCode's model catalog, return selectable Zen free entries.
 
@@ -2008,6 +2041,13 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         forwarded, "--cli-reviewer", _saved.cli_reviewer or "auto"
     )
     docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
+    # The TUI is a real-run surface: default the agent runtime to a real actor
+    # (opencode) rather than `contremaitre run`'s `fake` fixture default, so the
+    # per-role runtime picker actually appears on a bare `tui run` (the picker
+    # early-returns on a `fake` default). An explicit `--actor fake` still
+    # forces a fixture run.
+    actor = _extract_flag_value(forwarded, "--actor", ActorMode.OPENCODE.value)
+    sim_actor = _extract_flag_value(forwarded, "--sim-actor", "") or None
     # Confirmation has to happen BEFORE the subprocess spawn, because once
     # Textual attaches, stdin is owned by the TUI and an `input()` in the
     # subprocess would block invisibly. Pass --yes downstream so the
@@ -2045,6 +2085,9 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer_choice,
+        actor=actor,
+        sim_actor=sim_actor,
+        cli_tool=_extract_flag_value(forwarded, "--cli-tool", "codex"),
         allow_open_egress=("--allow-open-egress" in forwarded),
         docker_network=_extract_flag_value(forwarded, "--docker-network", "") or None,
         http_proxy=_extract_flag_value(forwarded, "--http-proxy", "") or None,
@@ -2081,6 +2124,15 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     sim_model = _extract_flag_value(forwarded, "--sim-model", sim_model)
     extra_reviewer_model = _extract_flag_value(forwarded, "--extra-reviewer-model", "") or None
     cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", cli_reviewer_choice)
+    # Fold the per-role runtime choice (the picker may have changed it) back
+    # into the subprocess flags. The picker writes confirm_args.actor /
+    # .sim_actor; `contremaitre run` reads --actor / --sim-actor.
+    _set_flag_value(forwarded, "--actor", getattr(confirm_args, "actor", actor))
+    resolved_sim = getattr(confirm_args, "sim_actor", sim_actor)
+    if resolved_sim:
+        _set_flag_value(forwarded, "--sim-actor", resolved_sim)
+    else:
+        _remove_flag(forwarded, "--sim-actor")
     if "--yes" not in forwarded and "-y" not in forwarded:
         forwarded.append("--yes")
     if "--repo-cache" not in " ".join(forwarded):
