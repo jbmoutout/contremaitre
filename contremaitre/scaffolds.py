@@ -14,7 +14,7 @@ SETTLED_RELPATH = Path(".contremaitre") / "SETTLED_DESIGN.md"
 IMPLEMENTATION_COMPLETE_RELPATH = Path(".contremaitre") / "IMPLEMENTATION_COMPLETE"
 
 
-def _derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
+def derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
     """Read SETTLED_DESIGN.md and turn it into (commit title, commit body).
 
     Title: first non-empty line, stripped of `# ` and any "Settled design — "

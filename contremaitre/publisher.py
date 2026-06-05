@@ -22,7 +22,7 @@ from .jsonlog import append_jsonl, write_json
 from .models import PublishMode, RunConfig, RunPaths
 from .scaffolds import (
     IMPLEMENTATION_COMPLETE_RELPATH,
-    _derive_commit_message,
+    derive_commit_message,
 )
 
 
@@ -243,8 +243,8 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         except (OSError, ValueError):
             return None
 
-    title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
-    # `_derive_commit_message` appends `\n\n---\nRun: <id>\n` for `git log`
+    title, settled_body = derive_commit_message(paths.worktree, paths.run_id)
+    # `derive_commit_message` appends `\n\n---\nRun: <id>\n` for `git log`
     # readability. The PR body has its own footer with run_id + diff hash,
     # so strip the commit-only trailer to avoid a double separator.
     settled_body = _re.sub(r"\n+---\nRun: [^\n]+\n*$", "", settled_body)

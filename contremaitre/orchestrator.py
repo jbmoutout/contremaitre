@@ -66,7 +66,7 @@ from .publisher import (
 from .scaffolds import (
     IMPLEMENTATION_COMPLETE_RELPATH,
     SETTLED_RELPATH,
-    _derive_commit_message,
+    derive_commit_message,
 )
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
 
@@ -1054,7 +1054,7 @@ class Orchestrator:
         if _only_contremaitre_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
-        title, body = _derive_commit_message(self.paths.worktree, self.run_id)
+        title, body = derive_commit_message(self.paths.worktree, self.run_id)
         # `:(exclude)X` pathspecs hold orchestration-internal / build-output
         # files out of the staged set. They stay in the worktree (SIM reads
         # them; agent produces them) but must not land in the PR diff.
