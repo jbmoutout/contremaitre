@@ -140,7 +140,7 @@ class DerivePrMetadataTest(unittest.TestCase):
             self.assertNotIn("Eval scorecard", body)
 
     def test_body_has_no_duplicate_run_footer(self):
-        # `_derive_commit_message` appends `---\nRun: <id>` for the commit
+        # `derive_commit_message` appends `---\nRun: <id>` for the commit
         # message. The PR body has its own footer with run id + diff hash,
         # so the commit-only trailer must be stripped.
         with tempfile.TemporaryDirectory() as tmp:

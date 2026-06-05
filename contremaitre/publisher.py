@@ -12,14 +12,21 @@ paths is structurally impossible.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from .flow_use import compute_phases
 from .jsonlog import append_jsonl, write_json
 from .models import PublishMode, RunConfig, RunPaths
+from .scaffolds import (
+    IMPLEMENTATION_COMPLETE_RELPATH,
+    derive_commit_message,
+)
 
 
 class PublishOutcomeKind(str, Enum):
@@ -217,20 +224,12 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     Self-contained so reviewers don't need to clone the run dir.
     """
 
-    import json as _json
-    import re as _re
-    from .flow_use import compute_phases
-    from .orchestrator import (
-        IMPLEMENTATION_COMPLETE_RELPATH,
-        _derive_commit_message,
-    )
-
     def _read_jsonl(p: Path) -> list[dict]:
         if not p.exists():
             return []
         try:
             return [
-                _json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()
+                json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()
             ]
         except (OSError, ValueError):
             return []
@@ -239,19 +238,19 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         if not p.exists():
             return None
         try:
-            return _json.loads(p.read_text(encoding="utf-8"))
+            return json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
 
-    title, settled_body = _derive_commit_message(paths.worktree, paths.run_id)
-    # `_derive_commit_message` appends `\n\n---\nRun: <id>\n` for `git log`
+    title, settled_body = derive_commit_message(paths.worktree, paths.run_id)
+    # `derive_commit_message` appends `\n\n---\nRun: <id>\n` for `git log`
     # readability. The PR body has its own footer with run_id + diff hash,
     # so strip the commit-only trailer to avoid a double separator.
-    settled_body = _re.sub(r"\n+---\nRun: [^\n]+\n*$", "", settled_body)
+    settled_body = re.sub(r"\n+---\nRun: [^\n]+\n*$", "", settled_body)
     # Demote SETTLED headings 2 levels so the body's own H2 sections
     # (## Design, ## SIM review) stay the top of the visible hierarchy
     # and the SETTLED H1/H2 don't blow up GitHub's rendering.
-    settled_body = _re.sub(r"^(#{1,4}) ", r"\1## ", settled_body, flags=_re.MULTILINE)
+    settled_body = re.sub(r"^(#{1,4}) ", r"\1## ", settled_body, flags=re.MULTILINE)
 
     impl_complete = _read_impl_complete(paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH)
     pr_eval = _read_json(paths.eval_dir / "pr_eval.json")
