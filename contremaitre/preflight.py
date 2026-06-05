@@ -215,23 +215,26 @@ def _check_network_policy(config: RunConfig) -> PreflightCheck:
                 "https_proxy": bool(config.https_proxy),
             },
         )
-    # A codex role NEVER runs open: the in-container subscription token is an
-    # exfiltratable JWT, so --allow-open-egress is not honored for it. Normally
-    # `_maybe_provision_cli_egress` sets an internal network + allowlist proxy
-    # before we get here; landing here means provisioning failed → hard refusal.
-    codex_active = ActorMode.CLI in {config.actor_mode, config.sim_actor_mode or config.actor_mode}
-    if codex_active:
-        return _fail(
-            "network_policy",
-            "codex role requires a locked egress (internal docker network + "
-            "allowlist proxy); --allow-open-egress is not honored for codex. "
-            "Egress auto-provisioning normally sets this — check Docker is up.",
-            {},
-        )
+    # `--allow-open-egress` is the explicit override for BOTH runtimes (for a
+    # codex role it means the operator accepts the exfiltratable-token risk —
+    # warned, bounded by the neutered refresh token).
     if config.allow_open_egress:
         return _warn(
             "network_policy",
             "open container egress explicitly allowed by --allow-open-egress",
+            {},
+        )
+    # A codex role defaults to a locked egress (the token is exfiltratable).
+    # `_maybe_provision_cli_egress` normally sets an internal network + allowlist
+    # proxy before we get here; landing here without one means provisioning
+    # failed — refuse rather than run a codex container open.
+    codex_active = ActorMode.CLI in {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    if codex_active:
+        return _fail(
+            "network_policy",
+            "codex role defaults to a locked egress (internal docker network + "
+            "allowlist proxy) and auto-provisioning did not set one — check "
+            "Docker is up, or pass --allow-open-egress to run open.",
             {},
         )
     return _fail(

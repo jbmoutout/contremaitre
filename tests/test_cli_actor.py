@@ -157,14 +157,12 @@ class EgressLockTest(unittest.TestCase):
             )
             runner._assert_egress_locked()  # no raise
 
-    def test_allow_open_egress_does_not_override_codex(self):
-        # The lock is mandatory for codex: --allow-open-egress is NOT an escape
-        # hatch (the in-container token is exfiltratable). Without both layers
-        # it still refuses, even with the flag set.
+    def test_allow_open_egress_overrides(self):
+        # The lock is the secure default, not mandatory: --allow-open-egress is
+        # the explicit escape hatch, so the runner launches without both layers.
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(Path(tmp), allow_open_egress=True)
-            with self.assertRaises(Exception):
-                runner._assert_egress_locked()
+            runner._assert_egress_locked()  # no raise
 
 
 class BuildCommandTest(unittest.TestCase):
@@ -285,6 +283,33 @@ class CodexModelArgTest(unittest.TestCase):
         self.assertEqual(_codex_effort_arg("high"), ["-c", "model_reasoning_effort=high"])
         self.assertEqual(_codex_effort_arg("xhigh"), ["-c", "model_reasoning_effort=xhigh"])
         self.assertEqual(_codex_effort_arg(""), [])
+
+
+class RoleModelLabelTest(unittest.TestCase):
+    def test_codex_role_shows_model_and_effort(self):
+        from contremaitre.models import role_model_label
+
+        label = role_model_label(
+            actor_mode=ActorMode.CLI,
+            opencode_model="opencode/deepseek-v4-flash-free",
+            codex_model="gpt-5.5",
+            codex_effort="high",
+        )
+        self.assertEqual(label, "gpt-5.5 (codex, effort=high)")
+
+    def test_opencode_role_shows_slug(self):
+        from contremaitre.models import role_model_label
+
+        for mode in (ActorMode.OPENCODE, ActorMode.OPENCODE.value, "fake"):
+            self.assertEqual(
+                role_model_label(
+                    actor_mode=mode,
+                    opencode_model="opencode/big-pickle",
+                    codex_model="gpt-5.5",
+                    codex_effort="high",
+                ),
+                "opencode/big-pickle",
+            )
 
 
 def _cli_config(root: Path, **over) -> RunConfig:

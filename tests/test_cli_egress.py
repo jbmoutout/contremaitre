@@ -133,13 +133,32 @@ class CliEgressIsAutoTest(unittest.TestCase):
         # token rides in the SIM container).
         self.assertTrue(_cli_egress_is_auto(self._args(actor="opencode", sim_actor="cli")))
 
-    def test_auto_even_when_open_egress(self):
-        # --allow-open-egress is NOT honored for codex: it always auto-locks.
-        self.assertTrue(_cli_egress_is_auto(self._args(allow_open_egress=True)))
+    def test_not_auto_when_open_egress(self):
+        # --allow-open-egress is the explicit override: no auto-lock, runs open.
+        self.assertFalse(_cli_egress_is_auto(self._args(allow_open_egress=True)))
 
     def test_not_auto_when_explicit_network(self):
         # An explicit operator-supplied policy wins (their own locked egress).
         self.assertFalse(_cli_egress_is_auto(self._args(docker_network="x")))
+
+
+class SquidAllowlistTest(unittest.TestCase):
+    def test_allowlist_covers_codex_and_opencode_providers(self):
+        # The locked proxy must reach codex (openai/chatgpt) AND an opencode SIM
+        # on either OpenRouter (paid) or OpenCode Zen (free → opencode.ai +
+        # models.dev catalog), so a mixed run works locked.
+        from contremaitre.cli_egress import _SQUID_CONF
+
+        conf = _SQUID_CONF.read_text(encoding="utf-8")
+        for domain in (
+            ".chatgpt.com",
+            ".openai.com",
+            ".openrouter.ai",
+            ".opencode.ai",
+            ".models.dev",
+        ):
+            self.assertIn(domain, conf)
+        self.assertIn("http_access deny all", conf)  # default-deny stays
 
 
 if __name__ == "__main__":

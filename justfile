@@ -45,8 +45,9 @@ install-hooks:
 #
 # Runtime (codex / opencode), models, and reasoning effort come from the
 # launch-screen pickers and ~/.config|.contremaitre/defaults.toml — not flags
-# here. `--allow-open-egress` only relaxes a pure-opencode run; codex always
-# auto-locks its egress and ignores this flag.
+# here. `--allow-open-egress` runs containers on open egress: for opencode it
+# satisfies the network policy; for codex it overrides the default egress lock
+# (so the agent can install deps) — drop it for a locked codex run.
 tui-run base fork check_cmd="":
     GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre tui run -- \
         --base {{base}} \

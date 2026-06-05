@@ -72,22 +72,22 @@ The codex access token is a ~10-day JWT, so the in-container credential outlives
 
 Preflight's `_check_codex_auth` confirms `~/.codex/auth.json` exists and isn't about to expire (CLI-actor runs only).
 
-### Egress — mandatory lock
+### Egress — locked by default, overridable
 
-Because that token is exfiltratable, a codex container's egress is **mandatorily** locked. [`cli_egress.py`](../contremaitre/cli_egress.py) stands up a turnkey two-layer lock (`ensure_egress_proxy`), shared and idempotent across runs:
+Because that token is exfiltratable, a codex container's egress is locked **by default**. [`cli_egress.py`](../contremaitre/cli_egress.py) stands up a turnkey two-layer lock (`ensure_egress_proxy`), shared and idempotent across runs:
 
 1. an **`--internal` docker network** (`contremaitre-cli-egress`) — no route to the outside and no external DNS resolution (closing DNS-tunnel exfil too), and
-2. a **squid allowlist proxy** (`contremaitre-egress-proxy`, dual-homed on the internal net + bridge) that is the network's sole exit and CONNECT-allows only the model providers' domains ([`cli_egress_squid.conf`](../contremaitre/cli_egress_squid.conf): `.chatgpt.com` / `.openai.com` for codex, `.openrouter.ai` for an opencode SIM in a mixed run). Everything else is denied, so neither the token nor the code can be POSTed out to an arbitrary collector.
+2. a **squid allowlist proxy** (`contremaitre-egress-proxy`, dual-homed on the internal net + bridge) that is the network's sole exit and CONNECT-allows only the model providers' domains ([`cli_egress_squid.conf`](../contremaitre/cli_egress_squid.conf): `.chatgpt.com` / `.openai.com` for codex; `.openrouter.ai`, `.opencode.ai`, `.models.dev` for an opencode SIM on an OpenRouter *or* free Zen model). Everything else is denied, so neither the token nor the code can be POSTed out to an arbitrary collector.
 
-> **Mixed-run limitation:** the allowlist covers OpenAI + OpenRouter only. A mixed `codex agent + opencode SIM` run therefore requires the SIM to use an **OpenRouter** model — a free OpenCode **Zen** model (`opencode/…`) routes through `opencode.ai`, which is not currently allowlisted, so a Zen SIM would be blocked behind the codex lock.
+> **Locked ≠ full network.** The allowlist is model-providers-only — **package registries (PyPI / npm / GitHub / …) are NOT on it.** A locked run therefore can't `uv sync` / `npm install` ad-hoc tooling; a run that needs to install deps must opt into open egress with `--allow-open-egress` (or pre-bake the deps via the [deps volume](#deps-caching)).
 
-The lock is enforced at three layers and is **not** relaxable by `--allow-open-egress` (that flag stays meaningful only for a *pure-opencode* run):
+The lock is the **secure default, not mandatory** — `--allow-open-egress` is the explicit, warned override (the operator accepts the exfil risk, which the neutered refresh token bounds to ~10-day quota abuse). Three layers cooperate:
 
 | Layer | Function | Behavior for a codex role |
 |---|---|---|
-| Host (pre-run) | `_maybe_provision_cli_egress` ([cli.py](../contremaitre/cli.py)) | Auto-provisions the network + proxy whenever a codex role is active (agent *or* SIM) and no explicit `--docker-network`/`--https-proxy` was given. Ignores `--allow-open-egress`. |
-| Preflight | `_check_network_policy` ([preflight.py](../contremaitre/preflight.py)) | Hard-fails a codex role on open egress (reaching here means auto-provision failed). |
-| Runner (launch) | `_assert_egress_locked` ([cli_actor.py](../contremaitre/cli_actor.py)) | Refuses to launch a codex turn unless *both* layers are set — a failed provision refuses rather than running open. |
+| Host (pre-run) | `_maybe_provision_cli_egress` ([cli.py](../contremaitre/cli.py)) | Auto-provisions the network + proxy whenever a codex role is active (agent *or* SIM) and neither an explicit `--docker-network`/`--https-proxy` nor `--allow-open-egress` was given. |
+| Preflight | `_check_network_policy` ([preflight.py](../contremaitre/preflight.py)) | `--allow-open-egress` → WARN-passes (opted in). Otherwise a codex role with no policy → FAIL (auto-provision failed; refuse rather than run open). |
+| Runner (launch) | `_assert_egress_locked` ([cli_actor.py](../contremaitre/cli_actor.py)) | Launches if egress is locked OR `--allow-open-egress` is set; else refuses. |
 
 The proxy container carries a `contremaitre.squid-sha256` label, so an edited allowlist auto-recreates it (the same staleness pattern as the image's `dockerfile-sha256`). It is kept across runs (the allowlist is static and secret-free, so one long-lived proxy serves every CLI run).
 
@@ -298,7 +298,7 @@ Read-only enforcement is belt-and-suspenders:
 
 Opencode containers see only `OPENROUTER_API_KEY` (when set) and the proxy variables passed via CLI flags. Ambient host env is never inherited. When `OPENROUTER_API_KEY` is absent, runs default to free OpenCode Zen models served by OpenCode; the container's `OPENROUTER_API_KEY` is simply not exported.
 
-Codex containers hold no OpenRouter key at all — only a neutered copy of the subscription token (a mounted home with `tokens.refresh_token` dummied) and the egress-proxy variables. The same git/GitHub host-ownership holds: a codex agent edits the worktree but never pushes or opens the PR. See [CLI actor (codex)](#cli-actor-codex-auth--egress-lock) for the token-minimisation and mandatory egress lock.
+Codex containers hold no OpenRouter key at all — only a neutered copy of the subscription token (a mounted home with `tokens.refresh_token` dummied) and the egress-proxy variables. The same git/GitHub host-ownership holds: a codex agent edits the worktree but never pushes or opens the PR. See [CLI actor (codex)](#cli-actor-codex-auth--egress-lock) for the token-minimisation and the (default-on, overridable) egress lock.
 
 ## Preflight
 
@@ -310,7 +310,7 @@ Live opencode and codex runs run preflight before worktree creation; the report 
 - missing Docker daemon or target image;
 - opencode binary failures inside the image (opencode roles);
 - failed `:ro` mount enforcement test;
-- open container egress with no network/proxy configured and `--allow-open-egress` unset (opencode roles) — for a **codex** role the egress lock is mandatory, so open egress hard-fails *even with* `--allow-open-egress`;
+- open container egress with no network/proxy configured and `--allow-open-egress` unset (either runtime) — a **codex** role additionally fails if its default egress lock couldn't be auto-provisioned and `--allow-open-egress` wasn't passed (it refuses rather than running a codex container open);
 - a missing or near-expiry codex subscription token (`~/.codex/auth.json`, codex roles only);
 - missing, unlimited, over-cap, or unverified OpenRouter key (opencode roles, when key is required).
 
@@ -381,7 +381,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`models.py`](../contremaitre/models.py) — `State`, `ReviewVerdict`, `CliReviewVerdict`, `TerminalVerdict`, `ActorMode` (`fake` / `opencode` / `cli`), `PublishMode` enums; `RunConfig` (incl. `actor_mode`, `sim_actor_mode`, `cli_tool`, `codex_model`, `codex_effort`), `RunPaths`, `Caps`, `DepsVolume`, `ParsedVerdict`, `RunResult` dataclasses. The stable seam between CLI, orchestrator, and actors.
 - [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
 - [`paths.py`](../contremaitre/paths.py) — slug validation, run-id generation, contained-path builder (prevents escape outside `run_dir`).
-- [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + codex runs, validated as the per-role union: repo/base ref, Docker image, `:ro` mount, network policy (mandatory lock for a codex role), OpenRouter key bounds (opencode), `_check_codex_auth` (codex). See [Preflight](#preflight).
+- [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + codex runs, validated as the per-role union: repo/base ref, Docker image, `:ro` mount, network policy (codex defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), `_check_codex_auth` (codex). See [Preflight](#preflight).
 - [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
 - [`publisher.py`](../contremaitre/publisher.py) — publication boundary: `StubPublisher` (dry-run) vs `GhPublisher` (real `gh pr create --draft`). PR title + body derived from `.contremaitre/SETTLED_DESIGN.md` + SIM verdict summary; `--pr-title` / `--pr-body` override.
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
@@ -565,7 +565,7 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--openrouter-env-var NAME` | `OPENROUTER_API_KEY` | Env-var name holding the OpenRouter key. |
 | `--docker-network NAME` | — | Docker `--network` for opencode containers. |
 | `--http-proxy URL` / `--https-proxy URL` / `--no-proxy LIST` | — | Container proxy settings (host env is not forwarded). |
-| `--allow-open-egress` | False | Accept unrestricted egress for an **opencode** run (otherwise a network/proxy is required). **Not honored for a codex role** — codex always auto-locks its egress and refuses to run open. |
+| `--allow-open-egress` | False | Accept unrestricted egress (otherwise a network/proxy is required for opencode, and a codex role auto-locks). For a **codex** role this is the explicit override of the default lock — warned, since the token is exfiltratable; use it when the agent must reach package registries the allowlist blocks. |
 | `--skip-openrouter-key-check` | False | Don't query OpenRouter key metadata. |
 | `--allow-unlimited-openrouter-key` | False | Accept a key with no provider-side credit limit. |
 | `--openrouter-key-url URL` | `https://openrouter.ai/api/v1/key` | OpenRouter key-metadata endpoint. |

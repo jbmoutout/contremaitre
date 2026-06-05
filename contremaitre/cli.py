@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from . import defaults as _defaults
 from .envfile import load_dotenv_defaults
 from .fixture import init_fixture
-from .models import ActorMode, Caps, PublishMode, RunConfig
+from .models import ActorMode, Caps, PublishMode, RunConfig, role_model_label
 from .orchestrator import run
 from .paths import slugify
 from .preflight import run_preflight
@@ -957,18 +957,20 @@ def _pick_models_interactive(
 
 
 def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
-    """True when a codex (CLI) role is active and no explicit egress was given.
+    """True when a codex (CLI) role should auto-provision its locked egress.
 
     Checks BOTH roles (agent + SIM): a codex role in either position carries the
-    exfiltratable in-container JWT, so it must lock. `--allow-open-egress` is
-    deliberately NOT honored here — codex always auto-provisions the locked
-    allowlist proxy; the flag only relaxes a pure-opencode run (see
-    preflight `_check_network_policy`). Explicit --docker-network/--https-proxy
-    still win (the operator's own locked policy).
+    exfiltratable in-container JWT, so the *default* is to lock. The lock is the
+    secure default, not mandatory — `--allow-open-egress` is the explicit,
+    warned override (the operator accepts the token risk, e.g. so the agent can
+    install deps from PyPI/npm that the provider-only allowlist would block).
+    Explicit `--docker-network`/`--https-proxy` also win (operator's own policy).
     """
 
     modes = {getattr(args, "actor", None), getattr(args, "sim_actor", None)}
     if ActorMode.CLI.value not in modes:
+        return False
+    if getattr(args, "allow_open_egress", False):
         return False
     return not (getattr(args, "docker_network", None) or getattr(args, "https_proxy", None))
 
@@ -977,11 +979,11 @@ def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
     """Stand up the shared allowlist egress proxy and point the run at it.
 
     Fires whenever a codex (CLI) role is active with no explicit
-    `--docker-network`/`--https-proxy`. `--allow-open-egress` does NOT suppress
-    it — codex always locks. Mutates `args` so the resolved config (and the
-    runner) see a locked egress. Failure is non-fatal here — preflight and the
-    runner still enforce the egress requirement, so a provision failure surfaces
-    as a clean "egress not configured" refusal rather than a crash.
+    `--docker-network`/`--https-proxy` and without `--allow-open-egress` (the
+    explicit open-egress override). Mutates `args` so the resolved config (and
+    the runner) see a locked egress. Failure is non-fatal here — preflight and
+    the runner still enforce the egress requirement, so a provision failure
+    surfaces as a clean "egress not configured" refusal rather than a crash.
     """
 
     if not _cli_egress_is_auto(args):
@@ -1014,17 +1016,17 @@ def _codex_status_lines(args: argparse.Namespace) -> tuple[str, str]:
     else:
         token_line = "codex token: MISSING — run codex once to log in"
 
-    if getattr(args, "docker_network", None) or getattr(args, "https_proxy", None):
+    if getattr(args, "allow_open_egress", False):
+        egress_line = (
+            "egress: OPEN (--allow-open-egress) — token is exfiltratable "
+            "(bounded to ~10-day quota abuse: refresh token is neutered)"
+        )
+    elif getattr(args, "docker_network", None) or getattr(args, "https_proxy", None):
         net = getattr(args, "docker_network", None) or "(none)"
         proxy = "yes" if getattr(args, "https_proxy", None) else "no"
         egress_line = f"egress: locked (network={net}, proxy={proxy})"
-    elif getattr(args, "allow_open_egress", False):
-        egress_line = (
-            "egress: --allow-open-egress IGNORED for codex — auto-locking "
-            "allowlist proxy on launch (token is exfiltratable)"
-        )
     else:
-        egress_line = "egress: auto-provision allowlist proxy on launch (OpenAI/OpenRouter only)"
+        egress_line = "egress: auto-provision allowlist proxy on launch (provider domains only)"
     return token_line, egress_line
 
 
@@ -1312,8 +1314,20 @@ def _launch_screen(
     print(f"  target          {source_url}")
     print(f"  branch          {base}  {_d(f'({publish})')}")
     print()
-    print(f"  agent           {_b(args.agent_model)}")
-    print(f"  sim             {_b(args.sim_model)}")
+    agent_mode = getattr(args, "actor", ActorMode.OPENCODE.value)
+    sim_mode = getattr(args, "sim_actor", None) or agent_mode
+    codex_model = getattr(args, "codex_model", "gpt-5.5")
+    codex_effort = getattr(args, "codex_effort", "high")
+    if agent_mode != sim_mode:
+        print(f"  runtime         {_b(f'agent={agent_mode}, sim={sim_mode}')}")
+    print(
+        f"  agent           "
+        f"{_b(role_model_label(actor_mode=agent_mode, opencode_model=args.agent_model, codex_model=codex_model, codex_effort=codex_effort))}"
+    )
+    print(
+        f"  sim             "
+        f"{_b(role_model_label(actor_mode=sim_mode, opencode_model=args.sim_model, codex_model=codex_model, codex_effort=codex_effort))}"
+    )
     if extra_model:
         print(f"  extra           {_b(extra_model)}")
     if cli_reviewer_choice in ("codex", "claude"):
@@ -2178,14 +2192,30 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     if "--repo-cache" not in " ".join(forwarded):
         forwarded.extend(["--repo-cache", str(cache_path)])
     run_cmd = [sys.executable, "-m", "contremaitre", "run", *forwarded]
+    # TUI header labels: a codex role shows its model + effort, not the (ignored)
+    # opencode slug carried in agent_model/sim_model.
+    resolved_actor = getattr(confirm_args, "actor", actor)
+    resolved_sim_mode = resolved_sim or resolved_actor
+    codex_model = _extract_flag_value(forwarded, "--codex-model", _saved.codex_model or "gpt-5.5")
+    codex_effort = _extract_flag_value(forwarded, "--codex-effort", _saved.codex_effort or "high")
     return tui.spawn_and_attach(
         runs_root=runs_root,
         run_slug=slugify(run_slug),
         run_cmd=run_cmd,
         refresh_hz=args.refresh_hz,
         discover_timeout_s=args.discover_timeout,
-        agent_model=agent_model,
-        sim_model=sim_model,
+        agent_model=role_model_label(
+            actor_mode=resolved_actor,
+            opencode_model=agent_model,
+            codex_model=codex_model,
+            codex_effort=codex_effort,
+        ),
+        sim_model=role_model_label(
+            actor_mode=resolved_sim_mode,
+            opencode_model=sim_model,
+            codex_model=codex_model,
+            codex_effort=codex_effort,
+        ),
         extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer_choice,
         docker_image=docker_image,

@@ -128,19 +128,23 @@ class PreflightTest(unittest.TestCase):
         self.assertTrue(report.passed, report.failure_summary())
         self.assertEqual("WARN", self._status_by_name(report)["openrouter_key"])
 
-    def test_codex_role_refuses_open_egress(self):
-        # --allow-open-egress is NOT honored for codex: with no explicit
-        # network/proxy the network-policy check must FAIL (not WARN-pass).
+    def test_codex_role_open_egress_warns(self):
+        # --allow-open-egress is the explicit override (warned), not a hard fail.
         config = self._config(actor_mode=ActorMode.CLI, allow_open_egress=True)
-        check = _check_network_policy(config)
-        self.assertEqual(check.status, "FAIL")
+        self.assertEqual(_check_network_policy(config).status, "WARN")
 
-    def test_codex_sim_role_refuses_open_egress(self):
-        # Reverse mix: opencode agent + codex SIM still refuses open egress.
+    def test_codex_role_no_policy_no_flag_fails(self):
+        # Default is locked: a codex role with neither an explicit policy nor the
+        # override (i.e. auto-provision failed) must refuse, not run open.
+        config = self._config(actor_mode=ActorMode.CLI, allow_open_egress=False)
+        self.assertEqual(_check_network_policy(config).status, "FAIL")
+
+    def test_codex_sim_no_policy_no_flag_fails(self):
+        # Reverse mix: opencode agent + codex SIM, no policy/flag → FAIL.
         config = self._config(
             actor_mode=ActorMode.OPENCODE,
             sim_actor_mode=ActorMode.CLI,
-            allow_open_egress=True,
+            allow_open_egress=False,
         )
         self.assertEqual(_check_network_policy(config).status, "FAIL")
 

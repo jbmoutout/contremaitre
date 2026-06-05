@@ -54,6 +54,7 @@ from .models import (
     RunResult,
     State,
     TerminalVerdict,
+    role_model_label,
 )
 from .paths import build_run_paths, new_run_id, validate_slug
 from .preflight import enforce_preflight
@@ -1179,8 +1180,18 @@ class Orchestrator:
                 "reason": reason,
                 "turns": self.turns,
                 "duration_seconds": round(time.monotonic() - self.started, 3),
-                "agent_model": self.config.agent_model,
-                "sim_model": self.config.sim_model,
+                "agent_model": role_model_label(
+                    actor_mode=self.config.actor_mode,
+                    opencode_model=self.config.agent_model,
+                    codex_model=self.config.codex_model,
+                    codex_effort=self.config.codex_effort,
+                ),
+                "sim_model": role_model_label(
+                    actor_mode=self.config.sim_actor_mode or self.config.actor_mode,
+                    opencode_model=self.config.sim_model,
+                    codex_model=self.config.codex_model,
+                    codex_effort=self.config.codex_effort,
+                ),
                 "extra_reviewer_model": self.config.extra_reviewer_model,
                 "actor_mode": self.config.actor_mode.value,
                 "publish_mode": self.config.publish_mode.value,

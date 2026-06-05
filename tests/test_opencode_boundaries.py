@@ -106,6 +106,55 @@ class OpencodeBoundaryTest(unittest.TestCase):
             self.assertIn("--session", cmd)
             self.assertIn("sess", cmd)
 
+    def _build_with_opencode_config(self, mount_mode: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", f"20260605-{root.name}")
+        paths.run_dir.mkdir(parents=True)
+        worktree = root / "worktree"
+        worktree.mkdir()
+        state = root / "state"
+        state.mkdir()
+        cfg = root / "synth-opencode.json"
+        cfg.write_text("{}", encoding="utf-8")
+        config = RunConfig(
+            repo=root,
+            base="main",
+            runs_root=root / "runs",
+            run_slug="t",
+            actor_mode=ActorMode.OPENCODE,
+            docker_image="img",
+            opencode_config=cfg,
+        )
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "k"}, clear=False):
+            build_docker_command(
+                config=config,
+                paths=paths,
+                worktree=worktree,
+                state_dir=state,
+                mount_mode=mount_mode,
+                model="m",
+                prompt="p",
+                session_id=None,
+                extra_mounts=[],
+                role="sim",
+            )
+        return worktree
+
+    def test_ro_mount_precreates_opencode_json_mountpoint(self):
+        # A codex-agent mix runs the opencode SIM with /app:ro and no opencode.json
+        # in the worktree (codex never emitted it); docker can't create the
+        # bind-mount target on a read-only /app, so build_docker_command does.
+        worktree = self._build_with_opencode_config("ro")
+        self.assertTrue((worktree / "opencode.json").exists())
+
+    def test_rw_mount_does_not_precreate_opencode_json(self):
+        # For the RW agent docker creates the mountpoint itself — don't pollute
+        # the worktree pre-emptively.
+        worktree = self._build_with_opencode_config("rw")
+        self.assertFalse((worktree / "opencode.json").exists())
+
     def test_opencode_docker_command_passes_explicit_proxy_only_by_name(self):
         with (
             tempfile.TemporaryDirectory() as tmp,

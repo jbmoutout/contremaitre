@@ -28,9 +28,10 @@ AUTH (subscription, hard-minimised — read before touching `prepare_codex_home`
 
 EGRESS (the load-bearing control — `_assert_egress_locked`)
   The access token is a ~10-DAY JWT, so the in-container credential outlives any
-  single run. Exfiltration is prevented by a two-layer lock the runner REFUSES
-  to launch without — the lock is MANDATORY (`allow_open_egress` is not honored
-  for codex; a failed auto-provision refuses rather than running open):
+  single run. By default exfiltration is prevented by a two-layer lock the
+  runner refuses to launch without (auto-provisioned for codex; `allow_open_egress`
+  is the explicit, warned escape hatch — the risk is bounded by the neutered
+  refresh token to ~10-day quota abuse, not account takeover):
     1. an `--internal` `docker_network` — kills direct egress AND external DNS,
     2. an allowlisting `https_proxy` (provider domains only) as the sole exit.
 
@@ -269,25 +270,25 @@ class CliActorRunner:
     # ----- security-critical seams -----------------------------------------
 
     def _assert_egress_locked(self) -> None:
-        """Refuse to launch unless BOTH containment layers are set.
+        """Refuse to launch unless egress is locked OR explicitly opened.
 
         The in-container access token is a ~10-day JWT, so it outlives the run;
         the only thing standing between an injected `cat auth.json` and an
-        attacker is the egress lock. Require an `--internal` docker_network
-        (no route, no external DNS) AND an allowlisting https_proxy (the sole
-        exit). This is the hard backstop: `allow_open_egress` is NOT honored for
-        codex — the lock is mandatory, so a failed auto-provision refuses to
-        launch rather than running open.
+        attacker is the egress lock. By default require an `--internal`
+        docker_network (no route, no external DNS) AND an allowlisting
+        https_proxy (the sole exit). `allow_open_egress` is the explicit, warned
+        escape hatch — the operator accepts the (bounded) token risk, e.g. so the
+        agent can install deps the provider-only allowlist would block.
         """
 
+        if self.config.allow_open_egress:
+            return
         if not (self.config.docker_network and self.config.https_proxy):
             raise ActorError(
                 "CLI actor refuses to launch without BOTH an --internal "
                 "docker_network and an allowlisting https_proxy (provider-only "
-                "egress). The in-container subscription token is long-lived, so "
-                "open egress is exfiltratable; --allow-open-egress is not honored "
-                "for codex. Egress auto-provisioning normally sets this — check "
-                "Docker is running."
+                "egress); pass --allow-open-egress to override. The in-container "
+                "subscription token is long-lived, so open egress is exfiltratable."
             )
 
     def _ensure_fresh_access_token(self) -> None:

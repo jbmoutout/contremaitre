@@ -2,7 +2,7 @@
 
 Deterministic orchestration shell that runs Matt Pocock's [`improve-codebase-architecture`](https://github.com/mattpocock/skills/tree/main/skills/engineering/improve-codebase-architecture) skill end-to-end against a target repository and produces a draft PR.
 
-The agent and SIM live inside per-run Docker containers. Each role runs one of two actor runtimes — **opencode** (an OpenRouter or free OpenCode Zen model) or **codex** (your ChatGPT-subscription `codex` CLI, driven headless) — and the two can mix (codex agent + opencode SIM, or the reverse). Git, GitHub, diff-scan, and cap enforcement stay host-owned — the agent has no outbound git/GitHub credentials, and a codex container runs behind a mandatory allowlist egress lock.
+The agent and SIM live inside per-run Docker containers. Each role runs one of two actor runtimes — **opencode** (an OpenRouter or free OpenCode Zen model) or **codex** (your ChatGPT-subscription `codex` CLI, driven headless) — and the two can mix (codex agent + opencode SIM, or the reverse). Git, GitHub, diff-scan, and cap enforcement stay host-owned — the agent has no outbound git/GitHub credentials, and a codex container runs behind an allowlist egress lock by default (overridable with `--allow-open-egress`).
 
 **Status**: v0.1.2 — pre-1.0, expect rough edges.
 
@@ -32,7 +32,7 @@ Skip the picker entirely with `--no-prompt` (uses [`.contremaitre/defaults.toml`
 
 ### Codex (your ChatGPT subscription)
 
-Instead of opencode, a role can run the **`codex` CLI** headless on your ChatGPT plan — no API key, no per-token billing. Pick `codex` for the agent and/or SIM in the launch screen, or set `--actor cli` (`--sim-actor opencode` for a mix), or `actor = "codex"` in `defaults.toml`. The codex model and reasoning effort are separate from the opencode slugs: `--codex-model` (default `gpt-5.5`) and `--codex-effort` (default `high`). Requires a logged-in `codex` on the host (`~/.codex/auth.json`); preflight checks the token isn't about to expire. Egress is **locked automatically** — the in-container token is exfiltratable, so a codex container only reaches the model provider through an allowlist proxy, and `--allow-open-egress` is ignored for it. Details: [docs/control-plane.md#cli-actor-codex-auth--egress-lock](docs/control-plane.md#cli-actor-codex-auth--egress-lock).
+Instead of opencode, a role can run the **`codex` CLI** headless on your ChatGPT plan — no API key, no per-token billing. Pick `codex` for the agent and/or SIM in the launch screen, or set `--actor cli` (`--sim-actor opencode` for a mix), or `actor = "codex"` in `defaults.toml`. The codex model and reasoning effort are separate from the opencode slugs: `--codex-model` (default `gpt-5.5`) and `--codex-effort` (default `high`). Requires a logged-in `codex` on the host (`~/.codex/auth.json`); preflight checks the token isn't about to expire. Egress is **locked by default** — the in-container token is exfiltratable, so a codex container only reaches the model provider through an allowlist proxy (OpenAI, OpenRouter, and OpenCode Zen). Pass `--allow-open-egress` to run it open when the agent needs other hosts (PyPI/npm/GitHub to install deps). Details: [docs/control-plane.md#cli-actor-codex-auth--egress-lock](docs/control-plane.md#cli-actor-codex-auth--egress-lock).
 
 ## How it works
 
@@ -64,7 +64,7 @@ The launcher takes the same flags whether you call `just tui-run …` or `python
 - `--check-cmd "<command>"` *(repeatable)* — fast deterministic check the post-implementation worktree must pass before publishing (e.g. `"npx tsc --noEmit"`, `"uv run pytest -q"`).
 - `--publish-mode stub|gh` — `stub` (default) is a full dry-run with no `git push` or `gh pr create`; `gh` opens the draft PR.
 - `--max-turns 30` / `--max-wall-minutes 180` / `--max-cost-usd 30` — per-run budgets; the orchestrator aborts cleanly on cap.
-- `--allow-open-egress` — for an **opencode** run, accept open egress instead of configuring `--docker-network` / `--http-proxy` / `--https-proxy`. A **codex** role ignores it and always auto-locks its egress.
+- `--allow-open-egress` — accept open egress instead of configuring `--docker-network` / `--http-proxy` / `--https-proxy`. A **codex** role is egress-locked by default; pass this to run it open (e.g. so the agent can install deps from PyPI/npm that the provider-only allowlist blocks) — warned, since the token is exfiltratable.
 - `-y` / `--yes` — skip the confirmation prompt (CI / scripts). `--no-prompt` also skips the interactive pickers.
 
 Headless mode is the same command minus the TUI prefix:
@@ -97,7 +97,7 @@ All keys are optional; unknown / malformed values degrade silently. `--no-prompt
 - **`--cli-reviewer` is not free.** It calls `claude -p` or `codex exec` on your machine against *your subscription* (Claude Pro/Max, ChatGPT Plus). Each review burns your usage allowance. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are scrubbed from the subprocess env so it can't silently fall through to billed API.
 - **Free models are rate-limited.** OpenCode Zen's free tier is generous but bounded; long runs or many evals eventually hit a daily cap that surfaces as `QUOTA_EXHAUSTED`.
 - **Paid OpenRouter runs cost real money.** A single `n=3` eval cell on `openrouter/anthropic/claude-sonnet-4.6` runs ~$7–10. The default eval config uses free Zen models for a reason.
-- **Codex runs burn your ChatGPT subscription.** A codex role drives `codex` headless on your plan — no API billing, but it counts against your subscription usage. Its egress is locked to the model provider (the in-container token is exfiltratable), so a misconfigured run refuses rather than running open.
+- **Codex runs burn your ChatGPT subscription.** A codex role drives `codex` headless on your plan — no API billing, but it counts against your subscription usage. Its egress is locked to the model provider by default (the in-container token is exfiltratable); pass `--allow-open-egress` to run it open when the agent needs to install deps — the risk is bounded (the refresh token is neutered, so worst case is ~10-day quota abuse, not account takeover).
 
 ## Other commands
 
@@ -110,7 +110,7 @@ All keys are optional; unknown / malformed values degrade silently. `--no-prompt
 - `contremaitre image build [--variant base|rust|go]` — build the runtime image. The default-variant image auto-builds on first opencode-mode run and auto-rebuilds when the Dockerfile changes.
 - `contremaitre fixture init <path>` — create a tiny git repo for fake-actor smoke runs.
 
-For controlled egress on an **opencode** run (instead of `--allow-open-egress`), pass `--docker-network`, `--http-proxy`, `--https-proxy`, `--no-proxy`. Ambient proxy env vars are *not* forwarded into containers — only what you pass explicitly. A **codex** run needs none of this: it auto-provisions its own internal network + allowlist proxy and refuses to run open.
+For controlled egress on an **opencode** run (instead of `--allow-open-egress`), pass `--docker-network`, `--http-proxy`, `--https-proxy`, `--no-proxy`. Ambient proxy env vars are *not* forwarded into containers — only what you pass explicitly. A **codex** run needs none of this by default: it auto-provisions its own internal network + allowlist proxy (and refuses to run open unless you pass `--allow-open-egress`).
 
 ## When something goes wrong
 

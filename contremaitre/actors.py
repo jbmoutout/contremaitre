@@ -631,6 +631,15 @@ def build_docker_command(
         for key, value in config.deps_volume.runtime_env:
             cmd.extend(["-e", f"{key}={value}"])
     if config.opencode_config:
+        # opencode.json is bind-mounted onto /app/opencode.json. When /app is
+        # read-only (the SIM / review roles) docker can't CREATE that mountpoint
+        # unless the worktree already has the file. After an opencode AGENT turn
+        # it does — the RW mount leaves the empty mountpoint behind — but after a
+        # codex agent turn (a mixed run) it does not, so the SIM's :ro mount fails
+        # with "read-only file system". Pre-create the target; a no-op for the RW
+        # agent and when opencode already emitted it.
+        if mount_mode == "ro":
+            (worktree / "opencode.json").touch(exist_ok=True)
         cmd.extend(["-v", f"{config.opencode_config}:/app/opencode.json:ro"])
     for host_path, container_path, mode in extra_mounts or []:
         cmd.extend(["-v", f"{host_path}:{container_path}:{mode}"])

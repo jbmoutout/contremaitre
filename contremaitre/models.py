@@ -54,6 +54,23 @@ class ActorMode(str, Enum):
     CLI = "cli"
 
 
+def role_model_label(
+    *, actor_mode, opencode_model: str, codex_model: str, codex_effort: str
+) -> str:
+    """Human label for a role's model. A codex role shows its codex-native model
+    + reasoning effort; any other runtime shows the opencode/OpenRouter slug.
+
+    Used by the launch recap, the TUI header, and `stats.json` so a codex role
+    never displays the (ignored) opencode slug. Accepts `actor_mode` as either an
+    `ActorMode` or its string value.
+    """
+
+    mode = actor_mode.value if isinstance(actor_mode, ActorMode) else actor_mode
+    if mode == ActorMode.CLI.value:
+        return f"{codex_model} (codex, effort={codex_effort})"
+    return opencode_model
+
+
 class PublishMode(str, Enum):
     STUB = "stub"
     GH = "gh"
