@@ -16,7 +16,8 @@ class PreflightTest(unittest.TestCase):
     def test_opencode_requires_explicit_network_policy(self):
         config = self._config(skip_openrouter_key_check=True)
 
-        report = run_preflight(config)
+        with self._mock_docker_ok():
+            report = run_preflight(config)
 
         self.assertFalse(report.passed)
         self.assertIn("network_policy", self._fail_names(report))
