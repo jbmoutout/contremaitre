@@ -102,17 +102,37 @@ class PrepareCodexHomeTest(unittest.TestCase):
             runner.prepare_codex_home(runner.agent_home)  # re-seed
             self.assertTrue((sess / "rollout.jsonl").exists())
 
-    def test_near_expiry_token_refuses(self):
+    def _write_near_expiry(self, runner):
+        (runner._src_codex_home / "auth.json").write_text(
+            json.dumps(
+                {"tokens": {"access_token": _fake_jwt(int(time.time()) + 60), "refresh_token": "r"}}
+            )
+        )
+
+    def test_near_expiry_refuses_when_host_refresh_does_not_renew(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(Path(tmp))
-            (runner._src_codex_home / "auth.json").write_text(
-                json.dumps(
-                    {"tokens": {"access_token": _fake_jwt(int(time.time()) + 60),
-                                "refresh_token": "r"}}
-                )
-            )
+            self._write_near_expiry(runner)
+            runner._host_refresh_token = lambda: None  # stub: no renewal
             with self.assertRaises(Exception):
                 runner.prepare_codex_home(runner.agent_home)
+
+    def test_near_expiry_recovers_when_host_refresh_renews(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, _ = _make_runner(Path(tmp))
+            self._write_near_expiry(runner)
+
+            def _renew():
+                (runner._src_codex_home / "auth.json").write_text(
+                    json.dumps(
+                        {"tokens": {"access_token": _fake_jwt(int(time.time()) + 9 * 24 * 3600),
+                                    "refresh_token": "REAL-SECRET-REFRESH-TOKEN"}}
+                    )
+                )
+
+            runner._host_refresh_token = _renew  # stub: refreshes the host token
+            home = runner.prepare_codex_home(runner.agent_home)  # no raise
+            self.assertEqual(json.loads((home / "auth.json").read_text())["tokens"]["refresh_token"], "x")
 
 
 class EgressLockTest(unittest.TestCase):

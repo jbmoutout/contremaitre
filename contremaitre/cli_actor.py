@@ -43,6 +43,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -293,23 +294,48 @@ class CliActorRunner:
             )
 
     def _ensure_fresh_access_token(self) -> None:
-        """Fail loudly if the host token is near expiry.
+        """Refresh the host token when the access JWT is near expiry.
 
-        Auto host-refresh is not yet implemented; since the token is a ~10-day
-        JWT, the operator's normal codex use keeps it fresh. We only block when
-        it's close enough that codex would attempt a (neutered → failing)
-        refresh mid-run.
+        Common case (token is a ~10-day JWT): nothing to do. Near expiry: trigger
+        a host-side refresh (the real refresh_token stays on the host, never in a
+        container), then re-check and raise only if it didn't renew — codex would
+        otherwise try, and with the neutered in-container token fail, to refresh
+        mid-run.
         """
 
-        exp = _access_token_exp(self._src_codex_home / "auth.json")
-        if exp is None:
+        auth = self._src_codex_home / "auth.json"
+        exp = _access_token_exp(auth)
+        if exp is None or exp - time.time() > _REFRESH_MARGIN_SECONDS:
             return
-        if exp - time.time() <= _REFRESH_MARGIN_SECONDS:
+        self._host_refresh_token()
+        exp = _access_token_exp(auth)
+        if exp is None or exp - time.time() <= _REFRESH_MARGIN_SECONDS:
             raise ActorError(
-                "codex access token is near expiry; refresh it on the host "
-                "(run codex once interactively) before launching the CLI actor. "
-                "Auto host-refresh is not yet implemented."
+                "codex access token is near expiry and host auto-refresh did not "
+                "renew it; run `codex login` on the host to re-authenticate."
             )
+
+    def _host_refresh_token(self) -> None:
+        """Refresh the host codex token via its auth manager (no model call).
+
+        `codex login status` initialises codex's auth manager, which refreshes a
+        near-expiry access token in place using the real refresh_token — which
+        stays on the host and never enters any container. Best-effort: failures
+        are swallowed; the caller re-checks expiry and raises if still stale.
+        """
+
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self._src_codex_home)
+        try:
+            subprocess.run(
+                ["codex", "login", "status"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=env,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def prepare_codex_home(self, home: Path) -> Path:
         """Seed/refresh a per-run CODEX_HOME whose refresh_token is neutered.
