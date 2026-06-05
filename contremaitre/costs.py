@@ -40,6 +40,34 @@ def sum_costs_in_events(*event_lists: list[dict[str, Any]]) -> float:
     return round(total, 6)
 
 
+def sum_step_finish_tokens(*paths: Path) -> dict[str, int]:
+    """Sum token counts across step_finish events (opencode + CLI-actor shape).
+
+    Returns input/output/reasoning/cache_read totals. Codex on a subscription
+    has no metered USD, so this token rollup — not a dollar figure — is the
+    usage signal surfaced for CLI runs.
+    """
+
+    totals = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0}
+    for path in paths:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "step_finish":
+                continue
+            tok = (event.get("part") or {}).get("tokens") or {}
+            totals["input"] += int(tok.get("input", 0) or 0)
+            totals["output"] += int(tok.get("output", 0) or 0)
+            totals["reasoning"] += int(tok.get("reasoning", 0) or 0)
+            cache = tok.get("cache") or {}
+            totals["cache_read"] += int(cache.get("read", 0) or 0)
+    return totals
+
+
 def _sum_costs(value: Any) -> float:
     if isinstance(value, dict):
         subtotal = 0.0

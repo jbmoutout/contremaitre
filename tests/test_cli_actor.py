@@ -12,9 +12,11 @@ from unittest.mock import patch
 from contremaitre.cli_actor import (
     CliActorRunner,
     _access_token_exp,
+    _append_usage_step_finish,
     _codex_model_arg,
     _parse_codex_events,
 )
+from contremaitre.costs import sum_step_finish_tokens
 from contremaitre.models import ActorMode, RunConfig
 from contremaitre.paths import build_run_paths
 from contremaitre.preflight import _check_codex_auth
@@ -239,6 +241,33 @@ class CodexAuthCheckTest(unittest.TestCase):
                 json.dumps({"tokens": {"access_token": _fake_jwt(int(time.time()) + 60)}})
             )
             self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "FAIL")
+
+
+class UsageStepFinishTest(unittest.TestCase):
+    def test_maps_codex_usage_to_opencode_step_finish_and_rolls_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "raw.jsonl"
+            _append_usage_step_finish(
+                p,
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "cached_input_tokens": 80,
+                    "reasoning_output_tokens": 5,
+                },
+            )
+            ev = json.loads(p.read_text().strip())
+            self.assertEqual(ev["type"], "step_finish")
+            self.assertEqual(ev["part"]["tokens"]["input"], 100)
+            self.assertEqual(ev["part"]["tokens"]["output"], 10)
+            self.assertEqual(ev["part"]["tokens"]["cache"]["read"], 80)
+            # No cost key: codex on a subscription is not metered → honest $0.
+            self.assertNotIn("cost", ev["part"])
+            # The TUI/cost rollup reads it uniformly.
+            self.assertEqual(
+                sum_step_finish_tokens(p),
+                {"input": 100, "output": 10, "reasoning": 5, "cache_read": 80},
+            )
 
 
 class ParseEventsTest(unittest.TestCase):

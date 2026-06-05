@@ -33,7 +33,7 @@ from . import events, prompts
 from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
-from .costs import estimate_recorded_cost_usd
+from .costs import estimate_recorded_cost_usd, sum_step_finish_tokens
 from .diffscan import DiffScanResult, scan_diff
 from .evaluator import (
     combined_review_summary,
@@ -1114,11 +1114,13 @@ class Orchestrator:
             self._emit(events.WALL_CAP, wall_minutes=wall_minutes)
             return True
         recorded_cost = estimate_recorded_cost_usd(self.paths.raw_export, self.paths.sim_raw_export)
+        token_rollup = sum_step_finish_tokens(self.paths.raw_export, self.paths.sim_raw_export)
         write_json(
             self.paths.cost_report,
             {
                 "recorded_cost_usd": recorded_cost,
                 "max_cost_usd": self.config.caps.max_cost_usd,
+                "tokens": token_rollup,
                 "note": "Recorded stream cost only; provider-side limit remains the primary spend guardrail.",
             },
         )

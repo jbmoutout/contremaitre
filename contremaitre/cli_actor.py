@@ -47,7 +47,7 @@ import time
 from pathlib import Path
 
 from .actors import ActorError, ActorOutput, _run_detached_container
-from .jsonlog import append_jsonl, append_text_event, append_transcript
+from .jsonlog import append_text_event, append_transcript
 from .models import RunConfig, RunPaths
 
 # codex REQUIRES tokens.refresh_token present and non-empty (parser + refresh
@@ -73,6 +73,31 @@ def _codex_model_arg(model: str) -> list[str]:
     if not model or model.startswith("openrouter/"):
         return []
     return ["-m", model]
+
+
+def _append_usage_step_finish(raw_export: Path, usage: dict) -> None:
+    """Append a codex turn's token usage as an opencode-shaped step_finish event.
+
+    Routing usage through the SAME step_finish channel opencode uses means the
+    TUI renders per-turn tokens (in/out/cache-r) with no CLI-specific code, and
+    costs.* roll it up uniformly. No `cost` key: codex on a subscription is not
+    metered per token, so recorded USD stays an honest $0 while tokens show.
+    """
+
+    tokens = {
+        "input": usage.get("input_tokens", 0),
+        "output": usage.get("output_tokens", 0),
+        "reasoning": usage.get("reasoning_output_tokens", 0),
+        "cache": {"read": usage.get("cached_input_tokens", 0)},
+    }
+    event = {
+        "type": "step_finish",
+        "timestamp": int(time.time() * 1000),
+        "part": {"tokens": tokens},
+    }
+    raw_export.parent.mkdir(parents=True, exist_ok=True)
+    with raw_export.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
 
 
 def _access_token_exp(auth_path: Path) -> int | None:
@@ -368,12 +393,7 @@ class CliActorRunner:
         if session_attr and parsed_session:
             setattr(self, session_attr, parsed_session)
         if usage is not None:
-            # Stash token usage for cost reporting; cost wiring is a follow-up,
-            # but the raw counts shouldn't be lost on the floor.
-            append_jsonl(
-                self.paths.guardrail_events,
-                {"event": "cli_actor_usage", "role": role, "model": model, "usage": usage},
-            )
+            _append_usage_step_finish(raw_export, usage)
 
         append_text_event(raw_export, role=role, phase=phase, text=final_text)
         append_transcript(self.paths.transcript, speaker=speaker, phase=phase, text=final_text)
