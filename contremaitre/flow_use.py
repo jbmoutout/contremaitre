@@ -34,10 +34,17 @@ Added (SIM): sim_read_settled, sim_read_diff, sim_read_diff_partial,
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from typing import Any
 
-from .extract import parse_apply_patch
+from .artifact_signals import (
+    SETTLED_RE,
+    compute_phase_counts,
+    compute_self_verification,
+    detect_artifact_writes,
+    timestamp_ms,
+    tokens_before,
+    tool_paths,
+)
 from .jsonlog import read_jsonl
 
 
@@ -45,21 +52,7 @@ from .jsonlog import read_jsonl
 # Regex patterns — all anchored to harness contracts, not model prose style
 # ---------------------------------------------------------------------------
 
-_SETTLED_RE = re.compile(r"SETTLED_DESIGN", re.IGNORECASE)
-_IMPL_COMPLETE_RE = re.compile(r"IMPLEMENTATION_COMPLETE")
 _DIFF_RE = re.compile(r"review_diff_round|(?:^|[/\\])diff\.patch$", re.IGNORECASE)
-_CONTREMAITRE_DIR_RE = re.compile(r"[/\\]?\.contremaitre[/\\]")
-
-# Test runner patterns — what "self-verification" looks like in bash tool calls
-_TEST_CMD_RE = re.compile(
-    r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b"
-)
-# Runtime install patterns — signal container config gap, not agent quality
-_RUNTIME_INSTALL_RE = re.compile(r"apt-?get\s+install|pip\s+install\b|npm\s+install\b")
-
-# Failure markers in test output (heuristic — manual ratification on fail)
-_TEST_FAIL_RE = re.compile(r"\bFAILED\b|\berror:\s|\bfailed\b", re.IGNORECASE)
-_ZERO_TESTS_RE = re.compile(r"0 passed|no tests ran|collected 0 items|Ran 0 tests", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -98,60 +91,15 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     """
     if agent_events is None:
         agent_events = read_jsonl(paths.raw_export)
-    tool_calls = [e for e in agent_events if e.get("type") == "tool_use"]
-    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
-    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
-    settled_ms = _timestamp_ms(settled_event)
-    impl_ms = _timestamp_ms(impl_event)
-
     guardrails_path = getattr(paths, "guardrail_events", None)
     guardrails = read_jsonl(guardrails_path) if guardrails_path else []
-    starts: list[tuple[float, str]] = []
-    for g in guardrails:
-        if g.get("event") != "opencode_actor_start":
-            continue
-        ts = _timestamp_ms(g)
-        role = g.get("role")
-        if ts is None or role not in ("agent", "sim", "review"):
-            continue
-        starts.append((ts, role))
-    starts.sort()
-
-    # Identify the impl-start turn: the agent turn whose lifetime contains
-    # the SETTLED write (start_ts ≤ settled_ms < next_start_ts).
-    impl_start_idx: int | None = None
-    if settled_ms is not None:
-        for i, (ts, role) in enumerate(starts):
-            if role != "agent":
-                continue
-            next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
-            if ts <= settled_ms < next_ts:
-                impl_start_idx = i
-                break
-
-    if impl_start_idx is None:
-        pre = starts
-        post = []
-    else:
-        pre = starts[:impl_start_idx]
-        post = starts[impl_start_idx:]
-
-    pre_settled_agent = sum(1 for _, r in pre if r == "agent")
-    pre_settled_sim = sum(1 for _, r in pre if r == "sim")
-    impl_agent = sum(1 for ts, r in post if r == "agent" and (impl_ms is None or ts <= impl_ms))
-
-    # max(round), not len(): with the extra reviewer enabled, review_cycles
-    # carries two entries per round plus optional `unavailable` entries; the
-    # round number is the canonical counter.
     cycles = read_jsonl(paths.review_cycles)
-    review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
+    counts = compute_phase_counts(agent_events, guardrails, cycles)
 
     return {
-        "pre_settled_agent_turns": pre_settled_agent,
-        "pre_settled_sim_turns": pre_settled_sim,
-        "grilling_exchanges": min(pre_settled_agent, pre_settled_sim),
-        "impl_turns": impl_agent,
-        "review_rounds": review_rounds,
+        "grilling_exchanges": counts.grilling_exchanges,
+        "impl_turns": counts.impl_turns,
+        "review_rounds": counts.review_rounds,
     }
 
 
@@ -172,29 +120,30 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     re_reads = sum(max(0, n - 1) for n in file_access.values())
     convergence, breadth, distinct, total = _convergence(file_access)
 
-    event_times = [ts for e in events if (ts := _timestamp_ms(e)) is not None]
+    event_times = [ts for e in events if (ts := timestamp_ms(e)) is not None]
     wall_seconds = (
         round((event_times[-1] - event_times[0]) / 1000, 1) if len(event_times) > 1 else 0
     )
 
-    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
-    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
-    first_code_edit = _find_first_code_edit(tool_calls)
+    writes = detect_artifact_writes(events)
+    settled_event = writes.settled_design
+    impl_event = writes.implementation_complete
+    first_code_edit = writes.first_code_edit
 
     t0 = event_times[0] if event_times else None
-    settled_ts = _timestamp_ms(settled_event)
+    settled_ts = settled_event.timestamp_ms if settled_event else None
     time_to_settled = (
         round((settled_ts - t0) / 1000, 1) if settled_ts is not None and t0 is not None else None
     )
-    tokens_to_settled = _tokens_before(events, settled_event)
+    tokens_to_settled = tokens_before(events, settled_event)
 
     settled_chars: int | None = None
     if settled_event:
-        settled_chars = _write_chars(settled_event, _SETTLED_RE)
+        settled_chars = settled_event.chars
 
     settled_before_edit: bool | None = None
     if settled_event and first_code_edit:
-        first_edit_ts = _timestamp_ms(first_code_edit)
+        first_edit_ts = first_code_edit.timestamp_ms
         settled_before_edit = (
             settled_ts < first_edit_ts
             if settled_ts is not None and first_edit_ts is not None
@@ -203,9 +152,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     elif settled_event:
         settled_before_edit = True
 
-    self_verified, self_verify_pass, runtime_install = _check_self_verification(
-        tool_calls, impl_event
-    )
+    verification = compute_self_verification(events)
 
     return {
         "tool_call_count": {"value": len(tool_calls), "extraction": "automatic"},
@@ -238,16 +185,16 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
             "extraction": "automatic",
         },
         "self_verified": {
-            "value": self_verified,
+            "value": verification.self_verified,
             "extraction": "automatic",
         },
         "self_verify_output_suggests_pass": {
-            "value": self_verify_pass,
+            "value": verification.output_suggests_pass,
             "extraction": "heuristic",
             "note": "Absence of FAILED/error: in bash output. Manual ratification on False.",
         },
         "runtime_install_required": {
-            "value": runtime_install,
+            "value": verification.runtime_install_required,
             "extraction": "automatic",
             "note": "apt-get/pip/npm install detected — container config gap, not agent quality.",
         },
@@ -275,7 +222,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
         by_tool[t] = by_tool.get(t, 0) + 1
 
     sim_read_settled = any(
-        _SETTLED_RE.search(_inp(e).get("filePath", "") or "")
+        SETTLED_RE.search(_inp(e).get("filePath", "") or "")
         for e in tool_calls
         if _tool_name(e) == "read"
     )
@@ -353,7 +300,7 @@ def _inp(e: dict) -> dict:
 def _count_file_accesses(tool_calls: list[dict]) -> dict[str, int]:
     acc: dict[str, int] = {}
     for e in tool_calls:
-        for fp in _tool_paths(e):
+        for fp in tool_paths(e):
             acc[fp] = acc.get(fp, 0) + 1
     return acc
 
@@ -373,141 +320,6 @@ def _convergence(file_access: dict[str, int]) -> tuple[str, float, int, int]:
     else:
         label = "thrashed"
     return label, breadth, distinct, total
-
-
-def _find_write_to(tool_calls: list[dict], pattern: re.Pattern) -> dict | None:
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        if (part.get("state") or {}).get("status") != "completed":
-            continue
-        inp = _inp(e)
-        target = (
-            inp.get("filePath") or inp.get("path") or inp.get("patchText") or inp.get("patch") or ""
-        )
-        if pattern.search(str(target)):
-            return e
-    return None
-
-
-def _find_first_code_edit(tool_calls: list[dict]) -> dict | None:
-    """First write/edit/apply_patch to a path outside .contremaitre/."""
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        if (part.get("state") or {}).get("status") != "completed":
-            continue
-        if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
-            return e
-    return None
-
-
-def _tokens_before(events: list[dict], target: dict | None) -> int | None:
-    if not target:
-        return None
-    total = 0
-    for e in events:
-        if e is target:
-            break
-        if e.get("type") == "step_finish":
-            total += (e.get("part") or {}).get("tokens", {}).get("total", 0)
-    return total
-
-
-def _check_self_verification(
-    tool_calls: list[dict], impl_event: dict | None
-) -> tuple[bool, bool | None, bool]:
-    """Return (self_verified, output_suggests_pass, runtime_install_required).
-
-    self_verified: agent ran a test command between last code edit and
-    IMPLEMENTATION_COMPLETE write.
-    output_suggests_pass: heuristic — no FAILED/error: in any test output.
-    runtime_install_required: agent had to install a runtime (container gap).
-    """
-    impl_ts = _timestamp_ms(impl_event) if impl_event else float("inf")
-
-    last_edit_ts: float | None = None
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        event_ts = _timestamp_ms(e)
-        if event_ts is None:
-            continue
-        if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
-            last_edit_ts = event_ts if last_edit_ts is None else max(last_edit_ts, event_ts)
-
-    test_outputs: list[str] = []
-    runtime_install = False
-
-    for e in tool_calls:
-        if _tool_name(e) != "bash":
-            continue
-        cmd = _inp(e).get("command") or ""
-        if _RUNTIME_INSTALL_RE.search(cmd):
-            runtime_install = True
-        event_ts = _timestamp_ms(e)
-        if event_ts is None:
-            continue
-        if (
-            _TEST_CMD_RE.search(cmd)
-            and last_edit_ts is not None
-            and last_edit_ts < event_ts < impl_ts
-        ):
-            test_outputs.append((e.get("part") or {}).get("state", {}).get("output") or "")
-
-    if not test_outputs:
-        return False, None, runtime_install
-
-    all_pass = all(
-        not _TEST_FAIL_RE.search(out) and not _ZERO_TESTS_RE.search(out) for out in test_outputs
-    )
-    return True, all_pass, runtime_install
-
-
-def _timestamp_ms(e: dict | None) -> float | None:
-    if not e:
-        return None
-    raw = e.get("timestamp")
-    if isinstance(raw, int | float):
-        return float(raw)
-    if isinstance(raw, str):
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    ts = e.get("ts")
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
-        except ValueError:
-            return None
-    return None
-
-
-def _tool_paths(e: dict) -> list[str]:
-    inp = _inp(e)
-    tool = _tool_name(e)
-    if tool == "apply_patch":
-        patch = inp.get("patchText") or inp.get("patch") or ""
-        return [fp for _, fp, _ in parse_apply_patch(str(patch))]
-    fp = inp.get("filePath") or inp.get("path") or ""
-    return [str(fp)] if fp else []
-
-
-def _write_chars(e: dict, pattern: re.Pattern) -> int:
-    inp = _inp(e)
-    tool = _tool_name(e)
-    if tool == "write":
-        return len(inp.get("content") or "")
-    if tool == "edit":
-        return len(inp.get("newString") or "")
-    if tool == "apply_patch":
-        patch = inp.get("patchText") or inp.get("patch") or ""
-        return sum(len(body) for _, fp, body in parse_apply_patch(str(patch)) if pattern.search(fp))
-    return 0
 
 
 def _read_limit(e: dict) -> int:

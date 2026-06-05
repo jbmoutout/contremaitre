@@ -296,6 +296,7 @@ Containers see `OPENROUTER_API_KEY` only when set on the host. The opencode bina
 Every `.py` under [contremaitre/](../contremaitre/). One line each — the code itself is the long form.
 
 - [`actors.py`](../contremaitre/actors.py) — `FakeActorRunner` + `OpencodeActorRunner`. Opencode containers run detached with role labels; output streamed via `docker logs -f`, exit awaited via `docker wait`.
+- [`artifact_signals.py`](../contremaitre/artifact_signals.py) — pure agent event interpretation for run artifact writes, phase counts, self-verification, and code-edit detection. Shared by flow-use observability and the TUI.
 - [`checks.py`](../contremaitre/checks.py) — `--check-cmd` runner. OPENCODE mode: sidecar container with the run's worktree + deps volume, 600s timeout. FAKE mode: runs on the host.
 - [`cli.py`](../contremaitre/cli.py) — argparse, subcommand dispatch, auto-derived clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/`, launch-screen banners + pickers, image staleness rebuild (compares `contremaitre.dockerfile-sha256` label).
 - [`cli_review_extra.py`](../contremaitre/cli_review_extra.py) — utility for re-judging a finished run with a different CLI reviewer.

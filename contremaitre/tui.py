@@ -35,9 +35,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .artifact_signals import (
+    compute_phase_counts,
+    compute_self_verification,
+    detect_artifact_writes,
+)
 from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
-from .extract import parse_apply_patch
 
 try:
     from rich.table import Table
@@ -52,21 +56,6 @@ except ImportError:  # pragma: no cover — gated at CLI entry point
     _TEXTUAL_AVAILABLE = False
 
 
-SETTLED_FILE_RE = re.compile(r"/SETTLED_DESIGN\.md$", re.IGNORECASE)
-IMPL_COMPLETE_FILE_RE = re.compile(r"/IMPLEMENTATION_COMPLETE$")
-ARCH_REVIEW_FILE_RE = re.compile(r"/architecture-review\.html?$", re.IGNORECASE)
-APPLY_PATCH_SETTLED_RE = re.compile(
-    r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*SETTLED_DESIGN\.md\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-APPLY_PATCH_IMPL_COMPLETE_RE = re.compile(
-    r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*IMPLEMENTATION_COMPLETE\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-APPLY_PATCH_ARCH_REVIEW_RE = re.compile(
-    r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*architecture-review\.html?\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
 DOCKER_REFRESH_S = 2.0
 
 # Sentinel for the "no prior active pane recorded yet" state on the very
@@ -955,189 +944,6 @@ def _task_count(events: list[dict[str, Any]]) -> int:
         for e in events
         if e.get("type") == "tool_use" and (e.get("part") or {}).get("tool") == "task"
     )
-
-
-def _settled_in(events: list[dict[str, Any]]) -> bool:
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        state = part.get("state") or {}
-        if state.get("status") != "completed":
-            continue
-        tool = part.get("tool")
-        inp = state.get("input") or {}
-        if tool in ("write", "edit"):
-            fp = inp.get("filePath") or inp.get("path") or ""
-            if SETTLED_FILE_RE.search(fp):
-                return True
-        elif tool == "apply_patch":
-            patch = inp.get("patchText") or inp.get("patch") or ""
-            if APPLY_PATCH_SETTLED_RE.search(patch):
-                return True
-    return False
-
-
-def _impl_complete_in(events: list[dict[str, Any]]) -> bool:
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        state = part.get("state") or {}
-        if state.get("status") != "completed":
-            continue
-        tool = part.get("tool")
-        inp = state.get("input") or {}
-        if tool in ("write", "edit"):
-            fp = inp.get("filePath") or inp.get("path") or ""
-            if IMPL_COMPLETE_FILE_RE.search(fp):
-                return True
-        elif tool == "apply_patch":
-            patch = inp.get("patchText") or inp.get("patch") or ""
-            if APPLY_PATCH_IMPL_COMPLETE_RE.search(patch):
-                return True
-    return False
-
-
-def _architecture_review_in(events: list[dict[str, Any]]) -> bool:
-    """True if `.contremaitre/architecture-review.html` has been written.
-
-    The skill's convention is for the agent to publish candidate cards there
-    before grilling with SIM. Not a harness gate, but useful as the
-    Exploring → Grilling boundary in the footer trail.
-    """
-
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        state = part.get("state") or {}
-        if state.get("status") != "completed":
-            continue
-        tool = part.get("tool")
-        inp = state.get("input") or {}
-        if tool in ("write", "edit"):
-            fp = inp.get("filePath") or inp.get("path") or ""
-            if ARCH_REVIEW_FILE_RE.search(fp):
-                return True
-        elif tool == "apply_patch":
-            patch = inp.get("patchText") or inp.get("patch") or ""
-            if APPLY_PATCH_ARCH_REVIEW_RE.search(patch):
-                return True
-    return False
-
-
-def _compute_phases_for_tui(
-    paths: dict[str, Path],
-    agent_events: list[dict[str, Any]],
-    guardrails: list[dict[str, Any]],
-    review_cycles: list[dict[str, Any]],
-) -> dict[str, int]:
-    """In-TUI mirror of flow_use.compute_phases.
-
-    The TUI ticks ~once a second and already holds the events it needs.
-    Re-reading from disk here would just duplicate I/O. Same logic as
-    flow_use.compute_phases — anchored to opencode_actor_start + the
-    SETTLED / IMPLEMENTATION_COMPLETE write timestamps.
-    """
-    settled_event = None
-    impl_event = None
-    for e in agent_events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        if (part.get("state") or {}).get("status") != "completed":
-            continue
-        inp = (part.get("state") or {}).get("input") or {}
-        target = inp.get("filePath") or inp.get("path") or inp.get("patchText") or ""
-        if settled_event is None and "SETTLED_DESIGN" in target.upper():
-            settled_event = e
-        if impl_event is None and "IMPLEMENTATION_COMPLETE" in target:
-            impl_event = e
-
-    settled_ms = settled_event.get("timestamp") if settled_event else None
-    impl_ms = impl_event.get("timestamp") if impl_event else None
-
-    starts: list[tuple[float, str]] = []
-    for g in guardrails:
-        if g.get("event") != "opencode_actor_start":
-            continue
-        ts_str = g.get("ts", "")
-        try:
-            from datetime import datetime
-
-            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() * 1000
-        except (ValueError, AttributeError):
-            continue
-        role = g.get("role")
-        if role in ("agent", "sim", "review"):
-            starts.append((ts, role))
-    starts.sort()
-
-    impl_start_idx: int | None = None
-    if settled_ms is not None:
-        for i, (ts, role) in enumerate(starts):
-            if role != "agent":
-                continue
-            next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
-            if ts <= settled_ms < next_ts:
-                impl_start_idx = i
-                break
-
-    if impl_start_idx is None:
-        pre, post = starts, []
-    else:
-        pre, post = starts[:impl_start_idx], starts[impl_start_idx:]
-
-    pre_agent = sum(1 for _, r in pre if r == "agent")
-    pre_sim = sum(1 for _, r in pre if r == "sim")
-    impl = sum(1 for ts, r in post if r == "agent" and (impl_ms is None or ts <= impl_ms))
-
-    return {
-        "grilling_exchanges": min(pre_agent, pre_sim),
-        "impl_turns": impl,
-        "review_rounds": len(review_cycles),
-    }
-
-
-def _self_verified_in(events: list[dict[str, Any]]) -> bool:
-    """True if agent ran a test command after its last code edit."""
-    _test_cmd_re = re.compile(
-        r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b"
-    )
-    _contremaitre_re = re.compile(r"[/\\]?\.contremaitre[/\\]")
-    last_edit_ts = 0
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        inp = (part.get("state") or {}).get("input") or {}
-        paths: list[str]
-        if part.get("tool") == "apply_patch":
-            patch = inp.get("patchText") or inp.get("patch") or ""
-            paths = [fp for _, fp, _ in parse_apply_patch(patch)]
-        else:
-            fp = inp.get("filePath") or inp.get("path") or ""
-            paths = [fp] if fp else []
-        if any(not _contremaitre_re.search(fp) for fp in paths):
-            last_edit_ts = max(last_edit_ts, e.get("timestamp", 0))
-    if not last_edit_ts:
-        return False
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        if (e.get("part") or {}).get("tool") != "bash":
-            continue
-        if e.get("timestamp", 0) <= last_edit_ts:
-            continue
-        cmd = ((e.get("part") or {}).get("state") or {}).get("input", {}).get("command") or ""
-        if _test_cmd_re.search(cmd):
-            return True
-    return False
 
 
 def _latest_pending_tool(events: list[dict[str, Any]]) -> str | None:
@@ -2161,9 +1967,10 @@ if _TEXTUAL_AVAILABLE:
 
             agent_turns = _text_event_count(agent_events)
             sim_turns = _text_event_count(sim_events)
-            settled = _settled_in(agent_events)
-            impl_complete = _impl_complete_in(agent_events)
-            self_verified = _self_verified_in(agent_events)
+            artifact_writes = detect_artifact_writes(agent_events)
+            settled = artifact_writes.settled_design is not None
+            impl_complete = artifact_writes.implementation_complete is not None
+            self_verified = compute_self_verification(agent_events).self_verified
 
             # Freeze elapsed + activity-age once the orchestrator has
             # written stats.json (terminal state) so a finished run stops
@@ -2448,7 +2255,7 @@ if _TEXTUAL_AVAILABLE:
                 g.get("event") == "opencode_actor_start" and g.get("role") == "review"
                 for g in guardrails
             )
-            architecture_review_done = _architecture_review_in(agent_events)
+            architecture_review_done = artifact_writes.architecture_review is not None
             # cli_review_started / _completed / _failed hoisted above.
             phase, color_state = _derive_phase(
                 terminal=terminal,
@@ -2467,9 +2274,12 @@ if _TEXTUAL_AVAILABLE:
             # Phase counters mirror flow_use.compute_phases so footer matches eval.
             review_cycles = _read_jsonl(self.paths["review_cycles"])
             test_runs = _read_jsonl(self.paths["test_runs"])
-            phase_counts = _compute_phases_for_tui(
-                self.paths, agent_events, guardrails, review_cycles
-            )
+            counts = compute_phase_counts(agent_events, guardrails, review_cycles)
+            phase_counts = {
+                "grilling_exchanges": counts.grilling_exchanges,
+                "impl_turns": counts.impl_turns,
+                "review_rounds": counts.review_rounds,
+            }
 
             # Verdict zone text. `attached` covers read-only TUI on an
             # in-progress run; terminal badges come from TerminalVerdict
