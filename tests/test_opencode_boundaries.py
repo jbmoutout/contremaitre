@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from contremaitre import prompts
-from contremaitre.actors import build_docker_command
+from contremaitre.actors.docker import build_docker_command
 from contremaitre.git_utils import GitRepo
 from contremaitre.models import ActorMode, PublishMode, RunConfig
 from contremaitre.orchestrator import Orchestrator

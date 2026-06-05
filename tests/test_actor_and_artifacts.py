@@ -15,8 +15,8 @@ import unittest
 from pathlib import Path
 
 from contremaitre import events
-from contremaitre.actors import (
-    FakeActorRunner,
+from contremaitre.actors.fake import FakeActorRunner
+from contremaitre.actors.recovery import (
     _harvest_step_finishes_from_sqlite,
     _recover_text_from_sqlite,
     _record_recovery,
