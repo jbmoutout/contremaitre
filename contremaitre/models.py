@@ -48,6 +48,10 @@ class TerminalVerdict(str, Enum):
 class ActorMode(str, Enum):
     FAKE = "fake"
     OPENCODE = "opencode"
+    # Drive a frontier CLI (currently codex) headless inside the per-run
+    # container AS the agent/SIM, on the operator's subscription. See
+    # cli_actor.CliActorRunner for the auth + egress-lock handling.
+    CLI = "cli"
 
 
 class PublishMode(str, Enum):
@@ -102,6 +106,9 @@ class RunConfig:
     cli_reviewer: str = "none"
     check_cmds: tuple[str, ...] = ()
     actor_mode: ActorMode = ActorMode.FAKE
+    # Which frontier CLI to drive AS the agent/SIM when actor_mode is CLI.
+    # Only "codex" is implemented today (claude pending a headless OAuth token).
+    cli_tool: str = "codex"
     sim_scenario: str = "approved"
     extra_reviewer_scenario: str = "approved"
     agent_scenario: str = "normal"

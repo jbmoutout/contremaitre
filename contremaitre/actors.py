@@ -513,6 +513,12 @@ def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
         )
     if config.actor_mode == ActorMode.OPENCODE:
         return OpencodeActorRunner(config=config, paths=paths)
+    if config.actor_mode == ActorMode.CLI:
+        # Lazy import: cli_actor imports this module for the shared detached
+        # runner, so a top-level import here would be a cycle.
+        from .cli_actor import CliActorRunner
+
+        return CliActorRunner(config=config, paths=paths, tool=config.cli_tool)
     raise ActorError(f"unknown actor mode: {config.actor_mode}")
 
 
