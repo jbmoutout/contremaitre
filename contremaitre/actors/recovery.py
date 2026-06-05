@@ -10,6 +10,14 @@ from ..models import RunPaths
 
 
 def _record_recovery(paths: RunPaths, *, kind: str, **fields) -> None:
+    """Append a recovery event to both recoveries.jsonl and guardrail_events.
+
+    `recoveries.jsonl` is the forensic capture for sqlite recoveries +
+    SIGTERM emergency writes — events that aren't normal control-plane
+    flow but matter for post-mortem analysis. Mirrored in guardrail_events
+    so a single tail catches them too.
+    """
+
     record = {"kind": kind, **fields}
     append_jsonl(paths.recoveries, record)
     append_jsonl(paths.guardrail_events, {"event": f"recovery_{kind}", **fields})
@@ -18,6 +26,19 @@ def _record_recovery(paths: RunPaths, *, kind: str, **fields) -> None:
 def _recover_text_from_sqlite(
     state_dir: Path, session_id: str | None
 ) -> tuple[str | None, str | None, bool]:
+    """Recover the latest message's text from opencode's sqlite.
+
+    Failure mode this addresses: opencode persists message parts to its
+    SQLite (text + step-finish with reason='stop') but sometimes does NOT
+    flush the corresponding `text` event to its --format=json stdout
+    before the docker process exits. The data is intact in the DB; we
+    read it back.
+
+    Returns: (text, message_id, completed). `completed` is True if the
+    message has a step-finish part with reason='stop' — i.e. genuinely
+    finished, not mid-stream.
+    """
+
     db_path = state_dir / "opencode.db"
     if not db_path.exists():
         return None, None, False
@@ -72,6 +93,8 @@ def _recover_text_from_sqlite(
 def _append_synthetic_text_event(
     raw_export: Path, text: str, message_id: str | None, session_id: str | None
 ) -> None:
+    """Append a synthetic text event so downstream tooling sees a uniform stream."""
+
     event = {
         "type": "text",
         "timestamp": int(time.time() * 1000),
@@ -86,6 +109,13 @@ def _append_synthetic_text_event(
 
 
 def _existing_step_finish_part_ids(path: Path) -> set[str]:
+    """Collect `part.id` values for step_finish events already in raw_export.
+
+    Used by `_harvest_step_finishes_from_sqlite` to dedupe — we never want
+    to re-emit a step_finish opencode's stdout already streamed, nor one we
+    synthesized on a previous turn.
+    """
+
     ids: set[str] = set()
     for event in read_jsonl(path):
         if event.get("type") != "step_finish":
@@ -99,6 +129,32 @@ def _existing_step_finish_part_ids(path: Path) -> set[str]:
 
 
 def _harvest_step_finishes_from_sqlite(state_dir: Path, raw_export: Path) -> int:
+    """Append synthetic `step_finish` events for parts opencode never streamed.
+
+    Two undercounts this addresses:
+
+    (a) Subagent (child) sessions spawned via the `task` tool log their
+        step-finish parts to the same opencode.db as the parent, but their
+        events never flow into the parent invocation's --format=json stdout.
+        Each parent turn that uses subagents leaves their cost invisible to
+        the recorded-cost estimator.
+
+    (b) Even for the parent session, the final step-finish part sometimes
+        lands in the DB after docker exits without flushing to stdout.
+
+    We walk every `part` row in the DB whose JSON has `type == "step-finish"`
+    and synthesize a `step_finish` event matching the stdout envelope shape
+    for any whose `part.id` isn't already in raw_export. The cost estimator
+    (`costs.estimate_recorded_cost_usd`) walks event JSON recursively for
+    `cost`-like keys, so synthesized parts contribute identically to real
+    ones without any estimator change.
+
+    Idempotent: dedupe is by `part.id`, so calling this every turn is safe
+    even when child sessions persist across turns.
+
+    Returns: number of synthetic events appended.
+    """
+
     db_path = state_dir / "opencode.db"
     if not db_path.exists():
         return 0
@@ -116,6 +172,11 @@ def _harvest_step_finishes_from_sqlite(state_dir: Path, raw_export: Path) -> int
     new_events: list[dict[str, object]] = []
     now_ms = int(time.time() * 1000)
     for part_id, session_id, message_id, data_str, time_created in rows:
+        # The `id` lives in the table column, not the JSON blob — opencode
+        # only injects it into the envelope when streaming to stdout. The
+        # `message_id` is also in a column. The JSON has the type / cost /
+        # tokens / reason fields; we reassemble the envelope shape that
+        # stdout emits.
         if not isinstance(part_id, str) or part_id in existing_ids:
             continue
         try:
@@ -130,6 +191,8 @@ def _harvest_step_finishes_from_sqlite(state_dir: Path, raw_export: Path) -> int
             "messageID": message_id,
             "sessionID": session_id,
         }
+        # opencode stores `time_created` as milliseconds since epoch; fall
+        # back to wall clock if the column is missing or malformed.
         if isinstance(time_created, (int, float)) and time_created > 0:
             ts = int(time_created)
         else:

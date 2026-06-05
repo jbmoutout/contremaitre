@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .. import events, prompts
+from .. import events
 from ..jsonlog import append_jsonl, append_transcript
 from ..models import ActorMode, RunConfig, RunPaths
 from .base import ActorError, ActorOutput, ActorRunner
@@ -29,6 +29,17 @@ from .recovery import (
 
 
 class OpencodeActorRunner:
+    """Run agent and SIM turns through opencode inside Docker.
+
+    The agent gets a writable `/app` mount and one persistent session across
+    WORK turns. The SIM gets the same worktree as a read-only mount and one
+    persistent session across WORK turns. The REVIEW pass uses a fresh SIM
+    session with an additional read-only `/review` mount containing the
+    settled design and the diff.
+
+    GitHub credentials are never passed into either container.
+    """
+
     def __init__(self, *, config: RunConfig, paths: RunPaths):
         self.config = config
         self.paths = paths
@@ -76,6 +87,8 @@ class OpencodeActorRunner:
         reviewer_id: str = "sim",
         model_override: str | None = None,
     ) -> ActorOutput:
+        from .. import prompts
+
         review_dir = self.paths.run_dir / "review_input"
         review_dir.mkdir(exist_ok=True)
         (review_dir / "SETTLED_DESIGN.md").write_text(
@@ -84,6 +97,9 @@ class OpencodeActorRunner:
         (review_dir / "diff.patch").write_text(
             diff_file.read_text(encoding="utf-8"), encoding="utf-8"
         )
+        # Fresh session every review attempt so the SIM has clean context.
+        # Separate state dirs per reviewer so SIM and extra reviewer can't
+        # collide on opencode.db when called back-to-back in one round.
         attempt_state = self.review_state / f"{reviewer_id}-attempt-{attempt}"
         attempt_state.mkdir(parents=True, exist_ok=True)
         raw_export = (
@@ -118,6 +134,11 @@ class OpencodeActorRunner:
         extra_mounts: list[tuple[Path, str, str]] | None = None,
         reviewer_id: str | None = None,
     ) -> ActorOutput:
+        # Retry wrapper: on transient upstream symptoms (a provider error
+        # surfaced into the stream, or a dual-signal stdout+log stall),
+        # kill the failed attempt and re-run the turn. Quota errors,
+        # wall-clock timeouts, and bare `exited N` failures bypass this
+        # — those are terminal.
         retryable_kinds = (events.PROVIDER_TRANSIENT_ERROR, events.OPENCODE_STALL)
         max_retries = self.config.opencode_transient_retry_max
         backoff = self.config.opencode_transient_retry_backoff_seconds
@@ -198,6 +219,9 @@ class OpencodeActorRunner:
             "cmd_redacted": redact_command(cmd),
         }
         if reviewer_id is not None:
+            # Tags review-pass starts so the TUI can route per-reviewer
+            # turn separators to the right pane. role stays "review" for
+            # transcript/breadcrumb back-compat; the field is additive.
             start_event["reviewer_id"] = reviewer_id
         append_jsonl(self.paths.guardrail_events, start_event)
         raw_export.parent.mkdir(parents=True, exist_ok=True)
@@ -241,6 +265,9 @@ class OpencodeActorRunner:
             setattr(self, session_attr, new_session_id)
         post_text_count = _count_text_events(raw_export)
         if post_text_count == pre_text_count:
+            # Provider/API error scoped to events emitted DURING this turn
+            # (after pre_text_count). Avoids tripping on stale errors from
+            # earlier turns left in the multi-turn stream.
             error = _latest_error_after_text_count(
                 raw_export, pre_text_count, events_offset=events_offset
             )
@@ -272,6 +299,10 @@ class OpencodeActorRunner:
                         kind=kind,
                     )
                 raise ActorError(f"{role} opencode emitted error without text: {error[:500]}")
+            # opencode silent-stall: the text part landed in opencode's sqlite
+            # but the corresponding `text` event was never flushed to stdout
+            # before docker exited. Read it back from the DB and synthesize
+            # the missing event so downstream tooling sees a uniform stream.
             recovered, msg_id, completed = _recover_text_from_sqlite(
                 state_dir, session_id or new_session_id
             )
@@ -297,6 +328,15 @@ class OpencodeActorRunner:
         return ActorOutput(text=latest, stderr=stderr, returncode=returncode)
 
     def _harvest_step_finishes(self, *, role: str, state_dir: Path, raw_export: Path) -> None:
+        """Backfill step_finish events for subagent sessions + stragglers.
+
+        Mirrors the sqlite-recovery pattern: opencode's stdout is the
+        source of truth when it's complete, the DB is the source of truth
+        when it isn't. Subagent (child) sessions are *always* invisible to
+        the parent's stdout, so harvesting is normal flow — not a recovery —
+        and we use guardrail_events rather than recoveries.jsonl.
+        """
+
         count = _harvest_step_finishes_from_sqlite(state_dir, raw_export)
         if count:
             append_jsonl(
@@ -309,6 +349,9 @@ class OpencodeActorRunner:
             )
 
     def _append_transcript(self, *, role: str, text: str) -> None:
+        # Roles: "agent" / "sim" / "review". The review role is the SIM doing
+        # the review pass; transcript speaker stays "sim" so both WORK and
+        # REVIEW SIM turns interleave under one identity.
         phase = "REVIEW" if role == "review" else "WORK"
         speaker = "sim" if role == "review" else role
         append_transcript(self.paths.transcript, speaker=speaker, phase=phase, text=text)

@@ -11,6 +11,17 @@ from .base import ActorError, ActorOutput
 
 
 class FakeActorRunner:
+    """Deterministic subprocess actor for fixture smoke runs.
+
+    The fake agent writes `.contremaitre/SETTLED_DESIGN.md`, a small
+    implementation, and `.contremaitre/IMPLEMENTATION_COMPLETE` on its first
+    turn, so the orchestrator's WORK loop terminates immediately. The fake
+    SIM emits canned strings or strict JSON verdicts based on scenario.
+
+    Owns its own raw_export + transcript writes. The orchestrator never
+    reaches into either file on behalf of this adapter.
+    """
+
     def __init__(self, *, paths: RunPaths, agent_scenario: str, sim_scenario: str):
         self.paths = paths
         self.agent_scenario = agent_scenario
@@ -84,6 +95,7 @@ class FakeActorRunner:
                 f"fake actor failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}"
             )
         text = proc.stdout.strip()
+        # Wrap in opencode's text-event shape so downstream readers see uniform JSONL.
         append_text_event(raw_export, role=role, phase=phase, text=text)
         append_transcript(self.paths.transcript, speaker=role, phase=phase, text=text)
         return ActorOutput(text=text, stderr=proc.stderr, returncode=proc.returncode)
