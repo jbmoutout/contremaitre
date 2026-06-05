@@ -1084,9 +1084,7 @@ def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
 
     tool = getattr(args, "cli_tool", "codex")
     yes_mode = (
-        getattr(args, "yes", False)
-        or getattr(args, "no_prompt", False)
-        or not sys.stdin.isatty()
+        getattr(args, "yes", False) or getattr(args, "no_prompt", False) or not sys.stdin.isatty()
     )
     token_line, egress_line = _codex_status_lines(args)
 
@@ -1830,9 +1828,7 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         cli_tool=getattr(args, "cli_tool", "codex"),
         codex_model=getattr(args, "codex_model", "gpt-5.5"),
         codex_effort=getattr(args, "codex_effort", "high"),
-        sim_actor_mode=(
-            ActorMode(args.sim_actor) if getattr(args, "sim_actor", None) else None
-        ),
+        sim_actor_mode=(ActorMode(args.sim_actor) if getattr(args, "sim_actor", None) else None),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
         extra_reviewer_scenario=getattr(args, "extra_reviewer_scenario", "approved"),
@@ -1934,7 +1930,11 @@ def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
         args.actor = saved.actor
     if saved.sim_actor and not _has_flag_in(argv, "--sim-actor") and hasattr(args, "sim_actor"):
         args.sim_actor = saved.sim_actor
-    if saved.codex_model and not _has_flag_in(argv, "--codex-model") and hasattr(args, "codex_model"):
+    if (
+        saved.codex_model
+        and not _has_flag_in(argv, "--codex-model")
+        and hasattr(args, "codex_model")
+    ):
         args.codex_model = saved.codex_model
     if (
         saved.codex_effort

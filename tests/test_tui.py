@@ -1473,8 +1473,10 @@ def test_codex_agent_message_renders_as_text():
 
 def test_codex_turn_completed_shows_tokens():
     typ, _tool, body = _row_plain(
-        {"type": "turn.completed",
-         "usage": {"input_tokens": 5, "output_tokens": 2, "cached_input_tokens": 1}}
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 5, "output_tokens": 2, "cached_input_tokens": 1},
+        }
     )
     assert typ == "turn_done"
     assert "in 5" in body and "out 2" in body

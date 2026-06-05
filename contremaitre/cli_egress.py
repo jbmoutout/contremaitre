@@ -74,9 +74,7 @@ def _ensure_proxy(runner, sleep) -> None:
     if not _SQUID_CONF.exists():
         raise EgressError(f"squid allowlist config missing: {_SQUID_CONF}")
     want_hash = _squid_conf_hash()
-    running = _docker(
-        runner, ["ps", "-q", "-f", f"name=^{PROXY_NAME}$", "-f", "status=running"]
-    )
+    running = _docker(runner, ["ps", "-q", "-f", f"name=^{PROXY_NAME}$", "-f", "status=running"])
     if running.stdout.strip():
         # Recreate when the allowlist changed under a running proxy — squid bakes
         # the config in at start, so an edited squid.conf would otherwise silently
@@ -85,7 +83,9 @@ def _ensure_proxy(runner, sleep) -> None:
         label = _docker(
             runner,
             [
-                "inspect", PROXY_NAME, "--format",
+                "inspect",
+                PROXY_NAME,
+                "--format",
                 '{{ index .Config.Labels "' + _SQUID_HASH_LABEL + '" }}',
             ],
         )
@@ -96,9 +96,17 @@ def _ensure_proxy(runner, sleep) -> None:
     created = _docker(
         runner,
         [
-            "run", "-d", "--name", PROXY_NAME, "--network", NETWORK_NAME,
-            "--label", f"{_SQUID_HASH_LABEL}={want_hash}",
-            "-v", f"{_SQUID_CONF}:/etc/squid/squid.conf:ro", PROXY_IMAGE,
+            "run",
+            "-d",
+            "--name",
+            PROXY_NAME,
+            "--network",
+            NETWORK_NAME,
+            "--label",
+            f"{_SQUID_HASH_LABEL}={want_hash}",
+            "-v",
+            f"{_SQUID_CONF}:/etc/squid/squid.conf:ro",
+            PROXY_IMAGE,
         ],
     )
     if created.returncode != 0:

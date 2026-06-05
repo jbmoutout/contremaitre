@@ -104,9 +104,7 @@ class EnsureEgressProxyTest(unittest.TestCase):
         self.assertIn(("network", "connect"), subs)
 
     def test_raises_when_network_create_fails(self):
-        runner = _make_runner(
-            {"network_inspect": _Resp(1), "network_create": _Resp(1, err="boom")}
-        )
+        runner = _make_runner({"network_inspect": _Resp(1), "network_create": _Resp(1, err="boom")})
         with self.assertRaises(EgressError):
             ensure_egress_proxy(runner=runner, sleep=lambda *_: None)
 

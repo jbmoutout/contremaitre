@@ -127,14 +127,20 @@ class PrepareCodexHomeTest(unittest.TestCase):
             def _renew():
                 (runner._src_codex_home / "auth.json").write_text(
                     json.dumps(
-                        {"tokens": {"access_token": _fake_jwt(int(time.time()) + 9 * 24 * 3600),
-                                    "refresh_token": "REAL-SECRET-REFRESH-TOKEN"}}
+                        {
+                            "tokens": {
+                                "access_token": _fake_jwt(int(time.time()) + 9 * 24 * 3600),
+                                "refresh_token": "REAL-SECRET-REFRESH-TOKEN",
+                            }
+                        }
                     )
                 )
 
             runner._host_refresh_token = _renew  # stub: refreshes the host token
             home = runner.prepare_codex_home(runner.agent_home)  # no raise
-            self.assertEqual(json.loads((home / "auth.json").read_text())["tokens"]["refresh_token"], "x")
+            self.assertEqual(
+                json.loads((home / "auth.json").read_text())["tokens"]["refresh_token"], "x"
+            )
 
 
 class EgressLockTest(unittest.TestCase):
@@ -168,8 +174,13 @@ class BuildCommandTest(unittest.TestCase):
                 Path(tmp), docker_network="cmtr-int", https_proxy="http://egress-proxy:3128"
             )
             cmd = runner._build_codex_command(
-                prompt="do it", codex_home=runner.agent_home, session_id=None,
-                model="m", mount_mode="rw", role="agent", extra_mounts=(),
+                prompt="do it",
+                codex_home=runner.agent_home,
+                session_id=None,
+                model="m",
+                mount_mode="rw",
+                role="agent",
+                extra_mounts=(),
             )
             joined = " ".join(cmd)
             self.assertEqual(cmd[:3], ["docker", "run", "-d"])
@@ -190,26 +201,38 @@ class BuildCommandTest(unittest.TestCase):
                 Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
             )
             cmd = runner._build_codex_command(
-                prompt="again", codex_home=runner.agent_home, session_id="SID-123",
-                model="m", mount_mode="rw", role="agent", extra_mounts=(),
+                prompt="again",
+                codex_home=runner.agent_home,
+                session_id="SID-123",
+                model="m",
+                mount_mode="rw",
+                role="agent",
+                extra_mounts=(),
             )
             # exec-level opts must precede the `resume` subcommand (clap rejects
             # them otherwise), and the session id must follow `resume`.
             self.assertLess(cmd.index("-s"), cmd.index("resume"))
             self.assertEqual(cmd[cmd.index("resume") + 1], "SID-123")
             # -m model is omitted on resume (the session carries it).
-            self.assertNotIn("-m", cmd[cmd.index("resume"):])
+            self.assertNotIn("-m", cmd[cmd.index("resume") :])
 
     def test_first_turn_falls_back_to_codex_model_for_namespaced(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(
-                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128",
-                codex_model="gpt-5.5", codex_effort="high",
+                Path(tmp),
+                docker_network="cmtr-int",
+                https_proxy="http://p:3128",
+                codex_model="gpt-5.5",
+                codex_effort="high",
             )
             cmd = runner._build_codex_command(
-                prompt="do it", codex_home=runner.agent_home,
-                session_id=None, model="openrouter/deepseek/deepseek-v4-flash",
-                mount_mode="rw", role="agent", extra_mounts=(),
+                prompt="do it",
+                codex_home=runner.agent_home,
+                session_id=None,
+                model="openrouter/deepseek/deepseek-v4-flash",
+                mount_mode="rw",
+                role="agent",
+                extra_mounts=(),
             )
             # codex rejects opencode/openrouter names on a ChatGPT account → fall
             # back to the codex-native config.codex_model, not the namespaced name.
@@ -224,8 +247,12 @@ class BuildCommandTest(unittest.TestCase):
                 Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
             )
             cmd = runner._build_codex_command(
-                prompt="review", codex_home=runner.review_home, session_id=None,
-                model="m", mount_mode="ro", role="review",
+                prompt="review",
+                codex_home=runner.review_home,
+                session_id=None,
+                model="m",
+                mount_mode="ro",
+                role="review",
                 extra_mounts=((Path("/tmp/rev"), "/review", "ro"),),
             )
             joined = " ".join(cmd)
@@ -262,8 +289,13 @@ class CodexModelArgTest(unittest.TestCase):
 
 def _cli_config(root: Path, **over) -> RunConfig:
     return RunConfig(
-        repo=root, base="main", runs_root=root / "runs", run_slug="t",
-        actor_mode=ActorMode.CLI, cli_tool="codex", **over,
+        repo=root,
+        base="main",
+        runs_root=root / "runs",
+        run_slug="t",
+        actor_mode=ActorMode.CLI,
+        cli_tool="codex",
+        **over,
     )
 
 
@@ -273,7 +305,9 @@ class CodexAuthCheckTest(unittest.TestCase):
             home = Path(tmp) / ".codex"
             home.mkdir(parents=True)
             (home / "auth.json").write_text(
-                json.dumps({"tokens": {"access_token": _fake_jwt(int(time.time()) + 9 * 24 * 3600)}})
+                json.dumps(
+                    {"tokens": {"access_token": _fake_jwt(int(time.time()) + 9 * 24 * 3600)}}
+                )
             )
             self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "PASS")
 
@@ -298,12 +332,28 @@ class TokenUsageRollupTest(unittest.TestCase):
             p.write_text(
                 "\n".join(
                     [
-                        json.dumps({"type": "turn.completed", "usage": {
-                            "input_tokens": 100, "output_tokens": 10,
-                            "cached_input_tokens": 80, "reasoning_output_tokens": 5}}),
-                        json.dumps({"type": "turn.completed", "usage": {
-                            "input_tokens": 40, "output_tokens": 4,
-                            "cached_input_tokens": 30, "reasoning_output_tokens": 1}}),
+                        json.dumps(
+                            {
+                                "type": "turn.completed",
+                                "usage": {
+                                    "input_tokens": 100,
+                                    "output_tokens": 10,
+                                    "cached_input_tokens": 80,
+                                    "reasoning_output_tokens": 5,
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "turn.completed",
+                                "usage": {
+                                    "input_tokens": 40,
+                                    "output_tokens": 4,
+                                    "cached_input_tokens": 30,
+                                    "reasoning_output_tokens": 1,
+                                },
+                            }
+                        ),
                     ]
                 )
             )
@@ -317,8 +367,10 @@ class TokenUsageRollupTest(unittest.TestCase):
             p = Path(tmp) / "raw.jsonl"
             p.write_text(
                 json.dumps(
-                    {"type": "step_finish",
-                     "part": {"tokens": {"input": 7, "output": 2, "cache": {"read": 3}}}}
+                    {
+                        "type": "step_finish",
+                        "part": {"tokens": {"input": 7, "output": 2, "cache": {"read": 3}}},
+                    }
                 )
             )
             self.assertEqual(
@@ -456,9 +508,7 @@ class TuiRunForwardsRuntimeTest(unittest.TestCase):
             args.sim_actor = "opencode"  # opencode SIM
             return True
 
-        cmd = self._spawn_cmd(
-            ["--fork", "git@github.com:o/r.git", "--base", "main"], picked
-        )
+        cmd = self._spawn_cmd(["--fork", "git@github.com:o/r.git", "--base", "main"], picked)
         self.assertEqual(cmd[cmd.index("--actor") + 1], "cli")
         self.assertEqual(cmd[cmd.index("--sim-actor") + 1], "opencode")
 
@@ -468,8 +518,12 @@ class CompositeRunnerTest(unittest.TestCase):
         paths = build_run_paths(Path(tmp) / "runs", f"20260605-{Path(tmp).name}")
         paths.run_dir.mkdir(parents=True, exist_ok=True)
         cfg = RunConfig(
-            repo=Path(tmp), base="main", runs_root=Path(tmp) / "runs", run_slug="t",
-            actor_mode=ActorMode.FAKE, **over,
+            repo=Path(tmp),
+            base="main",
+            runs_root=Path(tmp) / "runs",
+            run_slug="t",
+            actor_mode=ActorMode.FAKE,
+            **over,
         )
         return make_actor_runner(config=cfg, paths=paths)
 
@@ -502,8 +556,10 @@ class ParseEventsTest(unittest.TestCase):
                         json.dumps({"type": "thread.started", "thread_id": "SID-9"}),
                         json.dumps({"type": "turn.started"}),
                         json.dumps(
-                            {"type": "item.completed",
-                             "item": {"type": "agent_message", "text": "FINAL"}}
+                            {
+                                "type": "item.completed",
+                                "item": {"type": "agent_message", "text": "FINAL"},
+                            }
                         ),
                         json.dumps({"type": "turn.completed", "usage": {"output_tokens": 6}}),
                     ]
@@ -519,14 +575,23 @@ class ParseEventsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "events.jsonl"
             p.write_text(
-                json.dumps({"type": "item.completed",
-                            "item": {"type": "agent_message", "text": "FIRST"}}) + "\n"
+                json.dumps(
+                    {"type": "item.completed", "item": {"type": "agent_message", "text": "FIRST"}}
+                )
+                + "\n"
             )
             off = p.stat().st_size  # boundary between turn 1 and turn 2
             with p.open("a") as f:
                 f.write(json.dumps({"type": "thread.started", "thread_id": "S2"}) + "\n")
-                f.write(json.dumps({"type": "item.completed",
-                                    "item": {"type": "agent_message", "text": "SECOND"}}) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": "SECOND"},
+                        }
+                    )
+                    + "\n"
+                )
             text, sid, _u, _e = _parse_codex_events(p, start_offset=off)
             self.assertEqual(text, "SECOND")  # not "FIRST" from the prior turn
             self.assertEqual(sid, "S2")

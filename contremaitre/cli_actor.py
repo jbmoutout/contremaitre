@@ -407,9 +407,7 @@ class CliActorRunner:
             raw_export, start_offset=start_offset
         )
         if returncode != 0:
-            raise ActorError(
-                f"{role} codex exited {returncode}: {error or stderr[:500]}"
-            )
+            raise ActorError(f"{role} codex exited {returncode}: {error or stderr[:500]}")
         if error and not final_text:
             raise ActorError(f"{role} codex turn failed: {error}")
 

@@ -1399,7 +1399,13 @@ def _build_event_row(event: dict[str, Any]):
 
     # ----- codex --json shapes (CLI actor streams these into raw_export) -----
     if t == "thread.started":
-        return ("", ts, Text("session", style="dim"), "", Text(event.get("thread_id", ""), style="dim"))
+        return (
+            "",
+            ts,
+            Text("session", style="dim"),
+            "",
+            Text(event.get("thread_id", ""), style="dim"),
+        )
 
     if t == "turn.started":
         return ("", ts, Text("turn", style="dim"), "", "")
