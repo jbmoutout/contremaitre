@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from contremaitre.cli_actor import (
     CliActorRunner,
@@ -15,6 +17,7 @@ from contremaitre.cli_actor import (
 )
 from contremaitre.models import ActorMode, RunConfig
 from contremaitre.paths import build_run_paths
+from contremaitre.preflight import _check_codex_auth
 
 
 def _b64url(obj: dict) -> str:
@@ -205,6 +208,37 @@ class CodexModelArgTest(unittest.TestCase):
 
     def test_passes_codex_native_model(self):
         self.assertEqual(_codex_model_arg("gpt-5.5"), ["-m", "gpt-5.5"])
+
+
+def _cli_config(root: Path, **over) -> RunConfig:
+    return RunConfig(
+        repo=root, base="main", runs_root=root / "runs", run_slug="t",
+        actor_mode=ActorMode.CLI, cli_tool="codex", **over,
+    )
+
+
+class CodexAuthCheckTest(unittest.TestCase):
+    def test_pass_when_token_valid(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+            home = Path(tmp) / ".codex"
+            home.mkdir(parents=True)
+            (home / "auth.json").write_text(
+                json.dumps({"tokens": {"access_token": _fake_jwt(int(time.time()) + 9 * 24 * 3600)}})
+            )
+            self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "PASS")
+
+    def test_fail_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+            self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "FAIL")
+
+    def test_fail_when_near_expiry(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+            home = Path(tmp) / ".codex"
+            home.mkdir(parents=True)
+            (home / "auth.json").write_text(
+                json.dumps({"tokens": {"access_token": _fake_jwt(int(time.time()) + 60)}})
+            )
+            self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "FAIL")
 
 
 class ParseEventsTest(unittest.TestCase):

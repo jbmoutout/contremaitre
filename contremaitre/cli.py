@@ -183,6 +183,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value
     )
+    run_p.add_argument(
+        "--cli-tool",
+        choices=["codex", "claude"],
+        default="codex",
+        help="Frontier CLI to drive as agent/SIM when --actor cli (claude pending OAuth token)",
+    )
     run_p.add_argument("--run-slug", default="run")
     run_p.add_argument(
         "--check-cmd", action="append", default=[], help="Executable check command; repeatable"
@@ -930,6 +936,61 @@ def _pick_models_interactive(
     return agent, sim, extra, picker_args
 
 
+def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
+    """Launch screen for `--actor cli` (codex/claude on the operator's plan).
+
+    Subscription-driven, so there's no OpenRouter key probe or model picker —
+    instead a concise status: which tool, whether the codex token is valid, and
+    whether egress is locked (the CLI actor refuses to run on open egress unless
+    --allow-open-egress). yes/non-TTY mode collapses to one info line.
+    """
+
+    import time as _time
+
+    from .cli_actor import _access_token_exp
+
+    tool = getattr(args, "cli_tool", "codex")
+    yes_mode = (
+        getattr(args, "yes", False)
+        or getattr(args, "no_prompt", False)
+        or not sys.stdin.isatty()
+    )
+
+    auth = Path.home() / ".codex" / "auth.json"
+    exp = _access_token_exp(auth) if auth.exists() else None
+    if exp:
+        token_line = f"codex token: valid (~{(exp - int(_time.time())) // 3600}h left)"
+    elif auth.exists():
+        token_line = "codex token: present (opaque expiry)"
+    else:
+        token_line = "codex token: MISSING — run codex once to log in"
+
+    if getattr(args, "allow_open_egress", False):
+        egress_line = "egress: OPEN (--allow-open-egress) — token is exfiltratable"
+    elif getattr(args, "docker_network", None) or getattr(args, "https_proxy", None):
+        net = getattr(args, "docker_network", None) or "(none)"
+        proxy = "yes" if getattr(args, "https_proxy", None) else "no"
+        egress_line = f"egress: locked (network={net}, proxy={proxy})"
+    else:
+        egress_line = "egress: NOT set — CLI actor will REFUSE to launch (need network+proxy)"
+
+    if yes_mode:
+        print(f"[info] actor=cli tool={tool}; {token_line}; {egress_line}")
+        return True
+
+    print()
+    print(_RULE)
+    print(f"  {_b('contremaitre')} · CLI actor ({tool})")
+    print(f"  {token_line}")
+    print(f"  {egress_line}")
+    print(_RULE)
+    try:
+        reply = input("  launch? [Y/n] ").strip().lower()
+    except EOFError:
+        return True
+    return reply in ("", "y", "yes")
+
+
 def _launch_screen(
     *,
     args: argparse.Namespace,
@@ -951,6 +1012,11 @@ def _launch_screen(
     """
 
     from . import cli_reviewer
+
+    # CLI actor mode is subscription-driven, not OpenRouter — its launch screen
+    # is a separate, smaller flow (no key probe, no OpenRouter model picker).
+    if getattr(args, "actor", ActorMode.FAKE.value) == ActorMode.CLI.value:
+        return _cli_launch_screen(args=args)
 
     env_var = getattr(args, "openrouter_env_var", "OPENROUTER_API_KEY")
     key_url = getattr(args, "openrouter_key_url", "https://openrouter.ai/api/v1/key")
@@ -1621,6 +1687,7 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         extra_reviewer_model=getattr(args, "extra_reviewer_model", None),
         cli_reviewer=getattr(args, "cli_reviewer", "none"),
         actor_mode=ActorMode(args.actor),
+        cli_tool=getattr(args, "cli_tool", "codex"),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
         extra_reviewer_scenario=getattr(args, "extra_reviewer_scenario", "approved"),

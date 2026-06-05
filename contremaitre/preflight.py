@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -68,6 +69,18 @@ def run_preflight(config: RunConfig) -> PreflightReport:
                 _check_readonly_mount(config),
                 _check_network_policy(config),
                 _check_openrouter_key(config),
+            ]
+        )
+    elif config.actor_mode == ActorMode.CLI:
+        # CLI actor: no OpenRouter key (codex uses the operator's subscription),
+        # but the SAME egress policy applies (the in-container token is a
+        # long-lived JWT), plus a codex-auth source check.
+        checks.extend(
+            [
+                _check_docker_image(config),
+                _check_readonly_mount(config),
+                _check_network_policy(config),
+                _check_codex_auth(config),
             ]
         )
     passed = all(check.status != "FAIL" for check in checks)
@@ -207,6 +220,39 @@ def _check_network_policy(config: RunConfig) -> PreflightCheck:
         "network_policy",
         "opencode mode requires --docker-network or proxy flags, or explicit --allow-open-egress",
         {},
+    )
+
+
+def _check_codex_auth(config: RunConfig) -> PreflightCheck:
+    """Validate the operator's codex subscription token for CLI actor mode.
+
+    The CLI actor re-seeds a neutered copy of `~/.codex/auth.json` into each
+    container; here we confirm the source exists and its access token isn't
+    about to expire (codex would then try — and, with the neutered token,
+    fail — to refresh mid-run).
+    """
+
+    if config.cli_tool != "codex":
+        return _warn("codex_auth", f"cli_tool={config.cli_tool!r} not yet validated", {})
+    from .cli_actor import _access_token_exp
+
+    auth = Path.home() / ".codex" / "auth.json"
+    if not auth.exists():
+        return _fail("codex_auth", f"{auth} not found; run codex once to log in", {})
+    exp = _access_token_exp(auth)
+    if exp is None:
+        return _warn("codex_auth", "codex access token present (opaque; expiry unknown)", {})
+    remaining = exp - int(time.time())
+    if remaining <= 24 * 3600:
+        return _fail(
+            "codex_auth",
+            f"codex access token expires in ~{remaining // 3600}h; refresh it on the host",
+            {"remaining_s": remaining},
+        )
+    return _pass(
+        "codex_auth",
+        f"codex subscription token present and valid (~{remaining // 3600}h left)",
+        {"remaining_s": remaining},
     )
 
 
