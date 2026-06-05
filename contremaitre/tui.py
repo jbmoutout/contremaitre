@@ -68,6 +68,12 @@ APPLY_PATCH_ARCH_REVIEW_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 DOCKER_REFRESH_S = 2.0
+# codex writes its rate-limit snapshot into session-rollout files (not the
+# `--json` stream we tail). Re-reading them every chrome tick (5Hz) is wasteful
+# — the quota moves once per turn — so cache the parse for a few seconds, and
+# tail only the rollout's tail to find the latest `token_count` event.
+CODEX_USAGE_REFRESH_S = 3.0
+_CODEX_USAGE_TAIL_BYTES = 256 * 1024
 
 # Sentinel for the "no prior active pane recorded yet" state on the very
 # first tick — distinct from `None` (a legitimate active-pane value meaning
@@ -1272,6 +1278,186 @@ def _container_mount_mode(cid: str, worktree_str: str) -> str:
     return "rw"
 
 
+# ---------- codex subscription usage (rate limits) ----------
+#
+# codex `exec --json` (what we tail into raw_export) carries only per-turn token
+# counts — NOT the ChatGPT plan's usage limits. Those land in codex's session
+# rollout (`~/.codex/sessions/.../rollout-*.jsonl`) as `event_msg` /
+# `token_count` payloads carrying a `rate_limits` block:
+#   primary   — the short rolling window (e.g. 5h),  used_percent + resets_at
+#   secondary — the long window (e.g. weekly),       used_percent + resets_at
+# Every codex role (agent / SIM / review) authenticates against the operator's
+# single subscription, so the freshest rollout — whatever role wrote it — holds
+# the current account-wide quota. We surface it in the footer so the operator
+# can see how close a run is to getting rate-limited.
+
+
+def _latest_codex_rollout(run_dir: Path) -> Path | None:
+    """Most-recently-modified codex session rollout under any codex home."""
+
+    newest: Path | None = None
+    newest_mtime = -1.0
+    for home in run_dir.glob("codex-*-home"):
+        for roll in home.rglob("rollout-*.jsonl"):
+            try:
+                mtime = roll.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > newest_mtime:
+                newest_mtime = mtime
+                newest = roll
+    return newest
+
+
+def _read_codex_usage(run_dir: Path) -> dict[str, Any] | None:
+    """Latest codex rate-limit snapshot for `run_dir`, or None.
+
+    Tails the newest session rollout (only the last `_CODEX_USAGE_TAIL_BYTES`)
+    for the most recent `token_count` event and returns its rate-limit windows.
+    Returns None when this isn't a codex run, or no snapshot has landed yet.
+    """
+
+    roll = _latest_codex_rollout(run_dir)
+    if roll is None:
+        return None
+    try:
+        size = roll.stat().st_size
+        with roll.open("rb") as fh:
+            if size > _CODEX_USAGE_TAIL_BYTES:
+                fh.seek(size - _CODEX_USAGE_TAIL_BYTES)
+                fh.readline()  # drop the partial line the seek landed mid-way
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        # Cheap pre-filter — skip the (large) response_item lines without a parse.
+        if not line or '"token_count"' not in line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        if payload.get("type") != "token_count":
+            continue
+        # codex emits a `token_count` after every turn, but only populates the
+        # rate_limit windows on turns that hit the metered endpoint (the rest
+        # carry `rate_limits.primary: null`). Keep walking back to the last
+        # populated snapshot rather than stopping at an empty trailing one.
+        usage = _codex_usage_from_payload(payload)
+        if usage is not None:
+            return usage
+    return None
+
+
+def _codex_usage_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull the rate-limit windows out of a codex `token_count` payload."""
+
+    rate_limits = payload.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return None
+
+    def _window(w: Any) -> dict[str, Any] | None:
+        if not isinstance(w, dict) or not isinstance(w.get("used_percent"), (int, float)):
+            return None
+        return {
+            "used_percent": float(w["used_percent"]),
+            "window_minutes": w.get("window_minutes"),
+            "resets_at": w.get("resets_at"),
+        }
+
+    primary = _window(rate_limits.get("primary"))
+    secondary = _window(rate_limits.get("secondary"))
+    if primary is None and secondary is None:
+        return None
+    return {
+        "primary": primary,
+        "secondary": secondary,
+        "plan_type": rate_limits.get("plan_type"),
+    }
+
+
+def _fmt_window_minutes(minutes: Any) -> str:
+    """`300` → `5h`, `10080` → `7d`, else `{n}m`. Empty for unknown."""
+
+    if not isinstance(minutes, (int, float)) or minutes <= 0:
+        return ""
+    m = int(minutes)
+    if m % 1440 == 0:
+        return f"{m // 1440}d"
+    if m % 60 == 0:
+        return f"{m // 60}h"
+    return f"{m}m"
+
+
+def _fmt_reset(resets_at: Any, now: float) -> str:
+    """`↻1h02m` countdown to a reset epoch; empty when unknown or elapsed."""
+
+    if not isinstance(resets_at, (int, float)):
+        return ""
+    secs = int(resets_at - now)
+    if secs <= 0:
+        return ""
+    hours, rem = divmod(secs, 3600)
+    mins = rem // 60
+    return f"↻{hours}h{mins:02d}m" if hours else f"↻{mins}m"
+
+
+def _usage_pct_style(remaining: float) -> str:
+    """Color a remaining-budget percentage: red when nearly spent, amber when
+    low, neutral otherwise — only a shrinking budget should draw the eye."""
+
+    if remaining < 15:
+        return _PAL_ERROR
+    if remaining < 40:
+        return _PAL_WARN
+    return _PAL_TEXT
+
+
+def _codex_usage_token(
+    usage: dict[str, Any] | None,
+    *,
+    tool: str = "codex",
+    now: float | None = None,
+) -> "Text | None":
+    """The `codex 25% left (↻6m)` footer fragment, or None when no data.
+
+    Headlines the PRIMARY (short / session) window's remaining budget with a
+    reset countdown; the budget number is amber/red when low. The SECONDARY
+    (weekly) window is appended (labelled, since it needs disambiguating) only
+    when it's the tighter constraint, so the footer normally stays compact but
+    never hides the limit a run will actually hit first.
+    """
+
+    if not usage:
+        return None
+    # Headline the primary (session) window; if only the weekly is populated,
+    # headline that instead rather than show nothing.
+    head = usage.get("primary") or usage.get("secondary")
+    if not head:
+        return None
+    other = usage.get("secondary") if head is usage.get("primary") else None
+    now = time.time() if now is None else now
+
+    rem_p = max(0.0, 100.0 - head["used_percent"])
+    text = Text()
+    text.append(f"{tool} ", style=_PAL_DIM)
+    text.append(f"{round(rem_p)}% left", style=_usage_pct_style(rem_p))
+    reset = _fmt_reset(head.get("resets_at"), now)
+    if reset:
+        text.append(f" ({reset})", style=_PAL_VDIM)
+
+    if other:
+        rem_s = max(0.0, 100.0 - other["used_percent"])
+        if rem_s < rem_p:  # the weekly window is the binding limit — surface it too
+            win_s = _fmt_window_minutes(other.get("window_minutes")) or "wk"
+            text.append(f" · {win_s} ", style=_PAL_VDIM)
+            text.append(f"{round(rem_s)}% left", style=_usage_pct_style(rem_s))
+    return text
+
+
 # ---------- Per-event Rich renderables (only used when textual is loaded) ----------
 
 
@@ -1800,6 +1986,11 @@ if _TEXTUAL_AVAILABLE:
             self._recoveries_idx = 0
             self._docker_state: dict[str, Any] = {}
             self._docker_ts = 0.0
+            # codex subscription rate-limit snapshot, refreshed off the hot path
+            # (see CODEX_USAGE_REFRESH_S). None until the first read / for
+            # non-codex runs.
+            self._codex_usage: dict[str, Any] | None = None
+            self._codex_usage_ts = 0.0
             self._showed_initial_prompt = False
             # Snapshot of elapsed / last-write age at terminal state — once
             # stats.json appears the run is over and these numbers should
@@ -1953,6 +2144,9 @@ if _TEXTUAL_AVAILABLE:
             if now - self._docker_ts > DOCKER_REFRESH_S:
                 self._docker_state = _docker_info(self.docker_image, self.worktree)
                 self._docker_ts = now
+            if now - self._codex_usage_ts > CODEX_USAGE_REFRESH_S:
+                self._codex_usage = _read_codex_usage(self.run_dir)
+                self._codex_usage_ts = now
             self._update_turn_separators()
             self._update_agent_log()
             self._update_sim_log()
@@ -2673,6 +2867,12 @@ if _TEXTUAL_AVAILABLE:
             else:
                 cost_usd = sum_costs_in_events(agent_events, sim_events)
                 right.append(f"${cost_usd:.4f}", style=_PAL_TEXT if cost_usd > 0 else _PAL_DIM)
+            # codex subscription usage (e.g. `codex 5h 14%↻1h02m`) — only when a
+            # rate-limit snapshot exists, so non-codex runs stay unchanged.
+            usage_token = _codex_usage_token(self._codex_usage)
+            if usage_token is not None:
+                right.append(" · ", style=_PAL_VDIM)
+                right.append(usage_token)
             right.append("     ")
             right.append(status_text, style=status_style)
 

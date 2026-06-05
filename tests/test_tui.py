@@ -11,12 +11,22 @@ event migration) breaks these tests instead of silently degrading the TUI.
 
 from __future__ import annotations
 
+import json
 
 import pytest
 
 from contremaitre import events
 from contremaitre.tui import (
+    _PAL_ERROR,
+    _PAL_TEXT,
+    _PAL_WARN,
     _PHASES,
+    _codex_usage_from_payload,
+    _codex_usage_token,
+    _fmt_reset,
+    _fmt_window_minutes,
+    _read_codex_usage,
+    _usage_pct_style,
     _activity_state,
     _architecture_review_in,
     _build_event_row,
@@ -1506,3 +1516,111 @@ def test_text_event_count_includes_codex_agent_message():
         {"type": "item.completed", "item": {"type": "command_execution"}},  # not a turn
     ]
     assert _text_event_count(events_list) == 2
+
+
+# ===== codex subscription usage (footer rate-limit indicator) =====
+
+
+def _token_count_event(*, primary=80.0, secondary=20.0, resets_at=9_999_999_999):
+    """A codex `token_count` rollout event. `None` for a window omits it."""
+
+    def _win(used, minutes):
+        if used is None:
+            return None
+        return {"used_percent": used, "window_minutes": minutes, "resets_at": resets_at}
+
+    return {
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"model_context_window": 258400},
+            "rate_limits": {
+                "plan_type": "plus",
+                "primary": _win(primary, 300),
+                "secondary": _win(secondary, 10080),
+            },
+        },
+    }
+
+
+def test_codex_usage_from_payload_extracts_windows():
+    usage = _codex_usage_from_payload(_token_count_event()["payload"])
+    assert usage["primary"]["used_percent"] == 80.0
+    assert usage["primary"]["window_minutes"] == 300
+    assert usage["secondary"]["used_percent"] == 20.0
+
+
+def test_codex_usage_from_payload_none_when_windows_null():
+    # codex emits token_count after every turn but only fills the windows on
+    # turns that hit the metered endpoint — a null snapshot carries no signal.
+    payload = _token_count_event(primary=None, secondary=None)["payload"]
+    assert _codex_usage_from_payload(payload) is None
+
+
+def test_read_codex_usage_skips_trailing_null_snapshot(tmp_path):
+    roll = tmp_path / "codex-sim-home" / "sessions" / "2026" / "rollout-x.jsonl"
+    roll.parent.mkdir(parents=True)
+    roll.write_text(
+        "\n".join(
+            json.dumps(e)
+            for e in [
+                _token_count_event(primary=70.0),  # the real snapshot
+                {"type": "response_item", "payload": {"type": "message"}},
+                _token_count_event(primary=None, secondary=None),  # trailing null
+            ]
+        )
+        + "\n"
+    )
+    usage = _read_codex_usage(tmp_path)
+    assert usage is not None
+    assert usage["primary"]["used_percent"] == 70.0
+
+
+def test_read_codex_usage_none_without_codex_homes(tmp_path):
+    (tmp_path / "raw_export.jsonl").write_text("{}\n")  # opencode-only run
+    assert _read_codex_usage(tmp_path) is None
+
+
+def test_codex_usage_token_shows_remaining_and_reset():
+    # 84% used at now → 16% left; resets 1h2m out → `codex 16% left (↻1h02m)`.
+    usage = _codex_usage_from_payload(_token_count_event(primary=84.0, resets_at=3722)["payload"])
+    assert _codex_usage_token(usage, now=0.0).plain == "codex 16% left (↻1h02m)"
+
+
+def test_codex_usage_token_appends_weekly_only_when_tighter():
+    # weekly looser than session → hidden (just the session headline).
+    loose = _codex_usage_from_payload(_token_count_event(primary=84.0, secondary=20.0)["payload"])
+    loose_plain = _codex_usage_token(loose, now=0.0).plain
+    assert "wk" not in loose_plain and "7d" not in loose_plain
+    assert loose_plain.count("left") == 1
+    # weekly tighter than session → surfaced, labelled, with its own % left.
+    tight = _codex_usage_from_payload(_token_count_event(primary=10.0, secondary=95.0)["payload"])
+    tok = _codex_usage_token(tight, now=0.0).plain
+    assert "90% left" in tok  # session headline
+    assert "7d 5% left" in tok  # 95% used weekly → 5% left
+
+
+def test_codex_usage_token_none_when_no_data():
+    assert _codex_usage_token(None) is None
+    assert _codex_usage_token({"primary": None, "secondary": None}) is None
+
+
+def test_usage_pct_style_severity():
+    # Only low budgets draw the eye: red → amber → neutral (no green).
+    assert _usage_pct_style(5) == _PAL_ERROR
+    assert _usage_pct_style(30) == _PAL_WARN
+    assert _usage_pct_style(80) == _PAL_TEXT
+
+
+def test_fmt_window_minutes():
+    assert _fmt_window_minutes(300) == "5h"
+    assert _fmt_window_minutes(10080) == "7d"
+    assert _fmt_window_minutes(90) == "90m"
+    assert _fmt_window_minutes(None) == ""
+
+
+def test_fmt_reset_countdown():
+    assert _fmt_reset(3722, 0.0) == "↻1h02m"
+    assert _fmt_reset(600, 0.0) == "↻10m"
+    assert _fmt_reset(100, 200.0) == ""  # already elapsed
+    assert _fmt_reset(None, 0.0) == ""
