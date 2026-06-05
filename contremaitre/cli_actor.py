@@ -65,13 +65,15 @@ _REFRESH_MARGIN_SECONDS = 24 * 3600
 def _codex_model_arg(model: str) -> list[str]:
     """`["-m", model]`, or `[]` when codex should use its subscription default.
 
-    RunConfig.agent_model/sim_model are OpenRouter-namespaced (for opencode);
-    codex on a ChatGPT account rejects those, so we omit -m and let codex pick
-    its account default. A codex-native model name (e.g. "gpt-5.5") passes
-    through.
+    RunConfig.agent_model/sim_model are provider-namespaced for opencode
+    (`openrouter/...`, `opencode/...`); codex on a ChatGPT account rejects those
+    ("model is not supported when using Codex with a ChatGPT account"), so we
+    omit -m and let codex pick its account default. Codex-native names are bare
+    (`gpt-5.5`, `o3`, `gpt-5-codex`) — no provider prefix — and pass through.
+    Hence: any name carrying a `/` namespace is an opencode model, not codex's.
     """
 
-    if not model or model.startswith("openrouter/"):
+    if not model or "/" in model:
         return []
     return ["-m", model]
 

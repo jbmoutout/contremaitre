@@ -225,12 +225,18 @@ class BuildCommandTest(unittest.TestCase):
 
 
 class CodexModelArgTest(unittest.TestCase):
-    def test_omits_openrouter_and_empty(self):
+    def test_omits_namespaced_and_empty(self):
+        # Any provider-namespaced model is an opencode/openrouter name codex
+        # rejects on a ChatGPT account — omit -m, fall back to the account
+        # default. `opencode/...` is the one that slipped past an
+        # `openrouter/`-only filter (default agent_model = opencode free model).
         self.assertEqual(_codex_model_arg("openrouter/deepseek/deepseek-v4-flash"), [])
+        self.assertEqual(_codex_model_arg("opencode/deepseek-v4-flash-free"), [])
         self.assertEqual(_codex_model_arg(""), [])
 
     def test_passes_codex_native_model(self):
         self.assertEqual(_codex_model_arg("gpt-5.5"), ["-m", "gpt-5.5"])
+        self.assertEqual(_codex_model_arg("gpt-5-codex"), ["-m", "gpt-5-codex"])
 
 
 def _cli_config(root: Path, **over) -> RunConfig:
