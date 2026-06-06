@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 
 from contremaitre.paths import build_run_paths
-from contremaitre.publisher import _derive_pr_metadata
+from contremaitre.pr_body import render_pr_body
 from contremaitre.viewer.index import _read_impl_complete, _summarize_run
 
 
@@ -64,7 +64,7 @@ class DerivePrMetadataTest(unittest.TestCase):
                 settled=_SETTLED_FIXTURE,
                 impl_complete="Extracted bar; 42/42 tests pass.",
             )
-            _, body = _derive_pr_metadata(paths, diff_hash="deadbeef" * 8)
+            _, body = render_pr_body(paths, diff_hash="deadbeef" * 8)
             self.assertIn("> Extracted bar; 42/42 tests pass.", body)
             # Blockquote sits between the lede and the `## Design` separator.
             blockquote_idx = body.index("> Extracted bar")
@@ -75,7 +75,7 @@ class DerivePrMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self._paths(Path(tmp))
             _seed_worktree(paths.worktree, settled=_SETTLED_FIXTURE, impl_complete=None)
-            _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
+            _, body = render_pr_body(paths, diff_hash="abc" * 16)
             self.assertNotIn("> ", body.split("## Design")[0])
             self.assertIn("## Design", body)
 
@@ -87,7 +87,7 @@ class DerivePrMetadataTest(unittest.TestCase):
                 settled=_SETTLED_FIXTURE,
                 impl_complete="ok",
             )
-            _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
+            _, body = render_pr_body(paths, diff_hash="abc" * 16)
             # SETTLED's H1 must be gone; demoted to H3.
             self.assertNotIn("\n# SETTLED DESIGN", body)
             self.assertIn("### SETTLED DESIGN — Extract foo into bar", body)
@@ -121,7 +121,7 @@ class DerivePrMetadataTest(unittest.TestCase):
                     },
                 },
             )
-            _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
+            _, body = render_pr_body(paths, diff_hash="abc" * 16)
             self.assertIn("<summary>Eval scorecard</summary>", body)
             self.assertIn("Hard gates: ✓ PASS", body)
             self.assertIn("cross-family agreement", body)
@@ -136,7 +136,7 @@ class DerivePrMetadataTest(unittest.TestCase):
                 settled=_SETTLED_FIXTURE,
                 impl_complete="ok",
             )
-            _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
+            _, body = render_pr_body(paths, diff_hash="abc" * 16)
             self.assertNotIn("Eval scorecard", body)
 
     def test_body_has_no_duplicate_run_footer(self):
@@ -150,7 +150,7 @@ class DerivePrMetadataTest(unittest.TestCase):
                 settled=_SETTLED_FIXTURE,
                 impl_complete="ok",
             )
-            _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
+            _, body = render_pr_body(paths, diff_hash="abc" * 16)
             self.assertEqual(body.count(f"Run: {paths.run_id}"), 0)
             self.assertEqual(body.count(f"`{paths.run_id}`"), 1)
 
