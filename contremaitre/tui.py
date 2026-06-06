@@ -164,11 +164,39 @@ def _is_free_model(model: str) -> bool:
     return bare.endswith("-free") or bare == "big-pickle" or bare.endswith(":free")
 
 
-def _fmt_ts(ts_ms: int | None) -> str:
-    if not ts_ms:
+def _ts_to_ms(ts: object) -> int | None:
+    """Coerce a heterogeneous event timestamp to epoch-ms, or None.
+
+    Events arrive with int/float ms (opencode + our codex back-fill), a numeric
+    string, or an ISO-8601 string (claude emits e.g. `2026-06-06T12:49:25.658Z`
+    on user/assistant/result events). Anything unparseable → None (blank column).
+    """
+
+    if isinstance(ts, bool):  # bool is an int subclass; never a timestamp
+        return None
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    if isinstance(ts, str):
+        s = ts.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return int(s)
+        try:
+            from datetime import datetime
+
+            return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return None
+    return None
+
+
+def _fmt_ts(ts_ms: object) -> str:
+    ms = _ts_to_ms(ts_ms)
+    if not ms:
         return "        "
     try:
-        return time.strftime("%H:%M:%S", time.localtime(ts_ms / 1000))
+        return time.strftime("%H:%M:%S", time.localtime(ms / 1000))
     except (ValueError, OSError):
         return "        "
 
@@ -953,17 +981,34 @@ def _truncate_pr_title(title: str | None, limit: int = 60) -> str | None:
 
 def _text_event_count(events: list[dict[str, Any]]) -> int:
     # opencode emits `text`; the codex CLI actor emits the reply as an
-    # `item.completed` agent_message — both count as one actor turn.
+    # `item.completed` agent_message; the claude CLI actor emits one `result`
+    # per turn — each counts as one actor turn.
     return sum(
         1
         for e in events
-        if e.get("type") == "text"
+        if e.get("type") in ("text", "result")
         or (
             e.get("type") == "item.completed"
             and isinstance(e.get("item"), dict)
             and e["item"].get("type") == "agent_message"
         )
     )
+
+
+def _model_from_init_events(events: list[dict[str, Any]]) -> str | None:
+    """The model a claude run reports in its `system/init` event, or None.
+
+    The pre-run header label can't know the model when `claude_model` is empty
+    (claude then uses the ~/.claude account default), so the TUI back-fills the
+    real model from the stream once it starts.
+    """
+
+    for e in events:
+        if e.get("type") == "system" and e.get("subtype") == "init":
+            model = e.get("model")
+            if isinstance(model, str) and model:
+                return model
+    return None
 
 
 def _task_count(events: list[dict[str, Any]]) -> int:
@@ -1458,6 +1503,101 @@ def _codex_usage_token(
     return text
 
 
+# claude exposes its rate limit differently from codex: the `--output-format
+# stream-json` stdout (captured to *_raw_export.jsonl) carries `rate_limit_event`s
+# with the active window, its reset epoch, and a status/overage flag — but NO
+# remaining-percentage. So the footer surfaces the window + reset countdown,
+# reddened on a warning/overage status, rather than a "% left" like codex.
+_CLAUDE_WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d", "weekly": "7d", "monthly": "30d"}
+
+
+def _fmt_claude_window(rate_limit_type: Any) -> str:
+    if not isinstance(rate_limit_type, str) or not rate_limit_type:
+        return ""
+    return _CLAUDE_WINDOW_LABELS.get(rate_limit_type, rate_limit_type.replace("_", " "))
+
+
+def _last_rate_limit_info(path: Path) -> dict[str, Any] | None:
+    """The most recent `rate_limit_event`'s `rate_limit_info` in a stream file."""
+
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > _CODEX_USAGE_TAIL_BYTES:
+                fh.seek(size - _CODEX_USAGE_TAIL_BYTES)
+                fh.readline()  # drop the partial line the seek landed mid-way
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if not line or '"rate_limit_event"' not in line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        info = ev.get("rate_limit_info")
+        if isinstance(info, dict):
+            return info
+    return None
+
+
+def _read_claude_usage(run_dir: Path) -> dict[str, Any] | None:
+    """Latest claude rate-limit snapshot for `run_dir`, or None.
+
+    Scans the actor streams (newest first) for the most recent `rate_limit_event`
+    — agent / SIM / extra-reviewer — so a claude role in any position is covered
+    (incl. a mixed codex+claude run). Returns None for a non-claude run.
+    """
+
+    streams: list[tuple[float, Path]] = []
+    for name in ("raw_export.jsonl", "sim_raw_export.jsonl", "extra_reviewer_raw_export.jsonl"):
+        p = run_dir / name
+        try:
+            streams.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    for _mtime, p in sorted(streams, reverse=True):
+        info = _last_rate_limit_info(p)
+        if info is not None:
+            return info
+    return None
+
+
+def _claude_usage_token(
+    usage: dict[str, Any] | None,
+    *,
+    now: float | None = None,
+) -> "Text | None":
+    """The `claude 5h ↻1h02m` footer fragment, or None when no data.
+
+    claude's stream carries the active window + reset + status but no remaining
+    percentage, so this surfaces the window and a reset countdown, reddened when
+    the status isn't `allowed` or the account is into overage.
+    """
+
+    if not usage:
+        return None
+    now = time.time() if now is None else now
+    win = _fmt_claude_window(usage.get("rateLimitType")) or "limit"
+    overage = bool(usage.get("isUsingOverage"))
+    status = usage.get("status")
+    if overage:
+        style, win = _PAL_ERROR, f"{win} overage"
+    elif status and status != "allowed":
+        style = _PAL_WARN
+    else:
+        style = _PAL_TEXT
+    text = Text()
+    text.append("claude ", style=_PAL_DIM)
+    text.append(win, style=style)
+    reset = _fmt_reset(usage.get("resetsAt"), now)
+    if reset:
+        text.append(f" ({reset})", style=_PAL_VDIM)
+    return text
+
+
 # ---------- Per-event Rich renderables (only used when textual is loaded) ----------
 
 
@@ -1649,6 +1789,116 @@ def _codex_item_row(event: dict[str, Any], ts: str):
     return ("", ts, Text(itype or "item", style="dim"), "", Text(summary, style="dim"))
 
 
+# claude `stream-json` event types — disjoint from opencode (text/tool_use/
+# step_*/error) and codex (thread.*/turn.*/item.*), so a type check suffices.
+_CLAUDE_EVENT_TYPES = frozenset({"system", "assistant", "user", "result"})
+
+
+def _claude_tool_body(name: str, inp: dict[str, Any]) -> "Text":
+    """Compact one-line body for a claude `tool_use` block (input only).
+
+    The tool_result (output) arrives in a later `user` event; the live pane keeps
+    just the call, like the codex command rows (full I/O stays on disk).
+    """
+
+    body = Text()
+    if name == "Bash":
+        body.append(_truncate(str(inp.get("command") or "")), style="cyan")
+    elif name in ("Read", "Edit", "Write"):
+        body.append(str(inp.get("file_path") or ""))
+    elif name in ("Grep", "Glob"):
+        pat = inp.get("pattern") or inp.get("query") or inp.get("glob") or ""
+        body.append(_truncate(str(pat)))
+    elif name == "Task":
+        body.append(_truncate(str(inp.get("description") or inp.get("subagent_type") or "")))
+    else:
+        body.append(_truncate(json.dumps(inp)), style="dim")
+    return body
+
+
+def _claude_tool_result_text(content: Any) -> str:
+    """Flatten a claude tool_result `content` (str or list of blocks) for display."""
+
+    if isinstance(content, str):
+        return _truncate(content.replace("\n", " "))
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content if isinstance(b, dict)]
+        return _truncate(" ".join(parts).replace("\n", " "))
+    return ""
+
+
+def _claude_event_rows(event: dict[str, Any], ts: str) -> list:
+    """Rows for one claude `stream-json` event — 0..N (claude bundles blocks).
+
+    `system/init` → a session row (id + model); `assistant` → one row per
+    content block (text → blue text row, tool_use → tool row); `user` →
+    compact tool_result rows; `result` → a turn_done row with token rollup + cost
+    ($total_cost_usd), reddened on a non-success result.
+    """
+
+    t = event.get("type")
+    if t == "system":
+        if event.get("subtype") == "init":
+            label = f"{event.get('session_id', '')}  {event.get('model', '')}".strip()
+            return [("", ts, Text("session", style="dim"), "", Text(label, style="dim"))]
+        return [("", ts, Text("system", style="dim"), "", Text(str(event.get("subtype") or ""), style="dim"))]
+
+    if t == "assistant":
+        rows: list = []
+        for block in (event.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                txt = block.get("text") or ""
+                body = Text()
+                body.append(f"{len(txt):,} chars\n", style="dim")
+                body.append(txt)
+                rows.append((Text("▍", style="blue"), ts, Text("text", style="bold"), "", body))
+            elif block.get("type") == "tool_use":
+                name = block.get("name") or "?"
+                rows.append(
+                    (
+                        "",
+                        ts,
+                        Text("tool_use", style="dim"),
+                        Text(name, style=f"bold {_tool_style(name.lower())}"),
+                        _claude_tool_body(name, block.get("input") or {}),
+                    )
+                )
+        return rows
+
+    if t == "user":
+        rows = []
+        for block in (event.get("message") or {}).get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                rows.append(
+                    (
+                        "",
+                        ts,
+                        Text("tool_result", style="dim"),
+                        "",
+                        Text(_claude_tool_result_text(block.get("content")), style="dim"),
+                    )
+                )
+        return rows
+
+    if t == "result":
+        u = event.get("usage") or {}
+        bits = [
+            f"in {u.get('input_tokens', 0):,}",
+            f"out {u.get('output_tokens', 0):,}",
+            f"cache-r {u.get('cache_read_input_tokens', 0):,}",
+        ]
+        cost = event.get("total_cost_usd")
+        if isinstance(cost, (int, float)):
+            bits.append(f"cost ${cost:.4f}")
+        ok = not event.get("is_error") and event.get("subtype") in (None, "success")
+        style = "dim" if ok else "red"
+        return [("", ts, Text("turn_done", style=style), "", Text(" ".join(bits), style=style))]
+
+    return [("", ts, Text(str(t) or "?", style="dim"), "", "")]
+
+
 def _event_table() -> "Table":
     t = Table.grid(padding=(0, 1))
     t.add_column(width=1, no_wrap=True)
@@ -1660,15 +1910,21 @@ def _event_table() -> "Table":
 
 
 def _render_event(event: dict[str, Any]):
-    # codex `--json` events carry no timestamp; stamp first-render (≈ first-seen)
-    # wall-clock so codex rows show a time column too. opencode events already
-    # have `timestamp` and are left alone. Each event is rendered once (the panes
-    # are index-gated), so for a live tail this is the moment it arrived.
+    # codex `--json` / claude `stream-json` events carry no timestamp; stamp
+    # first-render (≈ first-seen) wall-clock so CLI rows show a time column too.
+    # opencode events already have `timestamp` and are left alone. Each event is
+    # rendered once (the panes are index-gated), so for a live tail this is the
+    # moment it arrived.
     if not event.get("timestamp"):
         event["timestamp"] = int(time.time() * 1000)
-    marker, ts, typ, tool, body = _build_event_row(event)
+    ts = _fmt_ts(event.get("timestamp"))
     t = _event_table()
-    t.add_row(marker, ts, typ, tool, body)
+    if event.get("type") in _CLAUDE_EVENT_TYPES:
+        # claude bundles several content blocks per event → one row each.
+        for row in _claude_event_rows(event, ts):
+            t.add_row(*row)
+    else:
+        t.add_row(*_build_event_row(event))
     return t
 
 
@@ -1979,6 +2235,7 @@ if _TEXTUAL_AVAILABLE:
             self.refresh_hz = refresh_hz
             self.t_start = time.time()
             self._agent_idx = 0
+            self._agent_model_resolved = False
             self._sim_idx = 0
             self._extra_reviewer_idx = 0
             self._extra_reviewer_mascot_shown = False
@@ -1991,6 +2248,7 @@ if _TEXTUAL_AVAILABLE:
             # non-codex runs.
             self._codex_usage: dict[str, Any] | None = None
             self._codex_usage_ts = 0.0
+            self._claude_usage: dict[str, Any] | None = None
             self._showed_initial_prompt = False
             # Snapshot of elapsed / last-write age at terminal state — once
             # stats.json appears the run is over and these numbers should
@@ -2146,6 +2404,7 @@ if _TEXTUAL_AVAILABLE:
                 self._docker_ts = now
             if now - self._codex_usage_ts > CODEX_USAGE_REFRESH_S:
                 self._codex_usage = _read_codex_usage(self.run_dir)
+                self._claude_usage = _read_claude_usage(self.run_dir)
                 self._codex_usage_ts = now
             self._update_turn_separators()
             self._update_agent_log()
@@ -2163,6 +2422,13 @@ if _TEXTUAL_AVAILABLE:
 
         def _update_agent_log(self) -> None:
             events = _read_jsonl(self.paths["raw_export"])
+            # Back-fill the header's agent model with the real one the CLI reports
+            # (the pre-run label shows the account default when claude_model is empty).
+            if not self._agent_model_resolved:
+                model = _model_from_init_events(events)
+                if model:
+                    self.agent_model = model
+                    self._agent_model_resolved = True
             widget = self.query_one("#agent-log", RichLog)
             at_bottom = self._at_bottom(widget)
             if not events and not self._showed_initial_prompt:
@@ -2867,12 +3133,16 @@ if _TEXTUAL_AVAILABLE:
             else:
                 cost_usd = sum_costs_in_events(agent_events, sim_events)
                 right.append(f"${cost_usd:.4f}", style=_PAL_TEXT if cost_usd > 0 else _PAL_DIM)
-            # codex subscription usage (e.g. `codex 5h 14%↻1h02m`) — only when a
-            # rate-limit snapshot exists, so non-codex runs stay unchanged.
-            usage_token = _codex_usage_token(self._codex_usage)
-            if usage_token is not None:
-                right.append(" · ", style=_PAL_VDIM)
-                right.append(usage_token)
+            # Subscription usage — codex (`codex 25% left ↻1h02m`) and/or claude
+            # (`claude 5h ↻1h02m`); only shown when that tool's rate-limit snapshot
+            # exists, so a single-tool run shows exactly one (and a mixed run both).
+            for usage_token in (
+                _codex_usage_token(self._codex_usage),
+                _claude_usage_token(self._claude_usage),
+            ):
+                if usage_token is not None:
+                    right.append(" · ", style=_PAL_VDIM)
+                    right.append(usage_token)
             right.append("     ")
             right.append(status_text, style=status_style)
 

@@ -342,20 +342,22 @@ def _is_codex_stream(events: list[dict[str, Any]]) -> bool:
 
 
 def _normalize_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Translate a codex stream into opencode's event shape; pass others through.
+    """Translate a CLI-actor stream into opencode's event shape; pass others through.
 
     Every downstream consumer (`_summarize_events`, `_build_timeline`,
     `_build_chat`) understands only opencode's vocabulary (`tool_use` / `text` /
-    `step_finish`, each wrapped in a `part`). codex emits a different one, so
-    without this adapter codex agent/SIM/reviewer turns are invisible in the
-    viewer. Token counting mirrors `costs.sum_token_usage` (raw
-    `input_tokens` / `output_tokens`, no cache subtraction) for consistency
-    with the orchestrator's own rollup.
+    `step_finish`, each wrapped in a `part`). codex and claude each emit a
+    different one, so without this adapter their agent/SIM/reviewer turns are
+    invisible in the viewer. Token counting mirrors `costs.sum_token_usage` (raw
+    `input_tokens` / `output_tokens`, no cache subtraction) for consistency with
+    the orchestrator's own rollup.
     """
 
-    if not _is_codex_stream(events):
-        return events
-    return _codex_to_opencode(events)
+    if _is_claude_stream(events):
+        return _claude_to_opencode(events)
+    if _is_codex_stream(events):
+        return _codex_to_opencode(events)
+    return events
 
 
 def _codex_to_opencode(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -416,7 +418,7 @@ def _codex_to_opencode(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for ev in events:
         etype = ev.get("type")
         # codex events are clockless on disk for legacy runs, but newer runs
-        # carry a real `timestamp` (back-filled in cli_actor._stamp_codex_slice);
+        # carry a real `timestamp` (back-filled in cli_actor._stamp_event_slice);
         # propagate it so the chat shows measured times, not synthetic ones.
         ts = ev.get("timestamp")
         if etype in ("turn.started", "thread.started"):
@@ -485,6 +487,204 @@ def _codex_item_tool(item: dict[str, Any], *, ts: int | float | None = None) -> 
         output="",
         ts=ts,
     )
+
+
+# ----- claude → opencode event normalization -----
+
+# claude `stream-json` types, disjoint from opencode and codex vocabularies.
+_CLAUDE_EVENT_TYPES = frozenset({"system", "assistant", "result"})
+
+
+def _is_claude_stream(events: list[dict[str, Any]]) -> bool:
+    """True when this stream is claude `-p --output-format stream-json` output.
+
+    claude speaks `system`/`assistant`/`user`/`result`; a single such event is
+    enough to tell it apart from opencode and codex.
+    """
+
+    return any(ev.get("type") in _CLAUDE_EVENT_TYPES for ev in events)
+
+
+def _coerce_ms(ts: Any) -> int | None:
+    """Coerce a heterogeneous event timestamp to epoch-ms, or None.
+
+    int/float ms pass through; an ISO-8601 string (claude, e.g.
+    `2026-06-06T12:49:25.658Z`) or numeric string is parsed; anything else → None
+    (left for `_assign_synthetic_timestamps` to back-fill).
+    """
+
+    if isinstance(ts, bool):
+        return None
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    if isinstance(ts, str):
+        s = ts.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return int(s)
+        try:
+            from datetime import datetime
+
+            return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return None
+    return None
+
+
+def _claude_to_opencode(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten claude stream-json into opencode-shaped events.
+
+    Per claude turn (one `-p` invocation, `system/init` … `result`) we emit, in
+    order: every `tool_use` block as a `tool_use` event (output stitched from the
+    matching `tool_result` in a later `user` event), one `step_finish` with the
+    turn's token usage + `total_cost_usd`, then a closing `text` event holding the
+    authoritative `result.result`. That order matches what `_stream_turns`
+    expects, so a claude turn renders as one chat bubble with its tool trace.
+    """
+
+    out: list[dict[str, Any]] = []
+    tools: list[dict[str, Any]] = []
+    tools_by_id: dict[str, dict[str, Any]] = {}
+    text = ""
+    text_ts: int | float | None = None
+    usage: dict[str, Any] | None = None
+    usage_ts: int | float | None = None
+    cost = 0.0
+    open_turn = False
+
+    def flush() -> None:
+        nonlocal tools, tools_by_id, text, text_ts, usage, usage_ts, cost, open_turn
+        if not open_turn:
+            return
+        out.extend(tools)
+        out.append(
+            {
+                "type": "step_finish",
+                "timestamp": usage_ts,
+                "part": {
+                    "tokens": {
+                        "input": int((usage or {}).get("input_tokens") or 0),
+                        "output": int((usage or {}).get("output_tokens") or 0),
+                    },
+                    "cost": cost,
+                },
+            }
+        )
+        out.append(
+            {
+                "type": "text",
+                "timestamp": text_ts if text_ts is not None else usage_ts,
+                "part": {"text": text},
+            }
+        )
+        tools = []
+        tools_by_id = {}
+        text = ""
+        text_ts = None
+        usage = None
+        usage_ts = None
+        cost = 0.0
+        open_turn = False
+
+    for ev in events:
+        etype = ev.get("type")
+        # claude emits ISO-8601 string timestamps on user/assistant/result events;
+        # coerce to epoch-ms so the chat preserves real times (and downstream
+        # sorting never mixes str with int).
+        ts = _coerce_ms(ev.get("timestamp"))
+        if etype == "system" and ev.get("subtype") == "init":
+            flush()  # close any turn left open by a missing result
+            open_turn = True
+        elif etype == "assistant":
+            open_turn = True
+            for block in (ev.get("message") or {}).get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    t = block.get("text")
+                    if isinstance(t, str) and t:
+                        text = t
+                        text_ts = ts
+                elif block.get("type") == "tool_use":
+                    tool_ev = _claude_item_tool(block, ts=ts)
+                    tools.append(tool_ev)
+                    bid = block.get("id")
+                    if bid:
+                        tools_by_id[bid] = tool_ev
+        elif etype == "user":
+            open_turn = True
+            for block in (ev.get("message") or {}).get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                target = tools_by_id.get(block.get("tool_use_id"))
+                if target is not None:
+                    target["part"]["state"]["output"] = _claude_block_text(block.get("content"))
+                    if block.get("is_error"):
+                        target["part"]["state"]["status"] = "error"
+        elif etype == "result":
+            open_turn = True
+            res = ev.get("result")
+            if isinstance(res, str) and res:
+                text = res
+                text_ts = ts
+            u = ev.get("usage")
+            if isinstance(u, dict):
+                usage = u
+                usage_ts = ts
+            c = ev.get("total_cost_usd")
+            if isinstance(c, (int, float)):
+                cost = float(c)
+            flush()
+    flush()
+    return out
+
+
+# claude tool name → opencode card tag (drives the viewer's per-tool styling).
+_CLAUDE_TOOL_TAGS = {
+    "Bash": "bash",
+    "Read": "read",
+    "Edit": "edit",
+    "Write": "write",
+    "Grep": "grep",
+    "Glob": "glob",
+    "Task": "task",
+    "TodoWrite": "todowrite",
+}
+
+
+def _claude_item_tool(block: dict[str, Any], *, ts: int | float | None = None) -> dict[str, Any]:
+    """One claude `tool_use` block → an opencode `tool_use` event (output empty).
+
+    The output is stitched later from the matching `tool_result`. The title is a
+    human-meaningful summary (command first line / file path / pattern) so the
+    card reads well regardless of the raw input key names.
+    """
+
+    name = block.get("name") or "tool"
+    inp = block.get("input") or {}
+    tag = _CLAUDE_TOOL_TAGS.get(name, name.lower())
+    if name == "Bash":
+        title = _first_line(str(inp.get("command") or ""))
+    elif name in ("Read", "Edit", "Write"):
+        title = str(inp.get("file_path") or "")
+    elif name in ("Grep", "Glob"):
+        title = str(inp.get("pattern") or inp.get("query") or inp.get("glob") or "")
+    elif name == "Task":
+        title = str(inp.get("description") or inp.get("subagent_type") or "")
+    else:
+        title = name
+    return _tool_event(tag, status="completed", title=title, inp=inp, output="", ts=ts)
+
+
+def _claude_block_text(content: Any) -> str:
+    """Flatten a claude tool_result `content` (str or list of text blocks)."""
+
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return ""
 
 
 def _tool_event(

@@ -153,6 +153,7 @@ class SquidAllowlistTest(unittest.TestCase):
         for domain in (
             ".chatgpt.com",
             ".openai.com",
+            ".anthropic.com",  # claude (the CLI actor) on a Claude subscription
             ".openrouter.ai",
             ".opencode.ai",
             ".models.dev",

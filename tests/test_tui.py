@@ -30,6 +30,7 @@ from contremaitre.tui import (
     _activity_state,
     _architecture_review_in,
     _build_event_row,
+    _claude_event_rows,
     _current_phase_label,
     _current_review_round,
     _derive_phase,
@@ -1624,3 +1625,215 @@ def test_fmt_reset_countdown():
     assert _fmt_reset(600, 0.0) == "↻10m"
     assert _fmt_reset(100, 200.0) == ""  # already elapsed
     assert _fmt_reset(None, 0.0) == ""
+
+
+# ===== claude stream-json rendering =====
+
+
+def _claude_rows_plain(ev):
+    plain = lambda x: x.plain if hasattr(x, "plain") else str(x)  # noqa: E731
+    return [
+        (plain(typ), plain(tool), plain(body))
+        for (_marker, _ts, typ, tool, body) in _claude_event_rows(ev, "12:00:00")
+    ]
+
+
+def test_claude_system_init_renders_session_row():
+    rows = _claude_rows_plain(
+        {"type": "system", "subtype": "init", "session_id": "abc-123", "model": "claude-opus-4-8"}
+    )
+    assert len(rows) == 1
+    typ, _tool, body = rows[0]
+    assert typ == "session"
+    assert "abc-123" in body and "claude-opus-4-8" in body
+
+
+def test_claude_assistant_multiblock_expands_to_n_rows():
+    rows = _claude_rows_plain(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "thinking then acting"},
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "pytest -q"}},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "app.py"}},
+                ]
+            },
+        }
+    )
+    assert len(rows) == 3  # one row per content block
+    assert rows[0][0] == "text" and "thinking then acting" in rows[0][2]
+    assert rows[1][0] == "tool_use" and rows[1][1] == "Bash" and "pytest -q" in rows[1][2]
+    assert rows[2][0] == "tool_use" and rows[2][1] == "Read" and "app.py" in rows[2][2]
+
+
+def test_claude_result_renders_turn_done_with_cost():
+    rows = _claude_rows_plain(
+        {
+            "type": "result",
+            "subtype": "success",
+            "usage": {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 80},
+            "total_cost_usd": 0.0512,
+        }
+    )
+    assert len(rows) == 1
+    typ, _tool, body = rows[0]
+    assert typ == "turn_done"
+    assert "in 100" in body and "out 10" in body and "cache-r 80" in body
+    assert "$0.0512" in body
+
+
+def test_claude_user_tool_result_renders_compact_row():
+    rows = _claude_rows_plain(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "1 passed in 0.1s"}
+                ]
+            },
+        }
+    )
+    assert len(rows) == 1
+    assert rows[0][0] == "tool_result" and "1 passed" in rows[0][2]
+
+
+def test_render_event_stamps_claude_event():
+    ev = {"type": "result", "subtype": "success", "result": "done"}
+    _render_event(ev)
+    assert isinstance(ev.get("timestamp"), int) and ev["timestamp"] > 0
+
+
+def test_text_event_count_includes_claude_result():
+    evts = [
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "x"}]}},
+        {"type": "result", "subtype": "success", "result": "a"},
+        {"type": "result", "subtype": "success", "result": "b"},
+    ]
+    assert _text_event_count(evts) == 2  # two turns (two results), not the assistant
+
+
+def test_codex_usage_token_absent_for_claude_run():
+    # claude stream-json carries no subscription-window data, so the footer
+    # usage token is codex-only (None when there's no rate-limit snapshot).
+    assert _codex_usage_token(None) is None
+
+
+# ===== timestamp coercion (claude emits ISO-8601 strings) =====
+
+
+def test_fmt_ts_handles_iso_string_and_int_and_none():
+    from contremaitre.tui import _fmt_ts, _ts_to_ms
+
+    # claude's user/assistant/result events carry ISO-8601 strings.
+    assert _ts_to_ms("2026-06-06T12:49:25.658Z") == 1780750165658
+    assert _ts_to_ms(1780750165658) == 1780750165658
+    assert _ts_to_ms("1780750165658") == 1780750165658
+    assert _ts_to_ms(None) is None
+    assert _ts_to_ms("") is None
+    assert _ts_to_ms("not-a-time") is None
+    # _fmt_ts must never raise on any of these (regression: TypeError str/int).
+    assert _fmt_ts("2026-06-06T12:49:25.658Z") != ""
+    assert _fmt_ts(None) == "        "
+
+
+def test_render_event_survives_claude_iso_string_timestamp():
+    # Regression: a claude tool_result `user` event carries an ISO-8601 string
+    # timestamp; _render_event must not crash dividing str by 1000.
+    ev = {
+        "type": "user",
+        "message": {
+            "content": [
+                {"type": "tool_result", "content": "<tool_use_error>boom</tool_use_error>",
+                 "is_error": True, "tool_use_id": "t1"}
+            ]
+        },
+        "timestamp": "2026-06-06T12:49:25.658Z",
+    }
+    _render_event(ev)  # must not raise
+
+
+def test_model_from_init_events_surfaces_claude_model():
+    from contremaitre.tui import _model_from_init_events
+
+    events = [
+        {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5},
+        {"type": "system", "subtype": "init", "model": "claude-sonnet-4-6", "session_id": "s"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+    ]
+    assert _model_from_init_events(events) == "claude-sonnet-4-6"
+    # No init event (e.g. codex stream) → None (header keeps its configured label).
+    assert _model_from_init_events([{"type": "turn.started"}]) is None
+
+
+# ===== claude footer usage (window + reset; no % — claude exposes none) =====
+
+
+def _rate_limit_line(rate_type="five_hour", status="allowed", resets_at=9_999_999_999, overage=False):
+    return json.dumps(
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": status,
+                "resetsAt": resets_at,
+                "rateLimitType": rate_type,
+                "isUsingOverage": overage,
+            },
+            "session_id": "s",
+        }
+    )
+
+
+def test_read_claude_usage_picks_last_rate_limit_event(tmp_path):
+    from contremaitre.tui import _read_claude_usage
+
+    (tmp_path / "raw_export.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "system", "subtype": "init", "model": "claude-sonnet-4-6"}),
+                _rate_limit_line(resets_at=111),
+                _rate_limit_line(resets_at=222),  # last one wins
+            ]
+        )
+    )
+    usage = _read_claude_usage(tmp_path)
+    assert usage is not None and usage["resetsAt"] == 222
+
+
+def test_read_claude_usage_none_for_codex_run(tmp_path):
+    from contremaitre.tui import _read_claude_usage
+
+    # A codex stream has no rate_limit_event → no claude footer.
+    (tmp_path / "raw_export.jsonl").write_text(
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}})
+    )
+    assert _read_claude_usage(tmp_path) is None
+
+
+def test_claude_usage_token_formats_window_and_reset():
+    from contremaitre.tui import _claude_usage_token
+
+    tok = _claude_usage_token(
+        {"status": "allowed", "rateLimitType": "five_hour", "resetsAt": 3722, "isUsingOverage": False},
+        now=0.0,
+    )
+    assert tok is not None
+    plain = tok.plain
+    assert "claude" in plain and "5h" in plain and "↻1h02m" in plain
+
+
+def test_claude_usage_token_marks_overage():
+    from contremaitre.tui import _claude_usage_token
+
+    tok = _claude_usage_token(
+        {"status": "allowed", "rateLimitType": "five_hour", "resetsAt": 0, "isUsingOverage": True},
+        now=0.0,
+    )
+    assert tok is not None and "overage" in tok.plain
+
+
+def test_claude_usage_token_none_when_empty():
+    from contremaitre.tui import _claude_usage_token
+
+    assert _claude_usage_token(None) is None

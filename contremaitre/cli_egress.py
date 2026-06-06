@@ -1,14 +1,14 @@
 """Turnkey egress lock for the CLI actor (ActorMode.CLI).
 
-The CLI actor refuses to run on open egress because the in-container codex
-token is a long-lived (~10-day) JWT. This module stands up the proven
-two-layer lock so the operator doesn't hand-roll it:
+The CLI actor refuses to run on open egress because the in-container token is
+long-lived (codex: a ~10-day JWT; claude: a ~1yr OAuth token). This module
+stands up the proven two-layer lock so the operator doesn't hand-roll it:
 
   1. an `--internal` docker network — no route to the outside, and no external
      DNS resolution (so DNS-tunnel exfil is closed too),
   2. a squid proxy, dual-homed (internal net + bridge), that allowlists only the
-     model providers' domains (OpenAI for codex; OpenRouter for a paired opencode
-     SIM in a mixed run) and is the network's sole exit.
+     model providers' domains (OpenAI for codex; Anthropic for claude; OpenRouter
+     for a paired opencode SIM in a mixed run) and is the network's sole exit.
 
 The agent container joins the internal network with HTTPS_PROXY pointed at the
 proxy. Idempotent and shared across runs — the allowlist is static and

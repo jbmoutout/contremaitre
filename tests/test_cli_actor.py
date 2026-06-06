@@ -12,17 +12,21 @@ from unittest.mock import MagicMock, patch
 
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
+    _CLAUDE_OAUTH_ENV,
     CliActorRunner,
     _access_token_exp,
+    _claude_effort_arg,
+    _claude_model_arg,
     _codex_effort_arg,
     _codex_model_arg,
+    _parse_claude_events,
     _parse_codex_events,
-    _stamp_codex_slice,
+    _stamp_event_slice,
 )
-from contremaitre.costs import sum_token_usage
+from contremaitre.costs import estimate_recorded_cost_usd, sum_token_usage
 from contremaitre.models import ActorMode, RunConfig
 from contremaitre.paths import build_run_paths
-from contremaitre.preflight import _check_codex_auth
+from contremaitre.preflight import _check_claude_auth, _check_cli_auth, _check_codex_auth
 
 
 def _b64url(obj: dict) -> str:
@@ -65,7 +69,7 @@ def _make_runner(root: Path, **config_overrides):
             }
         )
     )
-    runner._src_codex_home = src
+    runner.driver.src_codex_home = src
     return runner, paths
 
 
@@ -87,7 +91,7 @@ class PrepareCodexHomeTest(unittest.TestCase):
     def test_neuters_refresh_token_and_keeps_real_secret_out(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(Path(tmp))
-            home = runner.prepare_codex_home(runner.agent_home)
+            home = runner.driver.prepare_home(runner.agent_home)
             written = (home / "auth.json").read_text()
             self.assertEqual(json.loads(written)["tokens"]["refresh_token"], "x")
             # The real standing credential must never reach the mounted home.
@@ -102,11 +106,11 @@ class PrepareCodexHomeTest(unittest.TestCase):
             sess = runner.agent_home / "sessions" / "2026"
             sess.mkdir(parents=True, exist_ok=True)
             (sess / "rollout.jsonl").write_text("{}")
-            runner.prepare_codex_home(runner.agent_home)  # re-seed
+            runner.driver.prepare_home(runner.agent_home)  # re-seed
             self.assertTrue((sess / "rollout.jsonl").exists())
 
     def _write_near_expiry(self, runner):
-        (runner._src_codex_home / "auth.json").write_text(
+        (runner.driver.src_codex_home / "auth.json").write_text(
             json.dumps(
                 {"tokens": {"access_token": _fake_jwt(int(time.time()) + 60), "refresh_token": "r"}}
             )
@@ -116,9 +120,9 @@ class PrepareCodexHomeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(Path(tmp))
             self._write_near_expiry(runner)
-            runner._host_refresh_token = lambda: None  # stub: no renewal
+            runner.driver._host_refresh_token = lambda: None  # stub: no renewal
             with self.assertRaises(Exception):
-                runner.prepare_codex_home(runner.agent_home)
+                runner.driver.prepare_home(runner.agent_home)
 
     def test_near_expiry_recovers_when_host_refresh_renews(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,7 +130,7 @@ class PrepareCodexHomeTest(unittest.TestCase):
             self._write_near_expiry(runner)
 
             def _renew():
-                (runner._src_codex_home / "auth.json").write_text(
+                (runner.driver.src_codex_home / "auth.json").write_text(
                     json.dumps(
                         {
                             "tokens": {
@@ -137,8 +141,8 @@ class PrepareCodexHomeTest(unittest.TestCase):
                     )
                 )
 
-            runner._host_refresh_token = _renew  # stub: refreshes the host token
-            home = runner.prepare_codex_home(runner.agent_home)  # no raise
+            runner.driver._host_refresh_token = _renew  # stub: refreshes the host token
+            home = runner.driver.prepare_home(runner.agent_home)  # no raise
             self.assertEqual(
                 json.loads((home / "auth.json").read_text())["tokens"]["refresh_token"], "x"
             )
@@ -172,9 +176,9 @@ class BuildCommandTest(unittest.TestCase):
             runner, paths = _make_runner(
                 Path(tmp), docker_network="cmtr-int", https_proxy="http://egress-proxy:3128"
             )
-            cmd = runner._build_codex_command(
+            cmd = runner._build_command(
                 prompt="do it",
-                codex_home=runner.agent_home,
+                home=runner.agent_home,
                 session_id=None,
                 model="m",
                 mount_mode="rw",
@@ -199,9 +203,9 @@ class BuildCommandTest(unittest.TestCase):
             runner, _ = _make_runner(
                 Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
             )
-            cmd = runner._build_codex_command(
+            cmd = runner._build_command(
                 prompt="again",
-                codex_home=runner.agent_home,
+                home=runner.agent_home,
                 session_id="SID-123",
                 model="m",
                 mount_mode="rw",
@@ -224,9 +228,9 @@ class BuildCommandTest(unittest.TestCase):
                 codex_model="gpt-5.5",
                 codex_effort="high",
             )
-            cmd = runner._build_codex_command(
+            cmd = runner._build_command(
                 prompt="do it",
-                codex_home=runner.agent_home,
+                home=runner.agent_home,
                 session_id=None,
                 model="openrouter/deepseek/deepseek-v4-flash",
                 mount_mode="rw",
@@ -245,9 +249,9 @@ class BuildCommandTest(unittest.TestCase):
             runner, _ = _make_runner(
                 Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
             )
-            cmd = runner._build_codex_command(
+            cmd = runner._build_command(
                 prompt="review",
-                codex_home=runner.review_home,
+                home=runner.review_home,
                 session_id=None,
                 model="m",
                 mount_mode="ro",
@@ -314,13 +318,13 @@ class RoleModelLabelTest(unittest.TestCase):
 
 
 def _cli_config(root: Path, **over) -> RunConfig:
+    over.setdefault("cli_tool", "codex")
     return RunConfig(
         repo=root,
         base="main",
         runs_root=root / "runs",
         run_slug="t",
         actor_mode=ActorMode.CLI,
-        cli_tool="codex",
         **over,
     )
 
@@ -501,8 +505,11 @@ class TuiRunForwardsRuntimeTest(unittest.TestCase):
             extra_reviewer_skip=False,
             actor=None,
             sim_actor=None,
+            cli_tool=None,
             codex_model=None,
             codex_effort=None,
+            claude_model=None,
+            claude_effort=None,
         )
         ns = argparse.Namespace(run_args=run_args, refresh_hz=4, discover_timeout=10)
         with (
@@ -537,6 +544,19 @@ class TuiRunForwardsRuntimeTest(unittest.TestCase):
         cmd = self._spawn_cmd(["--fork", "git@github.com:o/r.git", "--base", "main"], picked)
         self.assertEqual(cmd[cmd.index("--actor") + 1], "cli")
         self.assertEqual(cmd[cmd.index("--sim-actor") + 1], "opencode")
+
+    def test_picker_claude_propagates_cli_tool(self):
+        # Regression: picking claude must fold --cli-tool back into the
+        # subprocess flags, else the run silently defaults to codex.
+        def picked(**kwargs):
+            args = kwargs["args"]
+            args.actor = "cli"
+            args.cli_tool = "claude"
+            return True
+
+        cmd = self._spawn_cmd(["--fork", "git@github.com:o/r.git", "--base", "main"], picked)
+        self.assertEqual(cmd[cmd.index("--actor") + 1], "cli")
+        self.assertEqual(cmd[cmd.index("--cli-tool") + 1], "claude")
 
 
 class CompositeRunnerTest(unittest.TestCase):
@@ -653,7 +673,7 @@ class StampCodexSliceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "raw.jsonl"
             p.write_text("\n".join(self._turn()) + "\n")
-            _stamp_codex_slice(p, start_offset=0, t_start=1000.0, t_end=1002.0)
+            _stamp_event_slice(p, start_offset=0, t_start=1000.0, t_end=1002.0)
             stamped = [json.loads(ln) for ln in p.read_text().splitlines()]
             ts = [e["timestamp"] for e in stamped]
             # Every event stamped, monotonic, inside [t_start, t_end] in ms.
@@ -676,7 +696,7 @@ class StampCodexSliceTest(unittest.TestCase):
             off = len(prior.encode("utf-8"))
             with p.open("a") as fh:
                 fh.write("\n".join(self._turn()) + "\n")
-            _stamp_codex_slice(p, start_offset=off, t_start=1000.0, t_end=1001.0)
+            _stamp_event_slice(p, start_offset=off, t_start=1000.0, t_end=1001.0)
             lines = [json.loads(ln) for ln in p.read_text().splitlines()]
             # Prior turn's existing timestamp is untouched; new slice is stamped.
             self.assertEqual(lines[0]["timestamp"], 42)
@@ -686,8 +706,361 @@ class StampCodexSliceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "raw.jsonl"
             p.write_text(json.dumps({"type": "turn.started", "timestamp": 7}) + "\n")
-            _stamp_codex_slice(p, start_offset=0, t_start=1000.0, t_end=1001.0)
+            _stamp_event_slice(p, start_offset=0, t_start=1000.0, t_end=1001.0)
             self.assertEqual(json.loads(p.read_text())["timestamp"], 7)
+
+
+# ===== claude CLI actor =======================================================
+
+
+def _make_claude_runner(root: Path, **config_overrides):
+    """Build a claude CliActorRunner (auth is the env token, no fixture home)."""
+    paths = build_run_paths(root / "runs", f"20260606-{root.name}")
+    paths.run_dir.mkdir(parents=True, exist_ok=True)
+    config = RunConfig(
+        repo=root,
+        base="main",
+        runs_root=root / "runs",
+        run_slug="test",
+        actor_mode=ActorMode.CLI,
+        cli_tool="claude",
+        docker_image="test-image",
+        **config_overrides,
+    )
+    return CliActorRunner(config=config, paths=paths, tool="claude"), paths
+
+
+class ClaudeModelArgTest(unittest.TestCase):
+    def test_omits_namespaced_and_empty(self):
+        self.assertEqual(_claude_model_arg("openrouter/deepseek/deepseek-v4-flash"), [])
+        self.assertEqual(_claude_model_arg(""), [])
+
+    def test_passes_claude_native_model(self):
+        self.assertEqual(_claude_model_arg("opus"), ["--model", "opus"])
+        self.assertEqual(_claude_model_arg("claude-opus-4-8"), ["--model", "claude-opus-4-8"])
+
+    def test_falls_back_to_claude_default_for_namespaced(self):
+        self.assertEqual(_claude_model_arg("opencode/x", "opus"), ["--model", "opus"])
+        self.assertEqual(_claude_model_arg("", "opus"), ["--model", "opus"])
+        # …but a claude-native per-role model still wins over the default.
+        self.assertEqual(_claude_model_arg("sonnet", "opus"), ["--model", "sonnet"])
+
+    def test_effort_arg(self):
+        self.assertEqual(_claude_effort_arg("high"), ["--effort", "high"])
+        self.assertEqual(_claude_effort_arg("max"), ["--effort", "max"])
+        self.assertEqual(_claude_effort_arg(""), [])
+
+
+class ClaudeBuildCommandTest(unittest.TestCase):
+    def test_first_turn_no_session_flag(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {_CLAUDE_OAUTH_ENV: "SECRET-TOKEN"}
+        ):
+            runner, _ = _make_claude_runner(
+                Path(tmp),
+                docker_network="cmtr-int",
+                https_proxy="http://p:3128",
+                claude_model="opus",
+                claude_effort="high",
+            )
+            cmd = runner._build_command(
+                prompt="do it",
+                home=runner.agent_home,
+                session_id=None,
+                model="openrouter/x",  # namespaced → falls back to claude_model
+                mount_mode="rw",
+                role="agent",
+            )
+            joined = " ".join(cmd)
+            self.assertIn("--output-format", cmd)
+            self.assertIn("stream-json", cmd)
+            self.assertIn("--verbose", cmd)
+            self.assertIn("bypassPermissions", cmd)
+            # First turn: no session flag — claude mints its own id (we capture it).
+            self.assertNotIn("--session-id", cmd)
+            self.assertNotIn("--resume", cmd)
+            self.assertEqual(cmd[cmd.index("--model") + 1], "opus")
+            self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
+            self.assertIn(f"{runner.agent_home}:/root/.claude/projects:rw", joined)
+            self.assertIn(f"{runner.worktree}:/app:rw", joined)
+            # Token forwarded by NAME only — the value must not be inlined on argv.
+            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
+            self.assertNotIn("SECRET-TOKEN", joined)
+            # prompt is the final positional arg.
+            self.assertEqual(cmd[-1], "do it")
+
+    def test_resume_turn_uses_resume_not_session_id(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {_CLAUDE_OAUTH_ENV: "t"}
+        ):
+            runner, _ = _make_claude_runner(
+                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
+            )
+            cmd = runner._build_command(
+                prompt="again",
+                home=runner.agent_home,
+                session_id="SID-123",
+                model="opus",
+                mount_mode="rw",
+                role="agent",
+            )
+            self.assertEqual(cmd[cmd.index("--resume") + 1], "SID-123")
+            self.assertNotIn("--session-id", cmd)
+
+    def test_review_mounts_worktree_readonly(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {_CLAUDE_OAUTH_ENV: "t"}
+        ):
+            runner, _ = _make_claude_runner(
+                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
+            )
+            cmd = runner._build_command(
+                prompt="review",
+                home=runner.review_home,
+                session_id=None,
+                model="opus",
+                mount_mode="ro",
+                role="review",
+                extra_mounts=((Path("/tmp/rev"), "/review", "ro"),),
+            )
+            joined = " ".join(cmd)
+            self.assertIn(f"{runner.worktree}:/app:ro", joined)
+            self.assertIn("/tmp/rev:/review:ro", joined)
+
+
+class ClaudeContainerEnvTest(unittest.TestCase):
+    def test_injects_token_and_scrubs_api_keys(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {_CLAUDE_OAUTH_ENV: "SECRET-TOKEN", "ANTHROPIC_API_KEY": "paid"}
+        ):
+            runner, _ = _make_claude_runner(Path(tmp))
+            env = runner.driver.container_env({})
+            self.assertEqual(env[_CLAUDE_OAUTH_ENV], "SECRET-TOKEN")
+            self.assertEqual(env["ANTHROPIC_API_KEY"], "")
+            self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+            # IS_SANDBOX=1 lets claude bypass permissions as root (the container
+            # is a sandbox); without it claude exits "cannot be used with root".
+            self.assertEqual(env["IS_SANDBOX"], "1")
+            # The forwarded names cover the token + the scrubbed keys + the sandbox flag.
+            self.assertEqual(
+                set(runner.driver.container_env_names()),
+                {_CLAUDE_OAUTH_ENV, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "IS_SANDBOX"},
+            )
+
+
+class ClaudeEnsureReadyTest(unittest.TestCase):
+    def test_raises_without_token(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {_CLAUDE_OAUTH_ENV: ""}
+        ):
+            runner, _ = _make_claude_runner(Path(tmp))
+            with self.assertRaises(Exception):
+                runner.driver.ensure_ready()
+
+    def test_passes_with_token(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {_CLAUDE_OAUTH_ENV: "tok"}
+        ):
+            runner, _ = _make_claude_runner(Path(tmp))
+            runner.driver.ensure_ready()  # no raise
+
+
+class ClaudePrepareHomeTest(unittest.TestCase):
+    def test_empty_home_no_credential_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, _ = _make_claude_runner(Path(tmp))
+            home = runner.driver.prepare_home(runner.agent_home)
+            self.assertTrue(home.is_dir())
+            # No credential file is ever written (auth is the env token).
+            self.assertFalse((home / "auth.json").exists())
+            self.assertFalse((home / ".credentials.json").exists())
+
+    def test_reseed_preserves_existing_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, _ = _make_claude_runner(Path(tmp))
+            proj = runner.agent_home / "projects" / "app"
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "sess.jsonl").write_text("{}")
+            runner.driver.prepare_home(runner.agent_home)  # idempotent
+            self.assertTrue((proj / "sess.jsonl").exists())
+
+
+class ClaudeParseEventsTest(unittest.TestCase):
+    def _stream(self):
+        return [
+            json.dumps(
+                {"type": "system", "subtype": "init", "session_id": "abc", "model": "claude-opus"}
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "interim"},
+                            {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "FINAL",
+                    "usage": {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 80},
+                    "total_cost_usd": 0.05,
+                }
+            ),
+        ]
+
+    def test_extracts_text_session_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "events.jsonl"
+            p.write_text("\n".join(self._stream()))
+            text, sid, usage, error = _parse_claude_events(p)
+            self.assertEqual(text, "FINAL")  # result.result, not the interim block
+            self.assertEqual(sid, "abc")
+            self.assertEqual(usage["input_tokens"], 100)
+            self.assertIsNone(error)
+
+    def test_surfaces_error_subtype(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "events.jsonl"
+            p.write_text(
+                json.dumps(
+                    {"type": "result", "subtype": "error_max_turns", "is_error": True, "result": ""}
+                )
+            )
+            text, _sid, _usage, error = _parse_claude_events(p)
+            self.assertEqual(text, "")
+            self.assertIn("error_max_turns", error)
+
+    def test_start_offset_scopes_to_one_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "events.jsonl"
+            p.write_text(
+                json.dumps({"type": "result", "subtype": "success", "result": "FIRST"}) + "\n"
+            )
+            off = p.stat().st_size
+            with p.open("a") as f:
+                f.write(
+                    json.dumps(
+                        {"type": "system", "subtype": "init", "session_id": "S2", "model": "m"}
+                    )
+                    + "\n"
+                )
+                f.write(
+                    json.dumps({"type": "result", "subtype": "success", "result": "SECOND"}) + "\n"
+                )
+            text, sid, _u, _e = _parse_claude_events(p, start_offset=off)
+            self.assertEqual(text, "SECOND")
+            self.assertEqual(sid, "S2")
+
+
+class ClaudeAuthCheckTest(unittest.TestCase):
+    def test_pass_when_token_set(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {_CLAUDE_OAUTH_ENV: "tok"}
+        ):
+            cfg = _cli_config(Path(tmp), cli_tool="claude")
+            self.assertEqual(_check_claude_auth(cfg).status, "PASS")
+            self.assertEqual(_check_cli_auth(cfg).status, "PASS")  # dispatch
+
+    def test_fail_when_token_missing(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {_CLAUDE_OAUTH_ENV: ""}
+        ):
+            cfg = _cli_config(Path(tmp), cli_tool="claude")
+            self.assertEqual(_check_claude_auth(cfg).status, "FAIL")
+
+
+class ClaudeTokenUsageTest(unittest.TestCase):
+    def test_rolls_up_result_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "raw.jsonl"
+            p.write_text(
+                json.dumps(
+                    {
+                        "type": "result",
+                        "usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 10,
+                            "cache_read_input_tokens": 80,
+                        },
+                    }
+                )
+            )
+            self.assertEqual(
+                sum_token_usage(p),
+                {"input": 100, "output": 10, "reasoning": 0, "cache_read": 80},
+            )
+
+    def test_sums_total_cost_usd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "raw.jsonl"
+            p.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "result", "total_cost_usd": 0.05}),
+                        json.dumps({"type": "result", "total_cost_usd": 0.02}),
+                    ]
+                )
+            )
+            self.assertAlmostEqual(estimate_recorded_cost_usd(p), 0.07)
+
+
+class ClaudeRoleModelLabelTest(unittest.TestCase):
+    def test_claude_role_shows_model_and_effort(self):
+        from contremaitre.models import role_model_label
+
+        label = role_model_label(
+            actor_mode=ActorMode.CLI,
+            opencode_model="opencode/x",
+            codex_model="gpt-5.5",
+            codex_effort="high",
+            cli_tool="claude",
+            claude_model="opus",
+            claude_effort="high",
+        )
+        self.assertEqual(label, "opus (claude, effort=high)")
+
+    def test_empty_claude_model_shows_account_default(self):
+        from contremaitre.models import role_model_label
+
+        label = role_model_label(
+            actor_mode=ActorMode.CLI,
+            opencode_model="opencode/x",
+            codex_model="gpt-5.5",
+            codex_effort="high",
+            cli_tool="claude",
+            claude_model="",
+            claude_effort="max",
+        )
+        self.assertEqual(label, "claude default (claude, effort=max)")
+
+
+class ClaudeMakeRunnerTest(unittest.TestCase):
+    def test_make_actor_runner_returns_claude_cli_runner(self):
+        from contremaitre.actors import make_actor_runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = build_run_paths(Path(tmp) / "runs", f"20260606-{Path(tmp).name}")
+            paths.run_dir.mkdir(parents=True, exist_ok=True)
+            cfg = _cli_config(Path(tmp), cli_tool="claude")
+            runner = make_actor_runner(config=cfg, paths=paths)
+            self.assertIsInstance(runner, CliActorRunner)
+            self.assertEqual(runner.tool, "claude")
+            self.assertEqual(runner.driver.name, "claude")
+            # claude homes are namespaced so they never collide with codex.
+            self.assertTrue(str(runner.agent_home).endswith("claude-agent-home"))
+
+    def test_claude_agent_with_opencode_sim_is_composite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = build_run_paths(Path(tmp) / "runs", f"20260606-{Path(tmp).name}")
+            paths.run_dir.mkdir(parents=True, exist_ok=True)
+            cfg = _cli_config(Path(tmp), cli_tool="claude", sim_actor_mode=ActorMode.OPENCODE)
+            self.assertIsInstance(make_actor_runner(config=cfg, paths=paths), CompositeActorRunner)
 
 
 if __name__ == "__main__":

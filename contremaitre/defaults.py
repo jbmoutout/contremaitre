@@ -21,12 +21,15 @@ without raising — a broken defaults file must not block a run that
 would otherwise launch with hardcoded fallbacks.
 
 Schema (all keys optional):
-    actor = "codex"         # opencode | codex | cli | fake — agent (and SIM
-                            # unless sim_actor) runtime. "codex" aliases the
-                            # "cli" runtime.
-    sim_actor = "opencode"  # override the SIM runtime (mix: codex agent + SIM)
+    actor = "claude"        # opencode | codex | claude | cli | fake — agent (and
+                            # SIM unless sim_actor) runtime. "codex"/"claude" both
+                            # alias the "cli" runtime and pin that CLI tool.
+    sim_actor = "opencode"  # override the SIM runtime (mix: CLI agent + SIM)
     codex_model = "gpt-5.5" # codex-native model name used when a role is codex
     codex_effort = "high"   # minimal | low | medium | high | xhigh
+    claude_model = "opus"   # claude model name used when a role is claude
+                            # (empty → the ~/.claude account default)
+    claude_effort = "high"  # low | medium | high | max
     agent_model = "opencode/big-pickle"   # used when a role is opencode
     sim_model = "opencode/big-pickle"
     extra_reviewer_model = "opencode/nemotron-3-super-free"  # or "skip"
@@ -48,10 +51,19 @@ from pathlib import Path
 _FILENAME = "defaults.toml"
 _VALID_CLI_REVIEWER = ("auto", "codex", "claude", "both", "none")
 # Friendly actor aliases → the runtime value the CLI/`ActorMode` understands.
-# "codex" is the operator-facing name for the `cli` runtime (codex is the only
-# CLI tool wired today), so the file can read `actor = "codex"`.
-_ACTOR_ALIASES = {"opencode": "opencode", "codex": "cli", "cli": "cli", "fake": "fake"}
+# "codex"/"claude" are the operator-facing names for the `cli` runtime (the CLI
+# tool is carried separately as `cli_tool`), so the file can read `actor = "claude"`.
+_ACTOR_ALIASES = {
+    "opencode": "opencode",
+    "codex": "cli",
+    "claude": "cli",
+    "cli": "cli",
+    "fake": "fake",
+}
+# Operator-facing actor names that also pin a specific CLI tool.
+_ACTOR_CLI_TOOLS = {"codex": "codex", "claude": "claude"}
 _VALID_CODEX_EFFORT = ("minimal", "low", "medium", "high", "xhigh")
+_VALID_CLAUDE_EFFORT = ("low", "medium", "high", "max")
 
 
 @dataclass(frozen=True)
@@ -72,8 +84,11 @@ class Defaults:
     cli_reviewer: str | None = None
     actor: str | None = None
     sim_actor: str | None = None
+    cli_tool: str | None = None
     codex_model: str | None = None
     codex_effort: str | None = None
+    claude_model: str | None = None
+    claude_effort: str | None = None
 
 
 def defaults_path() -> Path:
@@ -132,8 +147,13 @@ def load(path: Path | None = None) -> Defaults:
         cli_reviewer=_clean_cli_reviewer(data.get("cli_reviewer")),
         actor=_clean_actor(data.get("actor")),
         sim_actor=_clean_actor(data.get("sim_actor")),
+        # The CLI tool is carried by the operator-facing actor name ("codex" /
+        # "claude"); both normalize to the "cli" runtime, so this preserves which.
+        cli_tool=_actor_cli_tool(data.get("actor")),
         codex_model=_clean_str(data.get("codex_model")),
         codex_effort=_clean_codex_effort(data.get("codex_effort")),
+        claude_model=_clean_str(data.get("claude_model")),
+        claude_effort=_clean_claude_effort(data.get("claude_effort")),
     )
 
 
@@ -169,3 +189,23 @@ def _clean_codex_effort(value: object) -> str | None:
     if cleaned is None:
         return None
     return cleaned if cleaned.lower() in _VALID_CODEX_EFFORT else None
+
+
+def _clean_claude_effort(value: object) -> str | None:
+    cleaned = _clean_str(value)
+    if cleaned is None:
+        return None
+    return cleaned if cleaned.lower() in _VALID_CLAUDE_EFFORT else None
+
+
+def _actor_cli_tool(value: object) -> str | None:
+    """Derive the CLI tool from the operator-facing actor name, or None.
+
+    "codex" → "codex", "claude" → "claude"; "cli"/"opencode"/"fake"/unknown →
+    None (no specific tool pinned, callers fall back to the codex default).
+    """
+
+    cleaned = _clean_str(value)
+    if cleaned is None:
+        return None
+    return _ACTOR_CLI_TOOLS.get(cleaned.lower())

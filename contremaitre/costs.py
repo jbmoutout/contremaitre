@@ -41,12 +41,14 @@ def sum_costs_in_events(*event_lists: list[dict[str, Any]]) -> float:
 
 
 def sum_token_usage(*paths: Path) -> dict[str, int]:
-    """Sum token counts across actor streams, both event shapes.
+    """Sum token counts across actor streams, all event shapes.
 
-    Handles opencode `step_finish` (`part.tokens`) and codex `--json`
-    `turn.completed` (`usage`). Returns input/output/reasoning/cache_read
-    totals. Codex on a subscription has no metered USD, so this token rollup —
-    not a dollar figure — is the usage signal surfaced for CLI runs.
+    Handles opencode `step_finish` (`part.tokens`), codex `--json`
+    `turn.completed` (`usage`), and claude `stream-json` `result` (`usage`).
+    Returns input/output/reasoning/cache_read totals. A subscription CLI has no
+    metered USD for codex, so this token rollup — not a dollar figure — is the
+    usage signal surfaced for codex runs (claude additionally reports
+    `total_cost_usd`, picked up by `estimate_recorded_cost_usd`).
     """
 
     totals = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0}
@@ -72,6 +74,12 @@ def sum_token_usage(*paths: Path) -> dict[str, int]:
                 totals["output"] += int(usage.get("output_tokens", 0) or 0)
                 totals["reasoning"] += int(usage.get("reasoning_output_tokens", 0) or 0)
                 totals["cache_read"] += int(usage.get("cached_input_tokens", 0) or 0)
+            elif etype == "result":
+                # claude emits one `result` per turn (no separate reasoning token).
+                usage = event.get("usage") or {}
+                totals["input"] += int(usage.get("input_tokens", 0) or 0)
+                totals["output"] += int(usage.get("output_tokens", 0) or 0)
+                totals["cache_read"] += int(usage.get("cache_read_input_tokens", 0) or 0)
     return totals
 
 
@@ -79,9 +87,13 @@ def _sum_costs(value: Any) -> float:
     if isinstance(value, dict):
         subtotal = 0.0
         for key, child in value.items():
-            if key.lower() in {"cost", "cost_usd", "usd", "total_cost"} and isinstance(
-                child, (int, float)
-            ):
+            if key.lower() in {
+                "cost",
+                "cost_usd",
+                "usd",
+                "total_cost",
+                "total_cost_usd",  # claude `result` event reports spend directly
+            } and isinstance(child, (int, float)):
                 subtotal += float(child)
             else:
                 subtotal += _sum_costs(child)

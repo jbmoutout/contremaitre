@@ -23,6 +23,7 @@ from contremaitre.viewer import (
     VIEWER_FILENAME,
     _assign_synthetic_timestamps,
     _build_chat,
+    _is_claude_stream,
     _normalize_events,
     build_viewer,
 )
@@ -220,3 +221,58 @@ class CodexNormalizationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _claude_turn_events(command, output, message, *, input_tokens=100, output_tokens=20, cost=0.01):
+    """One claude `stream-json` turn: init, an assistant tool call, its result, a final reply."""
+
+    return [
+        {"type": "system", "subtype": "init", "session_id": "s", "model": "claude-opus-4-8"},
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "working"},
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": command}},
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": output}]},
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": message,
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            "total_cost_usd": cost,
+        },
+    ]
+
+
+class ClaudeNormalizeTest(unittest.TestCase):
+    def test_is_claude_stream_detects_claude_not_codex_or_opencode(self):
+        self.assertTrue(_is_claude_stream([{"type": "result", "subtype": "success"}]))
+        self.assertTrue(_is_claude_stream([{"type": "assistant", "message": {}}]))
+        self.assertFalse(_is_claude_stream([{"type": "text", "part": {}}]))
+        self.assertFalse(_is_claude_stream([{"type": "item.completed", "item": {}}]))
+
+    def test_claude_stream_becomes_chat_turns(self):
+        events = _normalize_events(
+            _claude_turn_events("ls -la", "total 0", "First reply.")
+            + _claude_turn_events("cat x.py", "print(1)", "Second reply.")
+        )
+        _assign_synthetic_timestamps([events])
+        chat = _build_chat(events, [])
+        turns = chat["turns"]
+        # Final text is result.result, one bubble per turn.
+        self.assertEqual([t["text"] for t in turns], ["First reply.", "Second reply."])
+        # The tool_use block became a bash card with input + stitched output.
+        self.assertEqual(turns[0]["tools"][0]["tool"], "bash")
+        self.assertEqual(turns[0]["tools"][0]["input"]["command"], "ls -la")
+        self.assertEqual(turns[0]["tools"][0]["output"], "total 0")
+        # result.usage rolled into the turn's token total (input + output).
+        self.assertEqual(chat["totals"]["AGENT"]["tokens"], 240)
+        self.assertEqual(chat["totals"]["AGENT"]["msgs"], 2)

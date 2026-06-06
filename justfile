@@ -16,7 +16,7 @@ set shell := ["bash", "-uc"]
 # Runtime, models, and reasoning effort live in defaults.toml + the launch
 # picker now — not here. `docker_image` stays because the `rust` preset pins it.
 publish_mode    := "gh"
-max_turns       := "20"
+max_turns       := "30"
 max_wall_min    := "45"
 max_cost_usd    := "5"
 docker_image    := ""   # e.g. "contremaitre-agent-rust:latest"; empty → CLI default

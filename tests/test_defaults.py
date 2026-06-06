@@ -189,3 +189,39 @@ def test_load_falls_through_to_xdg_when_no_cwd_local(monkeypatch, tmp_path: Path
     xdg.parent.mkdir(parents=True)
     xdg.write_text('agent_model = "openrouter/qwen/qwen3-max"\n')
     assert defaults.load().agent_model == "openrouter/qwen/qwen3-max"
+
+
+def test_load_normalizes_claude_actor_alias_and_tool(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "claude"\n')
+    out = defaults.load(path)
+    assert out.actor == "cli"  # runtime value
+    assert out.cli_tool == "claude"  # tool carried alongside
+
+
+def test_load_codex_actor_carries_codex_tool(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "codex"\n')
+    out = defaults.load(path)
+    assert out.actor == "cli"
+    assert out.cli_tool == "codex"
+
+
+def test_load_opencode_actor_has_no_cli_tool(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "opencode"\n')
+    assert defaults.load(path).cli_tool is None
+
+
+def test_load_reads_claude_model_and_effort(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('claude_model = "opus"\nclaude_effort = "max"\n')
+    out = defaults.load(path)
+    assert out.claude_model == "opus"
+    assert out.claude_effort == "max"
+
+
+def test_load_drops_invalid_claude_effort(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('claude_effort = "xhigh"\n')  # codex effort, not a claude level
+    assert defaults.load(path).claude_effort is None
