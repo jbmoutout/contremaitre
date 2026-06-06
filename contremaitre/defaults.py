@@ -85,6 +85,7 @@ class Defaults:
     actor: str | None = None
     sim_actor: str | None = None
     cli_tool: str | None = None
+    sim_cli_tool: str | None = None
     codex_model: str | None = None
     codex_effort: str | None = None
     claude_model: str | None = None
@@ -150,6 +151,7 @@ def load(path: Path | None = None) -> Defaults:
         # The CLI tool is carried by the operator-facing actor name ("codex" /
         # "claude"); both normalize to the "cli" runtime, so this preserves which.
         cli_tool=_actor_cli_tool(data.get("actor")),
+        sim_cli_tool=_actor_cli_tool(data.get("sim_actor")),
         codex_model=_clean_str(data.get("codex_model")),
         codex_effort=_clean_codex_effort(data.get("codex_effort")),
         claude_model=_clean_str(data.get("claude_model")),

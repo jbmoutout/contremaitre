@@ -527,7 +527,9 @@ class CompositeActorRunner:
         return self._sim.sim_review(**kwargs)
 
 
-def _make_single_runner(mode: ActorMode, *, config: RunConfig, paths: RunPaths) -> ActorRunner:
+def _make_single_runner(
+    mode: ActorMode, *, config: RunConfig, paths: RunPaths, tool: str | None = None
+) -> ActorRunner:
     if mode == ActorMode.FAKE:
         return FakeActorRunner(
             paths=paths,
@@ -541,18 +543,25 @@ def _make_single_runner(mode: ActorMode, *, config: RunConfig, paths: RunPaths) 
         # runner, so a top-level import here would be a cycle.
         from .cli_actor import CliActorRunner
 
-        return CliActorRunner(config=config, paths=paths, tool=config.cli_tool)
+        return CliActorRunner(config=config, paths=paths, tool=tool or config.cli_tool)
     raise ActorError(f"unknown actor mode: {mode}")
 
 
 def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
     agent_mode = config.actor_mode
     sim_mode = config.sim_actor_mode or config.actor_mode
-    if sim_mode == agent_mode:
-        return _make_single_runner(agent_mode, config=config, paths=paths)
+    agent_tool = config.cli_tool
+    sim_tool = config.sim_cli_tool or config.cli_tool
+    # A single runner only when the SIM matches the agent on BOTH runtime and (for
+    # the CLI runtime) tool. Two CLI roles with different tools — codex agent +
+    # claude SIM, or the reverse — need a composite of two CliActorRunners (their
+    # per-run homes are tool-namespaced, so they never collide).
+    same_tool = not (agent_mode == ActorMode.CLI and sim_tool != agent_tool)
+    if sim_mode == agent_mode and same_tool:
+        return _make_single_runner(agent_mode, config=config, paths=paths, tool=agent_tool)
     return CompositeActorRunner(
-        agent_runner=_make_single_runner(agent_mode, config=config, paths=paths),
-        sim_runner=_make_single_runner(sim_mode, config=config, paths=paths),
+        agent_runner=_make_single_runner(agent_mode, config=config, paths=paths, tool=agent_tool),
+        sim_runner=_make_single_runner(sim_mode, config=config, paths=paths, tool=sim_tool),
     )
 
 

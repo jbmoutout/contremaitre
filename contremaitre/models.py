@@ -154,6 +154,11 @@ class RunConfig:
     # SIM uses it instead, so a run can MIX runtimes (e.g. a codex agent with an
     # opencode SIM, or vice versa). None means the SIM shares `actor_mode`.
     sim_actor_mode: ActorMode | None = None
+    # Per-role CLI tool override (the cli_tool analog of sim_actor_mode): when set
+    # and the SIM runs the CLI runtime, the SIM drives this tool instead of
+    # `cli_tool` — so a run can mix the two CLI tools (codex agent + claude SIM,
+    # or the reverse). None means the SIM shares `cli_tool`.
+    sim_cli_tool: str | None = None
     sim_scenario: str = "approved"
     extra_reviewer_scenario: str = "approved"
     agent_scenario: str = "normal"

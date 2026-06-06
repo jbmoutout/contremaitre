@@ -220,6 +220,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the SIM's runtime (default: same as --actor); lets a codex "
         "agent pair with an opencode SIM, or the reverse",
     )
+    run_p.add_argument(
+        "--sim-cli-tool",
+        choices=["codex", "claude"],
+        default=None,
+        help="Override the SIM's CLI tool when the SIM runs --actor cli (default: "
+        "same as --cli-tool); lets a codex agent pair with a claude SIM, or the reverse",
+    )
     run_p.add_argument("--run-slug", default="run")
     run_p.add_argument(
         "--check-cmd", action="append", default=[], help="Executable check command; repeatable"
@@ -1109,15 +1116,26 @@ def _pick_runtimes_interactive(args: argparse.Namespace) -> None:
         return cur_mode, (cur_tool if cur_mode == ActorMode.CLI.value else None)
 
     agent_mode, agent_tool = _pick("agent", current_agent, current_tool)
-    sim_mode, sim_tool = _pick("SIM", getattr(args, "sim_actor", None) or agent_mode, agent_tool or current_tool)
+    current_sim_tool = getattr(args, "sim_cli_tool", None) or agent_tool or current_tool
+    sim_mode, sim_tool = _pick(
+        "SIM", getattr(args, "sim_actor", None) or agent_mode, current_sim_tool
+    )
     args.actor = agent_mode
     # Only record a SIM override when it actually differs from the agent.
     args.sim_actor = None if sim_mode == agent_mode else sim_mode
-    # v1: one cli_tool for any CLI role; the agent's pick wins when both are CLI.
+    # cli_tool is per-role: the agent's CLI tool, and the SIM's only when it runs
+    # CLI and differs (codex agent + claude SIM, or the reverse). When the agent
+    # isn't CLI but the SIM is, the SIM's tool rides on `cli_tool`.
     if agent_mode == ActorMode.CLI.value:
         args.cli_tool = agent_tool
+        args.sim_cli_tool = (
+            sim_tool if (sim_mode == ActorMode.CLI.value and sim_tool != agent_tool) else None
+        )
     elif sim_mode == ActorMode.CLI.value:
         args.cli_tool = sim_tool
+        args.sim_cli_tool = None
+    else:
+        args.sim_cli_tool = None
 
 
 def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
@@ -1365,24 +1383,26 @@ def _launch_screen(
     codex_model = getattr(args, "codex_model", "gpt-5.5")
     codex_effort = getattr(args, "codex_effort", "high")
     cli_tool = getattr(args, "cli_tool", "codex")
+    sim_cli_tool = getattr(args, "sim_cli_tool", None) or cli_tool
     claude_model = getattr(args, "claude_model", "")
     claude_effort = getattr(args, "claude_effort", "high")
     _label_kw = dict(
         codex_model=codex_model,
         codex_effort=codex_effort,
-        cli_tool=cli_tool,
         claude_model=claude_model,
         claude_effort=claude_effort,
     )
-    if agent_mode != sim_mode:
-        print(f"  runtime         {_b(f'agent={agent_mode}, sim={sim_mode}')}")
+    if agent_mode != sim_mode or cli_tool != sim_cli_tool:
+        agent_lbl = agent_mode if agent_mode != ActorMode.CLI.value else cli_tool
+        sim_lbl = sim_mode if sim_mode != ActorMode.CLI.value else sim_cli_tool
+        print(f"  runtime         {_b(f'agent={agent_lbl}, sim={sim_lbl}')}")
     print(
         f"  agent           "
-        f"{_b(role_model_label(actor_mode=agent_mode, opencode_model=args.agent_model, **_label_kw))}"
+        f"{_b(role_model_label(actor_mode=agent_mode, opencode_model=args.agent_model, cli_tool=cli_tool, **_label_kw))}"
     )
     print(
         f"  sim             "
-        f"{_b(role_model_label(actor_mode=sim_mode, opencode_model=args.sim_model, **_label_kw))}"
+        f"{_b(role_model_label(actor_mode=sim_mode, opencode_model=args.sim_model, cli_tool=sim_cli_tool, **_label_kw))}"
     )
     if extra_model:
         print(f"  extra           {_b(extra_model)}")
@@ -1901,6 +1921,7 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         claude_model=getattr(args, "claude_model", ""),
         claude_effort=getattr(args, "claude_effort", "high"),
         sim_actor_mode=(ActorMode(args.sim_actor) if getattr(args, "sim_actor", None) else None),
+        sim_cli_tool=getattr(args, "sim_cli_tool", None),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
         extra_reviewer_scenario=getattr(args, "extra_reviewer_scenario", "approved"),
@@ -2007,6 +2028,14 @@ def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
     # the "cli" runtime above.
     if saved.cli_tool and not _has_flag_in(argv, "--cli-tool") and hasattr(args, "cli_tool"):
         args.cli_tool = saved.cli_tool
+    # `sim_actor = "claude"` (or "codex") in defaults.toml carries the SIM's CLI
+    # tool, enabling a saved cross-CLI mix.
+    if (
+        saved.sim_cli_tool
+        and not _has_flag_in(argv, "--sim-cli-tool")
+        and hasattr(args, "sim_cli_tool")
+    ):
+        args.sim_cli_tool = saved.sim_cli_tool
     if (
         saved.codex_model
         and not _has_flag_in(argv, "--codex-model")
@@ -2217,6 +2246,8 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         actor=actor,
         sim_actor=sim_actor,
         cli_tool=_extract_flag_value(forwarded, "--cli-tool", _saved.cli_tool or "codex"),
+        sim_cli_tool=_extract_flag_value(forwarded, "--sim-cli-tool", "")
+        or (_saved.sim_cli_tool or None),
         allow_open_egress=("--allow-open-egress" in forwarded),
         docker_network=_extract_flag_value(forwarded, "--docker-network", "") or None,
         http_proxy=_extract_flag_value(forwarded, "--http-proxy", "") or None,
@@ -2269,6 +2300,13 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     resolved_actor_value = getattr(confirm_args, "actor", actor)
     if ActorMode.CLI.value in (resolved_actor_value, resolved_sim or resolved_actor_value):
         _set_flag_value(forwarded, "--cli-tool", getattr(confirm_args, "cli_tool", "codex"))
+    # The SIM may run a DIFFERENT CLI tool (codex agent + claude SIM, or reverse);
+    # fold that back too, or clear it when the SIM shares the agent's tool.
+    resolved_sim_cli_tool = getattr(confirm_args, "sim_cli_tool", None)
+    if resolved_sim_cli_tool:
+        _set_flag_value(forwarded, "--sim-cli-tool", resolved_sim_cli_tool)
+    else:
+        _remove_flag(forwarded, "--sim-cli-tool")
     if "--yes" not in forwarded and "-y" not in forwarded:
         forwarded.append("--yes")
     if "--repo-cache" not in " ".join(forwarded):
@@ -2281,12 +2319,12 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     codex_model = _extract_flag_value(forwarded, "--codex-model", _saved.codex_model or "gpt-5.5")
     codex_effort = _extract_flag_value(forwarded, "--codex-effort", _saved.codex_effort or "high")
     cli_tool = _extract_flag_value(forwarded, "--cli-tool", _saved.cli_tool or "codex")
+    sim_cli_tool = _extract_flag_value(forwarded, "--sim-cli-tool", "") or cli_tool
     claude_model = _extract_flag_value(forwarded, "--claude-model", _saved.claude_model or "")
     claude_effort = _extract_flag_value(forwarded, "--claude-effort", _saved.claude_effort or "high")
     _label_kw = dict(
         codex_model=codex_model,
         codex_effort=codex_effort,
-        cli_tool=cli_tool,
         claude_model=claude_model,
         claude_effort=claude_effort,
     )
@@ -2299,11 +2337,13 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         agent_model=role_model_label(
             actor_mode=resolved_actor,
             opencode_model=agent_model,
+            cli_tool=cli_tool,
             **_label_kw,
         ),
         sim_model=role_model_label(
             actor_mode=resolved_sim_mode,
             opencode_model=sim_model,
+            cli_tool=sim_cli_tool,
             **_label_kw,
         ),
         extra_reviewer_model=extra_reviewer_model,

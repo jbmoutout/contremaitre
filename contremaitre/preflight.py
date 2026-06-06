@@ -58,6 +58,17 @@ class PreflightReport:
         return "; ".join(f"{check.name}: {check.message}" for check in failures)
 
 
+def _active_cli_tools(config: RunConfig) -> set[str]:
+    """The CLI tool(s) in play this run — agent and SIM may differ (cross-CLI)."""
+
+    tools: set[str] = set()
+    if config.actor_mode == ActorMode.CLI:
+        tools.add(config.cli_tool)
+    if (config.sim_actor_mode or config.actor_mode) == ActorMode.CLI:
+        tools.add(config.sim_cli_tool or config.cli_tool)
+    return tools
+
+
 def run_preflight(config: RunConfig) -> PreflightReport:
     # The agent uses actor_mode; the SIM may override it (per-role mixing), so
     # we validate the UNION of both runtimes' requirements. OpenRouter is only
@@ -76,14 +87,11 @@ def run_preflight(config: RunConfig) -> PreflightReport:
     if ActorMode.CLI in modes:
         # CLI actor: no OpenRouter key (the CLI uses the operator's subscription),
         # but the SAME egress policy applies (the in-container token is
-        # long-lived), plus a per-tool auth-source check (codex token / claude
-        # OAuth token).
-        funcs += [
-            _check_docker_image,
-            _check_readonly_mount,
-            _check_network_policy,
-            _check_cli_auth,
-        ]
+        # long-lived), plus an auth-source check per ACTIVE CLI tool — so a mixed
+        # codex+claude run validates both the codex token and the claude OAuth token.
+        funcs += [_check_docker_image, _check_readonly_mount, _check_network_policy]
+        for tool in sorted(_active_cli_tools(config)):
+            funcs.append(_check_claude_auth if tool == "claude" else _check_codex_auth)
     # Dedupe by function identity (image/readonly/network are shared) so each
     # check runs once even when both runtimes are active.
     seen: set = set()
@@ -279,11 +287,10 @@ def _check_codex_auth(config: RunConfig) -> PreflightCheck:
     The CLI actor re-seeds a neutered copy of `~/.codex/auth.json` into each
     container; here we confirm the source exists and its access token isn't
     about to expire (codex would then try — and, with the neutered token,
-    fail — to refresh mid-run).
+    fail — to refresh mid-run). The caller only runs this when codex is an active
+    CLI tool (agent or SIM), so it no longer gates on `config.cli_tool` itself.
     """
 
-    if config.cli_tool != "codex":
-        return _warn("codex_auth", f"cli_tool={config.cli_tool!r} not yet validated", {})
     from .cli_actor import _access_token_exp
 
     auth = Path.home() / ".codex" / "auth.json"

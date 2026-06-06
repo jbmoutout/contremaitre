@@ -26,7 +26,12 @@ from contremaitre.cli_actor import (
 from contremaitre.costs import estimate_recorded_cost_usd, sum_token_usage
 from contremaitre.models import ActorMode, RunConfig
 from contremaitre.paths import build_run_paths
-from contremaitre.preflight import _check_claude_auth, _check_cli_auth, _check_codex_auth
+from contremaitre.preflight import (
+    _active_cli_tools,
+    _check_claude_auth,
+    _check_cli_auth,
+    _check_codex_auth,
+)
 
 
 def _b64url(obj: dict) -> str:
@@ -506,6 +511,7 @@ class TuiRunForwardsRuntimeTest(unittest.TestCase):
             actor=None,
             sim_actor=None,
             cli_tool=None,
+            sim_cli_tool=None,
             codex_model=None,
             codex_effort=None,
             claude_model=None,
@@ -1061,6 +1067,67 @@ class ClaudeMakeRunnerTest(unittest.TestCase):
             paths.run_dir.mkdir(parents=True, exist_ok=True)
             cfg = _cli_config(Path(tmp), cli_tool="claude", sim_actor_mode=ActorMode.OPENCODE)
             self.assertIsInstance(make_actor_runner(config=cfg, paths=paths), CompositeActorRunner)
+
+
+# ===== cross-CLI: codex agent + claude SIM (and the reverse) =====
+
+
+def _xcli_paths(tmp):
+    paths = build_run_paths(Path(tmp) / "runs", f"20260606-{Path(tmp).name}")
+    paths.run_dir.mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+class CrossCliRunnerTest(unittest.TestCase):
+    def test_codex_agent_claude_sim_is_composite_of_two_cli_runners(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(
+                Path(tmp), cli_tool="codex", sim_actor_mode=ActorMode.CLI, sim_cli_tool="claude"
+            )
+            r = make_actor_runner(config=cfg, paths=_xcli_paths(tmp))
+            self.assertIsInstance(r, CompositeActorRunner)
+            self.assertEqual(r._agent.tool, "codex")
+            self.assertEqual(r._sim.tool, "claude")
+            # Tool-namespaced homes → the two runners never collide in one run dir.
+            self.assertTrue(str(r._agent.agent_home).endswith("codex-agent-home"))
+            self.assertTrue(str(r._sim.sim_home).endswith("claude-sim-home"))
+
+    def test_claude_agent_codex_sim_reverse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(
+                Path(tmp), cli_tool="claude", sim_actor_mode=ActorMode.CLI, sim_cli_tool="codex"
+            )
+            r = make_actor_runner(config=cfg, paths=_xcli_paths(tmp))
+            self.assertIsInstance(r, CompositeActorRunner)
+            self.assertEqual(r._agent.tool, "claude")
+            self.assertEqual(r._sim.tool, "codex")
+
+    def test_same_tool_both_cli_stays_single_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # sim_cli_tool None → SIM shares the agent's tool → one runner, not composite.
+            cfg = _cli_config(Path(tmp), cli_tool="claude", sim_actor_mode=ActorMode.CLI)
+            r = make_actor_runner(config=cfg, paths=_xcli_paths(tmp))
+            self.assertNotIsInstance(r, CompositeActorRunner)
+            self.assertEqual(r.tool, "claude")
+
+
+class ActiveCliToolsTest(unittest.TestCase):
+    def test_mixed_run_reports_both_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(
+                Path(tmp), cli_tool="codex", sim_actor_mode=ActorMode.CLI, sim_cli_tool="claude"
+            )
+            self.assertEqual(_active_cli_tools(cfg), {"codex", "claude"})
+
+    def test_single_tool_run_reports_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(Path(tmp), cli_tool="claude")  # sim shares actor (CLI/claude)
+            self.assertEqual(_active_cli_tools(cfg), {"claude"})
+
+    def test_cli_agent_opencode_sim_reports_agent_tool_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(Path(tmp), cli_tool="claude", sim_actor_mode=ActorMode.OPENCODE)
+            self.assertEqual(_active_cli_tools(cfg), {"claude"})
 
 
 if __name__ == "__main__":

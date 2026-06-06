@@ -1194,7 +1194,7 @@ class Orchestrator:
                     opencode_model=self.config.sim_model,
                     codex_model=self.config.codex_model,
                     codex_effort=self.config.codex_effort,
-                    cli_tool=self.config.cli_tool,
+                    cli_tool=self.config.sim_cli_tool or self.config.cli_tool,
                     claude_model=self.config.claude_model,
                     claude_effort=self.config.claude_effort,
                 ),

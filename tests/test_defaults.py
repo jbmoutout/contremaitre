@@ -225,3 +225,20 @@ def test_load_drops_invalid_claude_effort(tmp_path: Path):
     path = tmp_path / "defaults.toml"
     path.write_text('claude_effort = "xhigh"\n')  # codex effort, not a claude level
     assert defaults.load(path).claude_effort is None
+
+
+def test_sim_actor_claude_carries_sim_cli_tool(tmp_path: Path):
+    # Cross-CLI from defaults: codex agent + claude SIM (and the reverse).
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "codex"\nsim_actor = "claude"\n')
+    out = defaults.load(path)
+    assert out.actor == "cli" and out.cli_tool == "codex"
+    assert out.sim_actor == "cli" and out.sim_cli_tool == "claude"
+
+
+def test_sim_actor_opencode_has_no_sim_cli_tool(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "claude"\nsim_actor = "opencode"\n')
+    out = defaults.load(path)
+    assert out.cli_tool == "claude"
+    assert out.sim_cli_tool is None

@@ -64,6 +64,7 @@ The launcher takes the same flags whether you call `just tui-run …` or `python
 - `--upstream …` + `--gh-repo <owner>/<repo>` — when `--fork` is *your* fork and you want the PR opened on the upstream repo.
 - `--actor opencode|cli` / `--sim-actor opencode|cli` — per-role runtime: `opencode` (a model) or `cli` (a subscription CLI). Omit to pick interactively; defaults from `defaults.toml`. Mixing is allowed (`--actor cli --sim-actor opencode`).
 - `--cli-tool codex|claude` — which subscription CLI a `cli` role drives (default `codex`).
+- `--sim-cli-tool codex|claude` — override the SIM's CLI tool for a **cross-CLI** run (codex agent + claude SIM, or the reverse); default: same as `--cli-tool`.
 - `--agent-model` / `--sim-model` — OpenRouter model slug, or an OpenCode Zen model, for an opencode role. Omit to pick interactively.
 - `--codex-model` / `--codex-effort` — codex-native model (default `gpt-5.5`) and reasoning effort (default `high`) for a codex role.
 - `--claude-model` / `--claude-effort` — claude model (empty = `~/.claude` account default) and effort (`low|medium|high|max`, default `high`) for a claude role.
