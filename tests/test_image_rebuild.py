@@ -117,6 +117,60 @@ class DockerfileHashRebuildTest(unittest.TestCase):
                 cli._ensure_default_image_built(config)
         fake_build.assert_called_once()
 
+    def test_cli_actor_mode_triggers_build(self):
+        """Codex (CLI) agent shares the same container image as opencode, so
+        a missing image must auto-build — the old gate bailed for any
+        non-opencode mode and left `codex: command not found` in-container.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            df = Path(tmp) / "Dockerfile"
+            df.write_text("FROM scratch\n", encoding="utf-8")
+            config = RunConfig(
+                repo=Path(tmp),
+                base="main",
+                runs_root=Path(tmp) / "runs",
+                run_slug="cli-build",
+                actor_mode=ActorMode.CLI,
+                docker_image=cli._DEFAULT_IMAGE,
+            )
+            with (
+                self._patch_dockerfile(df),
+                patch("contremaitre.cli.subprocess.run") as fake_run,
+                patch("contremaitre.cli._build_image_inline", return_value=0) as fake_build,
+            ):
+                fake_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+                rc = cli._ensure_default_image_built(config)
+        self.assertEqual(rc, 0)
+        fake_build.assert_called_once()
+
+    def test_composite_mixed_modes_triggers_build(self):
+        """A mixed pair (fake agent + codex SIM here) still shares one image.
+        The build decision is the UNION of both roles, not just the agent.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            df = Path(tmp) / "Dockerfile"
+            df.write_text("FROM scratch\n", encoding="utf-8")
+            config = RunConfig(
+                repo=Path(tmp),
+                base="main",
+                runs_root=Path(tmp) / "runs",
+                run_slug="mix-build",
+                actor_mode=ActorMode.FAKE,
+                sim_actor_mode=ActorMode.CLI,
+                docker_image=cli._DEFAULT_IMAGE,
+            )
+            with (
+                self._patch_dockerfile(df),
+                patch("contremaitre.cli.subprocess.run") as fake_run,
+                patch("contremaitre.cli._build_image_inline", return_value=0) as fake_build,
+            ):
+                fake_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+                rc = cli._ensure_default_image_built(config)
+        self.assertEqual(rc, 0)
+        fake_build.assert_called_once()
+
     def test_fake_actor_mode_skips_entirely(self):
         """No docker work in fake-mode test paths."""
 

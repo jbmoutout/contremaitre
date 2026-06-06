@@ -51,6 +51,42 @@ def test_load_reads_all_fields(tmp_path: Path):
     )
 
 
+def test_load_normalizes_codex_actor_alias(tmp_path: Path):
+    # "codex" is the operator-facing name; it normalizes to the "cli" runtime.
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "codex"\nsim_actor = "opencode"\n')
+    out = defaults.load(path)
+    assert out.actor == "cli"
+    assert out.sim_actor == "opencode"
+
+
+def test_load_passes_through_opencode_and_fake_actor(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "opencode"\n')
+    assert defaults.load(path).actor == "opencode"
+
+
+def test_load_drops_invalid_actor(tmp_path: Path):
+    # A typo / future value drops to None → falls through to the picker default.
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "claudette"\n')
+    assert defaults.load(path).actor is None
+
+
+def test_load_reads_codex_model_and_effort(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('codex_model = "gpt-5.5"\ncodex_effort = "high"\n')
+    out = defaults.load(path)
+    assert out.codex_model == "gpt-5.5"
+    assert out.codex_effort == "high"
+
+
+def test_load_drops_invalid_codex_effort(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('codex_effort = "ludicrous"\n')
+    assert defaults.load(path).codex_effort is None
+
+
 def test_load_strips_whitespace(tmp_path: Path):
     path = tmp_path / "defaults.toml"
     path.write_text('agent_model = "  opencode/big-pickle  "\n')
@@ -153,3 +189,56 @@ def test_load_falls_through_to_xdg_when_no_cwd_local(monkeypatch, tmp_path: Path
     xdg.parent.mkdir(parents=True)
     xdg.write_text('agent_model = "openrouter/qwen/qwen3-max"\n')
     assert defaults.load().agent_model == "openrouter/qwen/qwen3-max"
+
+
+def test_load_normalizes_claude_actor_alias_and_tool(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "claude"\n')
+    out = defaults.load(path)
+    assert out.actor == "cli"  # runtime value
+    assert out.cli_tool == "claude"  # tool carried alongside
+
+
+def test_load_codex_actor_carries_codex_tool(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "codex"\n')
+    out = defaults.load(path)
+    assert out.actor == "cli"
+    assert out.cli_tool == "codex"
+
+
+def test_load_opencode_actor_has_no_cli_tool(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "opencode"\n')
+    assert defaults.load(path).cli_tool is None
+
+
+def test_load_reads_claude_model_and_effort(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('claude_model = "opus"\nclaude_effort = "max"\n')
+    out = defaults.load(path)
+    assert out.claude_model == "opus"
+    assert out.claude_effort == "max"
+
+
+def test_load_drops_invalid_claude_effort(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('claude_effort = "xhigh"\n')  # codex effort, not a claude level
+    assert defaults.load(path).claude_effort is None
+
+
+def test_sim_actor_claude_carries_sim_cli_tool(tmp_path: Path):
+    # Cross-CLI from defaults: codex agent + claude SIM (and the reverse).
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "codex"\nsim_actor = "claude"\n')
+    out = defaults.load(path)
+    assert out.actor == "cli" and out.cli_tool == "codex"
+    assert out.sim_actor == "cli" and out.sim_cli_tool == "claude"
+
+
+def test_sim_actor_opencode_has_no_sim_cli_tool(tmp_path: Path):
+    path = tmp_path / "defaults.toml"
+    path.write_text('actor = "claude"\nsim_actor = "opencode"\n')
+    out = defaults.load(path)
+    assert out.cli_tool == "claude"
+    assert out.sim_cli_tool is None

@@ -1,4 +1,4 @@
-Run the `/improve-codebase-architecture` skill end-to-end against this repository. The SWE you're paired with is the user the skill talks to. Follow the skill for everything; the four host-side scaffolds below override skill defaults where they conflict.
+Run the `/improve-codebase-architecture` skill against this repository as a turn-by-turn dialogue. The SWE you're paired with is the person the skill addresses — a reviewer who replies between your turns, not you — so wherever the skill would ask them a question (which candidate to deepen, each grilling round), end your turn with it and wait; don't answer for them or start implementing alone. Otherwise follow the skill; the host scaffolds below override its defaults where they conflict.
 
 **Host owns git.** Never run `git status`, `git add`, `git commit`, `git push`, or `gh`. You have no credentials. The host stages, commits, scans, pushes, and opens the draft PR after the review pass approves. Your job is file edits in the worktree.
 

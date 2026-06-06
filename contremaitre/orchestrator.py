@@ -33,7 +33,7 @@ from . import events, prompts
 from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
-from .costs import estimate_recorded_cost_usd
+from .costs import estimate_recorded_cost_usd, sum_token_usage
 from .diffscan import DiffScanResult, scan_diff
 from .evaluator import (
     combined_review_summary,
@@ -54,6 +54,7 @@ from .models import (
     RunResult,
     State,
     TerminalVerdict,
+    role_model_label,
 )
 from .paths import build_run_paths, new_run_id, validate_slug
 from .preflight import enforce_preflight
@@ -1114,11 +1115,13 @@ class Orchestrator:
             self._emit(events.WALL_CAP, wall_minutes=wall_minutes)
             return True
         recorded_cost = estimate_recorded_cost_usd(self.paths.raw_export, self.paths.sim_raw_export)
+        token_rollup = sum_token_usage(self.paths.raw_export, self.paths.sim_raw_export)
         write_json(
             self.paths.cost_report,
             {
                 "recorded_cost_usd": recorded_cost,
                 "max_cost_usd": self.config.caps.max_cost_usd,
+                "tokens": token_rollup,
                 "note": "Recorded stream cost only; provider-side limit remains the primary spend guardrail.",
             },
         )
@@ -1177,8 +1180,24 @@ class Orchestrator:
                 "reason": reason,
                 "turns": self.turns,
                 "duration_seconds": round(time.monotonic() - self.started, 3),
-                "agent_model": self.config.agent_model,
-                "sim_model": self.config.sim_model,
+                "agent_model": role_model_label(
+                    actor_mode=self.config.actor_mode,
+                    opencode_model=self.config.agent_model,
+                    codex_model=self.config.codex_model,
+                    codex_effort=self.config.codex_effort,
+                    cli_tool=self.config.cli_tool,
+                    claude_model=self.config.claude_model,
+                    claude_effort=self.config.claude_effort,
+                ),
+                "sim_model": role_model_label(
+                    actor_mode=self.config.sim_actor_mode or self.config.actor_mode,
+                    opencode_model=self.config.sim_model,
+                    codex_model=self.config.codex_model,
+                    codex_effort=self.config.codex_effort,
+                    cli_tool=self.config.sim_cli_tool or self.config.cli_tool,
+                    claude_model=self.config.claude_model,
+                    claude_effort=self.config.claude_effort,
+                ),
                 "extra_reviewer_model": self.config.extra_reviewer_model,
                 "actor_mode": self.config.actor_mode.value,
                 "publish_mode": self.config.publish_mode.value,

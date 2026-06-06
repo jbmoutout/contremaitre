@@ -11,15 +11,26 @@ event migration) breaks these tests instead of silently degrading the TUI.
 
 from __future__ import annotations
 
+import json
 
 import pytest
 
 from contremaitre import events
 from contremaitre.tui import (
+    _PAL_ERROR,
+    _PAL_TEXT,
+    _PAL_WARN,
     _PHASES,
+    _codex_usage_from_payload,
+    _codex_usage_token,
+    _fmt_reset,
+    _fmt_window_minutes,
+    _read_codex_usage,
+    _usage_pct_style,
     _activity_state,
     _architecture_review_in,
     _build_event_row,
+    _claude_event_rows,
     _current_phase_label,
     _current_review_round,
     _derive_phase,
@@ -31,6 +42,7 @@ from contremaitre.tui import (
     _phase_trail,
     _pr_number_from_url,
     _read_jsonl,
+    _render_event,
     _render_guardrail,
     _reviewer_glyph,
     _reviewer_status,
@@ -1434,3 +1446,405 @@ def test_cli_review_tool_header_renders_divider_with_tool_name():
     assert "──" in sep.plain
     sep_codex = _cli_review_tool_header("codex")
     assert "codex review" in sep_codex.plain
+
+
+# ----- codex --json event rendering (CLI actor streams these into raw_export) -----
+
+
+def _row_plain(ev):
+    _marker, _ts, typ, tool, body = _build_event_row(ev)
+    plain = lambda x: x.plain if hasattr(x, "plain") else str(x)  # noqa: E731
+    return plain(typ), plain(tool), plain(body)
+
+
+def test_codex_command_execution_renders_command_and_exit():
+    typ, tool, body = _row_plain(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "sed -n app.py",
+                "aggregated_output": "def f(): ...",
+                "exit_code": 0,
+            },
+        }
+    )
+    assert typ == "command"
+    assert tool == "bash"
+    assert "sed -n app.py" in body
+    assert "exit 0" in body
+    # aggregated_output is intentionally NOT rendered (noise; still on disk).
+    assert "def f(): ..." not in body
+
+
+def test_render_event_stamps_codex_event_with_read_time():
+    # codex events carry no timestamp; _render_event stamps first-render
+    # wall-clock so the TUI shows a time column for them.
+    ev = {"type": "item.completed", "item": {"type": "agent_message", "text": "hi"}}
+    _render_event(ev)
+    assert isinstance(ev.get("timestamp"), int) and ev["timestamp"] > 0
+
+
+def test_render_event_preserves_existing_timestamp():
+    ev = {"type": "text", "part": {"text": "x"}, "timestamp": 123}
+    _render_event(ev)
+    assert ev["timestamp"] == 123
+
+
+def test_codex_agent_message_renders_as_text():
+    typ, _tool, body = _row_plain(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "hello world"}}
+    )
+    assert typ == "text"
+    assert "hello world" in body
+
+
+def test_codex_turn_completed_shows_tokens():
+    typ, _tool, body = _row_plain(
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 5, "output_tokens": 2, "cached_input_tokens": 1},
+        }
+    )
+    assert typ == "turn_done"
+    assert "in 5" in body and "out 2" in body
+
+
+def test_text_event_count_includes_codex_agent_message():
+    events_list = [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "x"}},
+        {"type": "text"},
+        {"type": "item.completed", "item": {"type": "command_execution"}},  # not a turn
+    ]
+    assert _text_event_count(events_list) == 2
+
+
+# ===== codex subscription usage (footer rate-limit indicator) =====
+
+
+def _token_count_event(*, primary=80.0, secondary=20.0, resets_at=9_999_999_999):
+    """A codex `token_count` rollout event. `None` for a window omits it."""
+
+    def _win(used, minutes):
+        if used is None:
+            return None
+        return {"used_percent": used, "window_minutes": minutes, "resets_at": resets_at}
+
+    return {
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"model_context_window": 258400},
+            "rate_limits": {
+                "plan_type": "plus",
+                "primary": _win(primary, 300),
+                "secondary": _win(secondary, 10080),
+            },
+        },
+    }
+
+
+def test_codex_usage_from_payload_extracts_windows():
+    usage = _codex_usage_from_payload(_token_count_event()["payload"])
+    assert usage["primary"]["used_percent"] == 80.0
+    assert usage["primary"]["window_minutes"] == 300
+    assert usage["secondary"]["used_percent"] == 20.0
+
+
+def test_codex_usage_from_payload_none_when_windows_null():
+    # codex emits token_count after every turn but only fills the windows on
+    # turns that hit the metered endpoint — a null snapshot carries no signal.
+    payload = _token_count_event(primary=None, secondary=None)["payload"]
+    assert _codex_usage_from_payload(payload) is None
+
+
+def test_read_codex_usage_skips_trailing_null_snapshot(tmp_path):
+    roll = tmp_path / "codex-sim-home" / "sessions" / "2026" / "rollout-x.jsonl"
+    roll.parent.mkdir(parents=True)
+    roll.write_text(
+        "\n".join(
+            json.dumps(e)
+            for e in [
+                _token_count_event(primary=70.0),  # the real snapshot
+                {"type": "response_item", "payload": {"type": "message"}},
+                _token_count_event(primary=None, secondary=None),  # trailing null
+            ]
+        )
+        + "\n"
+    )
+    usage = _read_codex_usage(tmp_path)
+    assert usage is not None
+    assert usage["primary"]["used_percent"] == 70.0
+
+
+def test_read_codex_usage_none_without_codex_homes(tmp_path):
+    (tmp_path / "raw_export.jsonl").write_text("{}\n")  # opencode-only run
+    assert _read_codex_usage(tmp_path) is None
+
+
+def test_codex_usage_token_shows_remaining_and_reset():
+    # 84% used at now → 16% left; resets 1h2m out → `codex 16% left (↻1h02m)`.
+    usage = _codex_usage_from_payload(_token_count_event(primary=84.0, resets_at=3722)["payload"])
+    assert _codex_usage_token(usage, now=0.0).plain == "codex 16% left (↻1h02m)"
+
+
+def test_codex_usage_token_appends_weekly_only_when_tighter():
+    # weekly looser than session → hidden (just the session headline).
+    loose = _codex_usage_from_payload(_token_count_event(primary=84.0, secondary=20.0)["payload"])
+    loose_plain = _codex_usage_token(loose, now=0.0).plain
+    assert "wk" not in loose_plain and "7d" not in loose_plain
+    assert loose_plain.count("left") == 1
+    # weekly tighter than session → surfaced, labelled, with its own % left.
+    tight = _codex_usage_from_payload(_token_count_event(primary=10.0, secondary=95.0)["payload"])
+    tok = _codex_usage_token(tight, now=0.0).plain
+    assert "90% left" in tok  # session headline
+    assert "7d 5% left" in tok  # 95% used weekly → 5% left
+
+
+def test_codex_usage_token_none_when_no_data():
+    assert _codex_usage_token(None) is None
+    assert _codex_usage_token({"primary": None, "secondary": None}) is None
+
+
+def test_usage_pct_style_severity():
+    # Only low budgets draw the eye: red → amber → neutral (no green).
+    assert _usage_pct_style(5) == _PAL_ERROR
+    assert _usage_pct_style(30) == _PAL_WARN
+    assert _usage_pct_style(80) == _PAL_TEXT
+
+
+def test_fmt_window_minutes():
+    assert _fmt_window_minutes(300) == "5h"
+    assert _fmt_window_minutes(10080) == "7d"
+    assert _fmt_window_minutes(90) == "90m"
+    assert _fmt_window_minutes(None) == ""
+
+
+def test_fmt_reset_countdown():
+    assert _fmt_reset(3722, 0.0) == "↻1h02m"
+    assert _fmt_reset(600, 0.0) == "↻10m"
+    assert _fmt_reset(100, 200.0) == ""  # already elapsed
+    assert _fmt_reset(None, 0.0) == ""
+
+
+# ===== claude stream-json rendering =====
+
+
+def _claude_rows_plain(ev):
+    plain = lambda x: x.plain if hasattr(x, "plain") else str(x)  # noqa: E731
+    return [
+        (plain(typ), plain(tool), plain(body))
+        for (_marker, _ts, typ, tool, body) in _claude_event_rows(ev, "12:00:00")
+    ]
+
+
+def test_claude_system_init_renders_session_row():
+    rows = _claude_rows_plain(
+        {"type": "system", "subtype": "init", "session_id": "abc-123", "model": "claude-opus-4-8"}
+    )
+    assert len(rows) == 1
+    typ, _tool, body = rows[0]
+    assert typ == "session"
+    assert "abc-123" in body and "claude-opus-4-8" in body
+
+
+def test_claude_assistant_multiblock_expands_to_n_rows():
+    rows = _claude_rows_plain(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "thinking then acting"},
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "pytest -q"}},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "app.py"}},
+                ]
+            },
+        }
+    )
+    assert len(rows) == 3  # one row per content block
+    assert rows[0][0] == "text" and "thinking then acting" in rows[0][2]
+    assert rows[1][0] == "tool_use" and rows[1][1] == "Bash" and "pytest -q" in rows[1][2]
+    assert rows[2][0] == "tool_use" and rows[2][1] == "Read" and "app.py" in rows[2][2]
+
+
+def test_claude_result_renders_turn_done_with_cost():
+    rows = _claude_rows_plain(
+        {
+            "type": "result",
+            "subtype": "success",
+            "usage": {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 80},
+            "total_cost_usd": 0.0512,
+        }
+    )
+    assert len(rows) == 1
+    typ, _tool, body = rows[0]
+    assert typ == "turn_done"
+    assert "in 100" in body and "out 10" in body and "cache-r 80" in body
+    assert "$0.0512" in body
+
+
+def test_claude_user_tool_result_renders_compact_row():
+    rows = _claude_rows_plain(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "1 passed in 0.1s"}
+                ]
+            },
+        }
+    )
+    assert len(rows) == 1
+    assert rows[0][0] == "tool_result" and "1 passed" in rows[0][2]
+
+
+def test_render_event_stamps_claude_event():
+    ev = {"type": "result", "subtype": "success", "result": "done"}
+    _render_event(ev)
+    assert isinstance(ev.get("timestamp"), int) and ev["timestamp"] > 0
+
+
+def test_text_event_count_includes_claude_result():
+    evts = [
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "x"}]}},
+        {"type": "result", "subtype": "success", "result": "a"},
+        {"type": "result", "subtype": "success", "result": "b"},
+    ]
+    assert _text_event_count(evts) == 2  # two turns (two results), not the assistant
+
+
+def test_codex_usage_token_absent_for_claude_run():
+    # claude stream-json carries no subscription-window data, so the footer
+    # usage token is codex-only (None when there's no rate-limit snapshot).
+    assert _codex_usage_token(None) is None
+
+
+# ===== timestamp coercion (claude emits ISO-8601 strings) =====
+
+
+def test_fmt_ts_handles_iso_string_and_int_and_none():
+    from contremaitre.tui import _fmt_ts, _ts_to_ms
+
+    # claude's user/assistant/result events carry ISO-8601 strings.
+    assert _ts_to_ms("2026-06-06T12:49:25.658Z") == 1780750165658
+    assert _ts_to_ms(1780750165658) == 1780750165658
+    assert _ts_to_ms("1780750165658") == 1780750165658
+    assert _ts_to_ms(None) is None
+    assert _ts_to_ms("") is None
+    assert _ts_to_ms("not-a-time") is None
+    # _fmt_ts must never raise on any of these (regression: TypeError str/int).
+    assert _fmt_ts("2026-06-06T12:49:25.658Z") != ""
+    assert _fmt_ts(None) == "        "
+
+
+def test_render_event_survives_claude_iso_string_timestamp():
+    # Regression: a claude tool_result `user` event carries an ISO-8601 string
+    # timestamp; _render_event must not crash dividing str by 1000.
+    ev = {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": "<tool_use_error>boom</tool_use_error>",
+                    "is_error": True,
+                    "tool_use_id": "t1",
+                }
+            ]
+        },
+        "timestamp": "2026-06-06T12:49:25.658Z",
+    }
+    _render_event(ev)  # must not raise
+
+
+def test_model_from_init_events_surfaces_claude_model():
+    from contremaitre.tui import _model_from_init_events
+
+    events = [
+        {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5},
+        {"type": "system", "subtype": "init", "model": "claude-sonnet-4-6", "session_id": "s"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+    ]
+    assert _model_from_init_events(events) == "claude-sonnet-4-6"
+    # No init event (e.g. codex stream) → None (header keeps its configured label).
+    assert _model_from_init_events([{"type": "turn.started"}]) is None
+
+
+# ===== claude footer usage (window + reset; no % — claude exposes none) =====
+
+
+def _rate_limit_line(
+    rate_type="five_hour", status="allowed", resets_at=9_999_999_999, overage=False
+):
+    return json.dumps(
+        {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": status,
+                "resetsAt": resets_at,
+                "rateLimitType": rate_type,
+                "isUsingOverage": overage,
+            },
+            "session_id": "s",
+        }
+    )
+
+
+def test_read_claude_usage_picks_last_rate_limit_event(tmp_path):
+    from contremaitre.tui import _read_claude_usage
+
+    (tmp_path / "raw_export.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "system", "subtype": "init", "model": "claude-sonnet-4-6"}),
+                _rate_limit_line(resets_at=111),
+                _rate_limit_line(resets_at=222),  # last one wins
+            ]
+        )
+    )
+    usage = _read_claude_usage(tmp_path)
+    assert usage is not None and usage["resetsAt"] == 222
+
+
+def test_read_claude_usage_none_for_codex_run(tmp_path):
+    from contremaitre.tui import _read_claude_usage
+
+    # A codex stream has no rate_limit_event → no claude footer.
+    (tmp_path / "raw_export.jsonl").write_text(
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}})
+    )
+    assert _read_claude_usage(tmp_path) is None
+
+
+def test_claude_usage_token_formats_window_and_reset():
+    from contremaitre.tui import _claude_usage_token
+
+    tok = _claude_usage_token(
+        {
+            "status": "allowed",
+            "rateLimitType": "five_hour",
+            "resetsAt": 3722,
+            "isUsingOverage": False,
+        },
+        now=0.0,
+    )
+    assert tok is not None
+    plain = tok.plain
+    assert "claude" in plain and "5h" in plain and "↻1h02m" in plain
+
+
+def test_claude_usage_token_marks_overage():
+    from contremaitre.tui import _claude_usage_token
+
+    tok = _claude_usage_token(
+        {"status": "allowed", "rateLimitType": "five_hour", "resetsAt": 0, "isUsingOverage": True},
+        now=0.0,
+    )
+    assert tok is not None and "overage" in tok.plain
+
+
+def test_claude_usage_token_none_when_empty():
+    from contremaitre.tui import _claude_usage_token
+
+    assert _claude_usage_token(None) is None

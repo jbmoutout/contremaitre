@@ -106,6 +106,55 @@ class OpencodeBoundaryTest(unittest.TestCase):
             self.assertIn("--session", cmd)
             self.assertIn("sess", cmd)
 
+    def _build_with_opencode_config(self, mount_mode: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", f"20260605-{root.name}")
+        paths.run_dir.mkdir(parents=True)
+        worktree = root / "worktree"
+        worktree.mkdir()
+        state = root / "state"
+        state.mkdir()
+        cfg = root / "synth-opencode.json"
+        cfg.write_text("{}", encoding="utf-8")
+        config = RunConfig(
+            repo=root,
+            base="main",
+            runs_root=root / "runs",
+            run_slug="t",
+            actor_mode=ActorMode.OPENCODE,
+            docker_image="img",
+            opencode_config=cfg,
+        )
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "k"}, clear=False):
+            build_docker_command(
+                config=config,
+                paths=paths,
+                worktree=worktree,
+                state_dir=state,
+                mount_mode=mount_mode,
+                model="m",
+                prompt="p",
+                session_id=None,
+                extra_mounts=[],
+                role="sim",
+            )
+        return worktree
+
+    def test_ro_mount_precreates_opencode_json_mountpoint(self):
+        # A codex-agent mix runs the opencode SIM with /app:ro and no opencode.json
+        # in the worktree (codex never emitted it); docker can't create the
+        # bind-mount target on a read-only /app, so build_docker_command does.
+        worktree = self._build_with_opencode_config("ro")
+        self.assertTrue((worktree / "opencode.json").exists())
+
+    def test_rw_mount_does_not_precreate_opencode_json(self):
+        # For the RW agent docker creates the mountpoint itself — don't pollute
+        # the worktree pre-emptively.
+        worktree = self._build_with_opencode_config("rw")
+        self.assertFalse((worktree / "opencode.json").exists())
+
     def test_opencode_docker_command_passes_explicit_proxy_only_by_name(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -416,3 +465,51 @@ class GhPublisherPreconditionsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZenKeyClassificationTest(unittest.TestCase):
+    """build_docker_command must require OPENROUTER_API_KEY only for keyed models,
+    matching preflight's `_check_openrouter_key` (both via `is_zen_model`) — else a
+    Zen-only run that passes preflight would fail here at launch (F1)."""
+
+    def _build(self, model: str):
+        from contremaitre.actors import build_docker_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = build_run_paths(root / "runs", f"20260606-{root.name}")
+            paths.run_dir.mkdir(parents=True)
+            worktree = root / "wt"
+            worktree.mkdir()
+            config = RunConfig(
+                repo=root,
+                base="main",
+                runs_root=root / "runs",
+                run_slug="t",
+                actor_mode=ActorMode.OPENCODE,
+                docker_image="img",
+            )
+            return build_docker_command(
+                config=config,
+                paths=paths,
+                worktree=worktree,
+                state_dir=root,
+                mount_mode="rw",
+                model=model,
+                prompt="p",
+                session_id=None,
+                role="agent",
+            )
+
+    def test_zen_model_needs_no_key(self):
+        # No OPENROUTER_API_KEY in env, free Zen model → must NOT raise.
+        with patch.dict(os.environ, {}, clear=True):
+            cmd, _ = self._build("opencode/deepseek-v4-flash-free")
+        self.assertEqual(cmd[:3], ["docker", "run", "-d"])
+
+    def test_non_zen_model_requires_key(self):
+        from contremaitre.actors import ActorError
+
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(ActorError):
+                self._build("openrouter/anthropic/claude-sonnet-4.6")

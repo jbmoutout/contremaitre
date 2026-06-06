@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from contremaitre.fixture import init_fixture
 from contremaitre.models import ActorMode, Caps, RunConfig
-from contremaitre.preflight import run_preflight
+from contremaitre.preflight import _check_network_policy, run_preflight
 
 
 class PreflightTest(unittest.TestCase):
@@ -128,6 +128,39 @@ class PreflightTest(unittest.TestCase):
         self.assertTrue(report.passed, report.failure_summary())
         self.assertEqual("WARN", self._status_by_name(report)["openrouter_key"])
 
+    def test_codex_role_open_egress_warns(self):
+        # --allow-open-egress is the explicit override (warned), not a hard fail.
+        config = self._config(actor_mode=ActorMode.CLI, allow_open_egress=True)
+        self.assertEqual(_check_network_policy(config).status, "WARN")
+
+    def test_codex_role_no_policy_no_flag_fails(self):
+        # Default is locked: a codex role with neither an explicit policy nor the
+        # override (i.e. auto-provision failed) must refuse, not run open.
+        config = self._config(actor_mode=ActorMode.CLI, allow_open_egress=False)
+        self.assertEqual(_check_network_policy(config).status, "FAIL")
+
+    def test_codex_sim_no_policy_no_flag_fails(self):
+        # Reverse mix: opencode agent + codex SIM, no policy/flag → FAIL.
+        config = self._config(
+            actor_mode=ActorMode.OPENCODE,
+            sim_actor_mode=ActorMode.CLI,
+            allow_open_egress=False,
+        )
+        self.assertEqual(_check_network_policy(config).status, "FAIL")
+
+    def test_codex_role_passes_with_explicit_lock(self):
+        config = self._config(
+            actor_mode=ActorMode.CLI,
+            docker_network="contremaitre-cli-egress",
+            https_proxy="http://contremaitre-egress-proxy:3128",
+        )
+        self.assertEqual(_check_network_policy(config).status, "PASS")
+
+    def test_pure_opencode_still_allows_open_egress(self):
+        # The flag remains a valid opt-in for a non-codex run (WARN, not FAIL).
+        config = self._config(actor_mode=ActorMode.OPENCODE, allow_open_egress=True)
+        self.assertEqual(_check_network_policy(config).status, "WARN")
+
     def _config(self, **overrides):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -171,3 +204,46 @@ class PreflightTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CliNetworkPolicyTest(unittest.TestCase):
+    """F4: a CLI role's egress preflight must require BOTH an internal network AND
+    an https proxy (matching cli_actor._assert_egress_locked) — a half-configured
+    run that passes a generic 'either' check would be refused on the first turn."""
+
+    def _cfg(self, **over):
+        return RunConfig(
+            repo=Path("/tmp"),
+            base="main",
+            runs_root=Path("/tmp/runs"),
+            run_slug="t",
+            actor_mode=ActorMode.CLI,
+            **over,
+        )
+
+    def test_cli_only_network_fails(self):
+        self.assertEqual(_check_network_policy(self._cfg(docker_network="net")).status, "FAIL")
+
+    def test_cli_only_proxy_fails(self):
+        self.assertEqual(
+            _check_network_policy(self._cfg(https_proxy="http://p:3128")).status, "FAIL"
+        )
+
+    def test_cli_both_layers_pass(self):
+        cfg = self._cfg(docker_network="net", https_proxy="http://p:3128")
+        self.assertEqual(_check_network_policy(cfg).status, "PASS")
+
+    def test_cli_allow_open_egress_warns(self):
+        self.assertEqual(_check_network_policy(self._cfg(allow_open_egress=True)).status, "WARN")
+
+    def test_opencode_still_accepts_either(self):
+        # Unchanged for opencode: a single network OR proxy is sufficient.
+        cfg = RunConfig(
+            repo=Path("/tmp"),
+            base="main",
+            runs_root=Path("/tmp/runs"),
+            run_slug="t",
+            actor_mode=ActorMode.OPENCODE,
+            docker_network="net",
+        )
+        self.assertEqual(_check_network_policy(cfg).status, "PASS")

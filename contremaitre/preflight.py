@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .jsonlog import write_json
-from .models import ActorMode, RunConfig, RunPaths
+from .models import ActorMode, RunConfig, RunPaths, is_zen_model
 
 
 class PreflightError(RuntimeError):
@@ -57,19 +58,45 @@ class PreflightReport:
         return "; ".join(f"{check.name}: {check.message}" for check in failures)
 
 
+def _active_cli_tools(config: RunConfig) -> set[str]:
+    """The CLI tool(s) in play this run — agent and SIM may differ (cross-CLI)."""
+
+    tools: set[str] = set()
+    if config.actor_mode == ActorMode.CLI:
+        tools.add(config.cli_tool)
+    if (config.sim_actor_mode or config.actor_mode) == ActorMode.CLI:
+        tools.add(config.sim_cli_tool or config.cli_tool)
+    return tools
+
+
 def run_preflight(config: RunConfig) -> PreflightReport:
-    checks = [_check_repo(config)]
-    if config.actor_mode == ActorMode.OPENCODE:
-        checks.extend(
-            [
-                _check_opencode_config(config),
-                _check_docker_image(config),
-                _check_opencode_binary(config),
-                _check_readonly_mount(config),
-                _check_network_policy(config),
-                _check_openrouter_key(config),
-            ]
-        )
+    # The agent uses actor_mode; the SIM may override it (per-role mixing), so
+    # we validate the UNION of both runtimes' requirements. OpenRouter is only
+    # checked if opencode is in play; codex auth only if the CLI actor is.
+    modes = {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    funcs = [_check_repo]
+    if ActorMode.OPENCODE in modes:
+        funcs += [
+            _check_opencode_config,
+            _check_docker_image,
+            _check_opencode_binary,
+            _check_readonly_mount,
+            _check_network_policy,
+            _check_openrouter_key,
+        ]
+    if ActorMode.CLI in modes:
+        # CLI actor: no OpenRouter key (the CLI uses the operator's subscription),
+        # but the SAME egress policy applies (the in-container token is
+        # long-lived), plus an auth-source check per ACTIVE CLI tool — so a mixed
+        # codex+claude run validates both the codex token and the claude OAuth token.
+        funcs += [_check_docker_image, _check_readonly_mount, _check_network_policy]
+        for tool in sorted(_active_cli_tools(config)):
+            funcs.append(_check_claude_auth if tool == "claude" else _check_codex_auth)
+    # Dedupe by function identity (image/readonly/network are shared) so each
+    # check runs once even when both runtimes are active.
+    seen: set = set()
+    ordered = [f for f in funcs if not (f in seen or seen.add(f))]
+    checks = [f(config) for f in ordered]
     passed = all(check.status != "FAIL" for check in checks)
     return PreflightReport(passed=passed, checks=checks)
 
@@ -185,6 +212,28 @@ def _check_readonly_mount(config: RunConfig) -> PreflightCheck:
 
 
 def _check_network_policy(config: RunConfig) -> PreflightCheck:
+    cli_active = ActorMode.CLI in {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    # A CLI role's egress is locked by default and the runner requires BOTH layers
+    # — an `--internal` docker network AND an allowlisting https proxy (exactly
+    # `cli_actor._assert_egress_locked`). A generic "either is set" check would
+    # pass a half-configured run that the first CLI turn then refuses, so gate on
+    # BOTH here. `_maybe_provision_cli_egress` normally sets both before we land.
+    if cli_active and not config.allow_open_egress:
+        if config.docker_network and config.https_proxy:
+            return _pass(
+                "network_policy",
+                "CLI egress locked (internal docker network + allowlist https proxy)",
+                {"docker_network": config.docker_network, "https_proxy": True},
+            )
+        return _fail(
+            "network_policy",
+            "CLI role requires BOTH an --internal docker_network and an "
+            "allowlisting --https-proxy (or --allow-open-egress); auto-provisioning "
+            "did not set both — check Docker is up.",
+            {"docker_network": config.docker_network, "https_proxy": bool(config.https_proxy)},
+        )
+    # opencode (or a CLI role explicitly opened): either a proxy or a network is
+    # acceptable; `--allow-open-egress` is the explicit open override.
     explicit_proxy = bool(config.http_proxy or config.https_proxy)
     explicit_network = bool(config.docker_network)
     if explicit_proxy or explicit_network:
@@ -210,29 +259,99 @@ def _check_network_policy(config: RunConfig) -> PreflightCheck:
     )
 
 
+def _check_cli_auth(config: RunConfig) -> PreflightCheck:
+    """Dispatch the CLI actor's auth-source check by `cli_tool`."""
+
+    if config.cli_tool == "claude":
+        return _check_claude_auth(config)
+    return _check_codex_auth(config)
+
+
+def _check_claude_auth(config: RunConfig) -> PreflightCheck:
+    """Validate the operator's claude headless OAuth token for CLI actor mode.
+
+    claude runs in-container off `CLAUDE_CODE_OAUTH_TOKEN` (from
+    `claude setup-token`), forwarded by name. We only confirm the env var is
+    set — the token is opaque and long-lived, so there's no expiry to check, and
+    `claude` need not be on the host PATH (it's baked into the runtime image).
+    """
+
+    from .cli_actor import _CLAUDE_OAUTH_ENV
+
+    if not os.environ.get(_CLAUDE_OAUTH_ENV):
+        return _fail(
+            "claude_auth",
+            f"{_CLAUDE_OAUTH_ENV} not set; run `claude setup-token` and export it",
+            {},
+        )
+    return _pass("claude_auth", "claude OAuth token present", {})
+
+
+def _check_codex_auth(config: RunConfig) -> PreflightCheck:
+    """Validate the operator's codex subscription token for CLI actor mode.
+
+    The CLI actor re-seeds a neutered copy of `~/.codex/auth.json` into each
+    container; here we confirm the source exists and its access token isn't
+    about to expire (codex would then try — and, with the neutered token,
+    fail — to refresh mid-run). The caller only runs this when codex is an active
+    CLI tool (agent or SIM), so it no longer gates on `config.cli_tool` itself.
+    """
+
+    from .cli_actor import _access_token_exp
+
+    auth = Path.home() / ".codex" / "auth.json"
+    if not auth.exists():
+        return _fail("codex_auth", f"{auth} not found; run codex once to log in", {})
+    exp = _access_token_exp(auth)
+    if exp is None:
+        return _warn("codex_auth", "codex access token present (opaque; expiry unknown)", {})
+    remaining = exp - int(time.time())
+    if remaining <= 24 * 3600:
+        # WARN, not FAIL: a near-expiry (or expired) token is RECOVERABLE — the
+        # runner host-refreshes it in `CodexDriver.prepare_home` before each turn
+        # (real refresh_token, host-side, never in a container) and hard-fails
+        # there if it can't renew. Failing preflight would abort the run before
+        # that refresh ever runs (preflight precedes actor setup), making the
+        # recovery path unreachable.
+        return _warn(
+            "codex_auth",
+            f"codex access token expires in ~{remaining // 3600}h; the runner will "
+            "attempt a host-side refresh before launch (run `codex login` if it can't).",
+            {"remaining_s": remaining},
+        )
+    return _pass(
+        "codex_auth",
+        f"codex subscription token present and valid (~{remaining // 3600}h left)",
+        {"remaining_s": remaining},
+    )
+
+
 def _check_openrouter_key(config: RunConfig) -> PreflightCheck:
     if config.skip_openrouter_key_check:
         return _warn("openrouter_key", "OpenRouter key check skipped", {})
+    # Free OpenCode Zen models (opencode/*) don't need a key — the opencode
+    # binary has built-in access — and a CLI role (codex/claude) ignores its
+    # opencode-namespaced model entirely. Decide on the SELECTED models first:
+    # when none is a non-Zen slug, the key is irrelevant to this run, so don't
+    # hit the network to verify it (a present-but-unused key, or a verification
+    # failure behind a corporate/self-signed-cert proxy, must not block a
+    # Zen-only or pure-CLI run).
+    selected = [m for m in (config.agent_model, config.sim_model, config.extra_reviewer_model) if m]
+    non_free = [m for m in selected if not is_zen_model(m)]
     key = os.environ.get(config.openrouter_env_var)
-    if not key:
-        # Free OpenCode Zen models (opencode/*) don't need a key — the
-        # opencode binary has built-in access. Only fail when a non-Zen
-        # model was selected (any OpenRouter slug would need the key).
-        selected = [
-            m for m in (config.agent_model, config.sim_model, config.extra_reviewer_model) if m
-        ]
-        non_free = [m for m in selected if not m.startswith("opencode/")]
-        if non_free:
-            return _fail(
-                "openrouter_key",
-                f"{config.openrouter_env_var} is not set and non-free model(s) selected: "
-                + ", ".join(non_free),
-                {"non_free_models": non_free},
-            )
+    if not non_free:
+        note = "present but unused" if key else "not set"
         return _pass(
             "openrouter_key",
-            f"{config.openrouter_env_var} is not set; using free OpenCode Zen models only",
+            f"no non-free model selected; OpenRouter key {note} (free OpenCode Zen / CLI only)",
             {"models": selected},
+        )
+    if not key:
+        return _fail(
+            "openrouter_key",
+            f"{config.openrouter_env_var} is not set and non-free model(s) selected: "
+            + ", ".join(non_free),
+            {"non_free_models": non_free},
         )
     try:
         info = _fetch_openrouter_key(config.openrouter_key_url, key)

@@ -34,6 +34,13 @@ ENV PATH="/root/.local/bin:${PATH}"
 RUN curl -fsSL https://opencode.ai/install | bash
 ENV PATH="/root/.opencode/bin:${PATH}"
 
+# Frontier CLIs for ActorMode.CLI (run codex/claude headless AS agent/SIM on the
+# operator's subscription) + ripgrep, which both CLIs reach for by default
+# (without it codex falls back to slower grep).
+RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm i -g @openai/codex @anthropic-ai/claude-code
+
 # mattpocock/skills installed globally so /improve-codebase-architecture
 # is available to opencode regardless of which target repo is mounted.
 RUN npx -y skills@latest add mattpocock/skills --all --global

@@ -48,6 +48,51 @@ class TerminalVerdict(str, Enum):
 class ActorMode(str, Enum):
     FAKE = "fake"
     OPENCODE = "opencode"
+    # Drive a frontier CLI (currently codex) headless inside the per-run
+    # container AS the agent/SIM, on the operator's subscription. See
+    # cli_actor.CliActorRunner for the auth + egress-lock handling.
+    CLI = "cli"
+
+
+def is_zen_model(model: str) -> bool:
+    """True for a free OpenCode Zen model (`opencode/...`), which the opencode
+    binary reaches via built-in access — no `OPENROUTER_API_KEY` needed.
+
+    The single source of truth for "does this opencode model need the key", shared
+    by preflight (`_check_openrouter_key`) and the runner (`build_docker_command`)
+    so a green preflight can't turn into a runtime "key required" failure. Any
+    other slug (OpenRouter, incl. `...:free`) goes through the keyed API.
+    """
+
+    return bool(model) and model.startswith("opencode/")
+
+
+def role_model_label(
+    *,
+    actor_mode,
+    opencode_model: str,
+    codex_model: str,
+    codex_effort: str,
+    cli_tool: str = "codex",
+    claude_model: str = "",
+    claude_effort: str = "high",
+) -> str:
+    """Human label for a role's model. A CLI role shows its CLI-native model
+    + effort (codex or claude, per `cli_tool`); any other runtime shows the
+    opencode/OpenRouter slug.
+
+    Used by the launch recap, the TUI header, and `stats.json` so a CLI role
+    never displays the (ignored) opencode slug. Accepts `actor_mode` as either an
+    `ActorMode` or its string value. `cli_tool` defaults to "codex" so existing
+    callers (and the codex path) are unchanged.
+    """
+
+    mode = actor_mode.value if isinstance(actor_mode, ActorMode) else actor_mode
+    if mode == ActorMode.CLI.value:
+        if cli_tool == "claude":
+            return f"{claude_model or 'claude default'} (claude, effort={claude_effort})"
+        return f"{codex_model} (codex, effort={codex_effort})"
+    return opencode_model
 
 
 class PublishMode(str, Enum):
@@ -102,6 +147,31 @@ class RunConfig:
     cli_reviewer: str = "none"
     check_cmds: tuple[str, ...] = ()
     actor_mode: ActorMode = ActorMode.FAKE
+    # Which frontier CLI to drive AS the agent/SIM when actor_mode is CLI:
+    # "codex" (ChatGPT subscription) or "claude" (Claude subscription, via a
+    # headless CLAUDE_CODE_OAUTH_TOKEN). See cli_actor.CliDriver.
+    cli_tool: str = "codex"
+    # codex-native model + reasoning effort for a codex role. agent_model/
+    # sim_model are opencode-namespaced and codex rejects them, so a codex role
+    # uses `codex_model` (the per-role model wins only if it is codex-native).
+    # `codex_effort` is pinned via `-c model_reasoning_effort=<effort>`.
+    codex_model: str = "gpt-5.5"
+    codex_effort: str = "high"
+    # claude-native model + effort for a claude CLI role (cli_tool="claude").
+    # `claude_model` empty → claude uses the operator's ~/.claude account default
+    # (don't hardcode a model). `claude_effort` maps to claude's `--effort`
+    # (low|medium|high|max), set every turn (resume-safe), mirroring codex_effort.
+    claude_model: str = ""
+    claude_effort: str = "high"
+    # Per-role actor override: the agent uses `actor_mode`; when this is set the
+    # SIM uses it instead, so a run can MIX runtimes (e.g. a codex agent with an
+    # opencode SIM, or vice versa). None means the SIM shares `actor_mode`.
+    sim_actor_mode: ActorMode | None = None
+    # Per-role CLI tool override (the cli_tool analog of sim_actor_mode): when set
+    # and the SIM runs the CLI runtime, the SIM drives this tool instead of
+    # `cli_tool` — so a run can mix the two CLI tools (codex agent + claude SIM,
+    # or the reverse). None means the SIM shares `cli_tool`.
+    sim_cli_tool: str | None = None
     sim_scenario: str = "approved"
     extra_reviewer_scenario: str = "approved"
     agent_scenario: str = "normal"

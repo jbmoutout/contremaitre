@@ -31,7 +31,7 @@ from typing import Protocol
 
 from . import events
 from .jsonlog import append_jsonl, append_text_event, append_transcript, read_jsonl
-from .models import ActorMode, RunConfig, RunPaths
+from .models import ActorMode, RunConfig, RunPaths, is_zen_model
 
 
 class ActorError(RuntimeError):
@@ -504,16 +504,65 @@ class OpencodeActorRunner:
         append_transcript(self.paths.transcript, speaker=speaker, phase=phase, text=text)
 
 
-def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
-    if config.actor_mode == ActorMode.FAKE:
+class CompositeActorRunner:
+    """Route agent and SIM turns to DIFFERENT backing runtimes.
+
+    Lets a run mix actors per role — e.g. a codex agent paired with an opencode
+    SIM. `agent_turn` goes to the agent runner; `sim_turn` / `sim_review` go to
+    the SIM runner. Each sub-runner owns its own state (sessions, containers);
+    they only share the role-separated `RunPaths` sinks.
+    """
+
+    def __init__(self, *, agent_runner: ActorRunner, sim_runner: ActorRunner):
+        self._agent = agent_runner
+        self._sim = sim_runner
+
+    def agent_turn(self, message: str) -> ActorOutput:
+        return self._agent.agent_turn(message)
+
+    def sim_turn(self, message: str) -> ActorOutput:
+        return self._sim.sim_turn(message)
+
+    def sim_review(self, **kwargs) -> ActorOutput:
+        return self._sim.sim_review(**kwargs)
+
+
+def _make_single_runner(
+    mode: ActorMode, *, config: RunConfig, paths: RunPaths, tool: str | None = None
+) -> ActorRunner:
+    if mode == ActorMode.FAKE:
         return FakeActorRunner(
             paths=paths,
             agent_scenario=config.agent_scenario,
             sim_scenario=config.sim_scenario,
         )
-    if config.actor_mode == ActorMode.OPENCODE:
+    if mode == ActorMode.OPENCODE:
         return OpencodeActorRunner(config=config, paths=paths)
-    raise ActorError(f"unknown actor mode: {config.actor_mode}")
+    if mode == ActorMode.CLI:
+        # Lazy import: cli_actor imports this module for the shared detached
+        # runner, so a top-level import here would be a cycle.
+        from .cli_actor import CliActorRunner
+
+        return CliActorRunner(config=config, paths=paths, tool=tool or config.cli_tool)
+    raise ActorError(f"unknown actor mode: {mode}")
+
+
+def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
+    agent_mode = config.actor_mode
+    sim_mode = config.sim_actor_mode or config.actor_mode
+    agent_tool = config.cli_tool
+    sim_tool = config.sim_cli_tool or config.cli_tool
+    # A single runner only when the SIM matches the agent on BOTH runtime and (for
+    # the CLI runtime) tool. Two CLI roles with different tools — codex agent +
+    # claude SIM, or the reverse — need a composite of two CliActorRunners (their
+    # per-run homes are tool-namespaced, so they never collide).
+    same_tool = not (agent_mode == ActorMode.CLI and sim_tool != agent_tool)
+    if sim_mode == agent_mode and same_tool:
+        return _make_single_runner(agent_mode, config=config, paths=paths, tool=agent_tool)
+    return CompositeActorRunner(
+        agent_runner=_make_single_runner(agent_mode, config=config, paths=paths, tool=agent_tool),
+        sim_runner=_make_single_runner(sim_mode, config=config, paths=paths, tool=sim_tool),
+    )
 
 
 def build_docker_command(
@@ -531,8 +580,12 @@ def build_docker_command(
 ) -> tuple[list[str], dict[str, str]]:
     env = os.environ.copy()
     env_var = config.openrouter_env_var
-    if env_var not in env:
-        raise ActorError(f"{env_var} is required for opencode actor mode")
+    # Free OpenCode Zen models (`opencode/...`) use the opencode binary's built-in
+    # access — no key. Only a keyed (OpenRouter) model requires the env var. This
+    # mirrors preflight's `_check_openrouter_key` (both via `is_zen_model`), so a
+    # Zen-only run that passes preflight doesn't then fail here.
+    if not is_zen_model(model) and env_var not in env:
+        raise ActorError(f"{env_var} is required for opencode model {model!r}")
     proxy_vars: list[str] = []
     if config.http_proxy:
         env["HTTP_PROXY"] = config.http_proxy
@@ -591,6 +644,15 @@ def build_docker_command(
         for key, value in config.deps_volume.runtime_env:
             cmd.extend(["-e", f"{key}={value}"])
     if config.opencode_config:
+        # opencode.json is bind-mounted onto /app/opencode.json. When /app is
+        # read-only (the SIM / review roles) docker can't CREATE that mountpoint
+        # unless the worktree already has the file. After an opencode AGENT turn
+        # it does — the RW mount leaves the empty mountpoint behind — but after a
+        # codex agent turn (a mixed run) it does not, so the SIM's :ro mount fails
+        # with "read-only file system". Pre-create the target; a no-op for the RW
+        # agent and when opencode already emitted it.
+        if mount_mode == "ro":
+            (worktree / "opencode.json").touch(exist_ok=True)
         cmd.extend(["-v", f"{config.opencode_config}:/app/opencode.json:ro"])
     for host_path, container_path, mode in extra_mounts or []:
         cmd.extend(["-v", f"{host_path}:{container_path}:{mode}"])

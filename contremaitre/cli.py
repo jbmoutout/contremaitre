@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from . import defaults as _defaults
 from .envfile import load_dotenv_defaults
 from .fixture import init_fixture
-from .models import ActorMode, Caps, PublishMode, RunConfig
+from .models import ActorMode, Caps, PublishMode, RunConfig, role_model_label
 from .orchestrator import run
 from .paths import slugify
 from .preflight import run_preflight
@@ -182,6 +182,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value
+    )
+    run_p.add_argument(
+        "--cli-tool",
+        choices=["codex", "claude"],
+        default="codex",
+        help="Frontier CLI to drive as agent/SIM when --actor cli (codex or claude)",
+    )
+    run_p.add_argument(
+        "--codex-model",
+        default="gpt-5.5",
+        help="codex-native model for a codex role (opencode-namespaced --agent/sim-model "
+        "are rejected by codex and fall back to this)",
+    )
+    run_p.add_argument(
+        "--codex-effort",
+        choices=["minimal", "low", "medium", "high", "xhigh"],
+        default="high",
+        help="codex reasoning effort (-c model_reasoning_effort) for a codex role",
+    )
+    run_p.add_argument(
+        "--claude-model",
+        default="",
+        help="claude model for a claude role (e.g. opus / claude-opus-4-8); "
+        "empty uses the ~/.claude account default",
+    )
+    run_p.add_argument(
+        "--claude-effort",
+        choices=["low", "medium", "high", "max"],
+        default="high",
+        help="claude effort (--effort) for a claude role",
+    )
+    run_p.add_argument(
+        "--sim-actor",
+        choices=[mode.value for mode in ActorMode],
+        default=None,
+        help="Override the SIM's runtime (default: same as --actor); lets a codex "
+        "agent pair with an opencode SIM, or the reverse",
+    )
+    run_p.add_argument(
+        "--sim-cli-tool",
+        choices=["codex", "claude"],
+        default=None,
+        help="Override the SIM's CLI tool when the SIM runs --actor cli (default: "
+        "same as --cli-tool); lets a codex agent pair with a claude SIM, or the reverse",
     )
     run_p.add_argument("--run-slug", default="run")
     run_p.add_argument(
@@ -509,6 +553,7 @@ def _run_cmd(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("aborted", file=sys.stderr)
         return 130
+    _maybe_provision_cli_egress(args)
     config = _config_from_args(args, repo=cache_path)
     rc = _ensure_default_image_built(config)
     if rc != 0:
@@ -930,6 +975,201 @@ def _pick_models_interactive(
     return agent, sim, extra, picker_args
 
 
+def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
+    """True when a codex (CLI) role should auto-provision its locked egress.
+
+    Checks BOTH roles (agent + SIM): a codex role in either position carries the
+    exfiltratable in-container JWT, so the *default* is to lock. The lock is the
+    secure default, not mandatory — `--allow-open-egress` is the explicit,
+    warned override (the operator accepts the token risk, e.g. so the agent can
+    install deps from PyPI/npm that the provider-only allowlist would block).
+    Explicit `--docker-network`/`--https-proxy` also win (operator's own policy).
+    """
+
+    modes = {getattr(args, "actor", None), getattr(args, "sim_actor", None)}
+    if ActorMode.CLI.value not in modes:
+        return False
+    if getattr(args, "allow_open_egress", False):
+        return False
+    return not (getattr(args, "docker_network", None) or getattr(args, "https_proxy", None))
+
+
+def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
+    """Stand up the shared allowlist egress proxy and point the run at it.
+
+    Fires whenever a codex (CLI) role is active with no explicit
+    `--docker-network`/`--https-proxy` and without `--allow-open-egress` (the
+    explicit open-egress override). Mutates `args` so the resolved config (and
+    the runner) see a locked egress. Failure is non-fatal here — preflight and
+    the runner still enforce the egress requirement, so a provision failure
+    surfaces as a clean "egress not configured" refusal rather than a crash.
+    """
+
+    if not _cli_egress_is_auto(args):
+        return
+    from .cli_egress import ensure_egress_proxy
+
+    try:
+        network, proxy = ensure_egress_proxy()
+    except Exception as exc:  # noqa: BLE001 - degrade to the enforced refusal
+        print(f"[warn] CLI egress auto-provision failed: {exc}", file=sys.stderr)
+        return
+    args.docker_network = network
+    args.https_proxy = proxy
+    print(f"[info] CLI egress: {network} + allowlist proxy ({proxy})")
+
+
+def _cli_status_lines(args: argparse.Namespace) -> tuple[str, str]:
+    """(token_line, egress_line) describing the CLI run's posture, per cli_tool."""
+
+    tool = getattr(args, "cli_tool", "codex")
+    if tool == "claude":
+        token_line = _claude_token_line()
+    else:
+        token_line = _codex_token_line()
+
+    if getattr(args, "allow_open_egress", False):
+        # The blast radius differs: codex's refresh token is neutered (bounded to
+        # ~10-day quota abuse), claude's OAuth token is long-lived and unneutered.
+        bound = (
+            "long-lived OAuth token, exfiltratable"
+            if tool == "claude"
+            else "bounded to ~10-day quota abuse: refresh token is neutered"
+        )
+        egress_line = f"egress: OPEN (--allow-open-egress) — token is exfiltratable ({bound})"
+    elif getattr(args, "docker_network", None) or getattr(args, "https_proxy", None):
+        net = getattr(args, "docker_network", None) or "(none)"
+        proxy = "yes" if getattr(args, "https_proxy", None) else "no"
+        egress_line = f"egress: locked (network={net}, proxy={proxy})"
+    else:
+        egress_line = "egress: auto-provision allowlist proxy on launch (provider domains only)"
+    return token_line, egress_line
+
+
+def _codex_token_line() -> str:
+    import time as _time
+
+    from .cli_actor import _access_token_exp
+
+    auth = Path.home() / ".codex" / "auth.json"
+    exp = _access_token_exp(auth) if auth.exists() else None
+    if exp:
+        return f"codex token: valid (~{(exp - int(_time.time())) // 3600}h left)"
+    if auth.exists():
+        return "codex token: present (opaque expiry)"
+    return "codex token: MISSING — run codex once to log in"
+
+
+def _claude_token_line() -> str:
+    from .cli_actor import _CLAUDE_OAUTH_ENV
+
+    if os.environ.get(_CLAUDE_OAUTH_ENV):
+        return f"claude token: present ({_CLAUDE_OAUTH_ENV} set)"
+    return f"claude token: MISSING — run `claude setup-token` and export {_CLAUDE_OAUTH_ENV}"
+
+
+def _pick_runtimes_interactive(args: argparse.Namespace) -> None:
+    """Prompt for the agent and SIM runtimes; set args.actor / args.sim_actor / args.cli_tool.
+
+    Runtime is per role: `opencode` (OpenRouter models) or the `cli` runtime with
+    a tool (`codex` / `claude`, both subscription CLIs). They can differ — a CLI
+    agent can pair with an opencode SIM, or the reverse. Enter keeps the current
+    choice. Skipped for a `fake` default (fixture runs) so the picker only shows
+    for real runs.
+
+    v1 limitation: a single `cli_tool` is shared by any CLI role, so codex-agent +
+    claude-SIM (two different CLI tools in one run) is not representable — the
+    agent's CLI tool wins.
+    """
+
+    current_agent = getattr(args, "actor", ActorMode.FAKE.value)
+    if current_agent == ActorMode.FAKE.value:
+        return  # fixture/smoke run — don't surface the runtime picker
+
+    current_tool = getattr(args, "cli_tool", "codex")
+    # (mode, tool, label). codex and claude both map to the `cli` runtime, carrying
+    # their tool so the picker can set args.cli_tool.
+    choices = [
+        (ActorMode.OPENCODE.value, None, "opencode  (OpenRouter models)"),
+        (ActorMode.CLI.value, "codex", "codex     (subscription CLI)"),
+        (ActorMode.CLI.value, "claude", "claude    (subscription CLI)"),
+    ]
+
+    def _pick(role: str, cur_mode: str, cur_tool: str) -> tuple[str, str | None]:
+        print()
+        print(f"  {role} runtime:")
+        for i, (val, tool, label) in enumerate(choices, start=1):
+            is_current = val == cur_mode and (val != ActorMode.CLI.value or tool == cur_tool)
+            marker = "  ← current" if is_current else ""
+            print(f"    {i}  {label}{marker}")
+        keep = cur_tool if cur_mode == ActorMode.CLI.value else cur_mode
+        try:
+            reply = input(f"  pick (Enter={keep}): ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply.isdigit():
+            idx = int(reply) - 1
+            if 0 <= idx < len(choices):
+                val, tool, _ = choices[idx]
+                return val, tool
+        # Keep current: preserve the tool only when the current runtime is CLI.
+        return cur_mode, (cur_tool if cur_mode == ActorMode.CLI.value else None)
+
+    agent_mode, agent_tool = _pick("agent", current_agent, current_tool)
+    current_sim_tool = getattr(args, "sim_cli_tool", None) or agent_tool or current_tool
+    sim_mode, sim_tool = _pick(
+        "SIM", getattr(args, "sim_actor", None) or agent_mode, current_sim_tool
+    )
+    args.actor = agent_mode
+    # Only record a SIM override when it actually differs from the agent.
+    args.sim_actor = None if sim_mode == agent_mode else sim_mode
+    # cli_tool is per-role: the agent's CLI tool, and the SIM's only when it runs
+    # CLI and differs (codex agent + claude SIM, or the reverse). When the agent
+    # isn't CLI but the SIM is, the SIM's tool rides on `cli_tool`.
+    if agent_mode == ActorMode.CLI.value:
+        args.cli_tool = agent_tool
+        args.sim_cli_tool = (
+            sim_tool if (sim_mode == ActorMode.CLI.value and sim_tool != agent_tool) else None
+        )
+    elif sim_mode == ActorMode.CLI.value:
+        args.cli_tool = sim_tool
+        args.sim_cli_tool = None
+    else:
+        args.sim_cli_tool = None
+
+
+def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
+    """Launch screen for `--actor cli` (codex/claude on the operator's plan).
+
+    Subscription-driven, so there's no OpenRouter key probe or model picker —
+    instead a concise status: which tool, whether the codex token is valid, and
+    whether egress is locked (the CLI actor refuses to run on open egress unless
+    --allow-open-egress). yes/non-TTY mode collapses to one info line.
+    """
+
+    tool = getattr(args, "cli_tool", "codex")
+    yes_mode = (
+        getattr(args, "yes", False) or getattr(args, "no_prompt", False) or not sys.stdin.isatty()
+    )
+    token_line, egress_line = _cli_status_lines(args)
+
+    if yes_mode:
+        print(f"[info] actor=cli tool={tool}; {token_line}; {egress_line}")
+        return True
+
+    print()
+    print(_RULE)
+    print(f"  {_b('contremaitre')} · CLI actor ({tool})")
+    print(f"  {token_line}")
+    print(f"  {egress_line}")
+    print(_RULE)
+    try:
+        reply = input("  launch? [Y/n] ").strip().lower()
+    except EOFError:
+        return True
+    return reply in ("", "y", "yes")
+
+
 def _launch_screen(
     *,
     args: argparse.Namespace,
@@ -963,6 +1203,20 @@ def _launch_screen(
     no_prompt = getattr(args, "no_prompt", False)
     yes_mode = getattr(args, "yes", False) or no_prompt or not sys.stdin.isatty()
 
+    # Per-role runtime selection (interactive only): agent and SIM can each run
+    # opencode or codex. Sets args.actor / args.sim_actor; flags are the
+    # non-interactive defaults.
+    if not yes_mode:
+        _pick_runtimes_interactive(args)
+    agent_mode = getattr(args, "actor", ActorMode.FAKE.value)
+    sim_mode = getattr(args, "sim_actor", None) or agent_mode
+
+    # No opencode role → a pure CLI run (codex/claude): the smaller CLI status
+    # screen, no OpenRouter probe or model picker.
+    if ActorMode.OPENCODE.value not in (agent_mode, sim_mode):
+        return _cli_launch_screen(args=args)
+    any_cli = ActorMode.CLI.value in (agent_mode, sim_mode)
+
     if yes_mode:
         # Skip the network probe in non-TTY mode — we only need presence
         # in the log line, and probing on every CI invocation is wasted
@@ -991,6 +1245,14 @@ def _launch_screen(
     # context.
     _print_key_banner(env_var, key_state)
 
+    # When one role is a CLI tool (mixed run), surface its token + egress posture
+    # alongside the OpenRouter banner so the operator sees both constraints.
+    if any_cli:
+        token_line, egress_line = _cli_status_lines(args)
+        cli_tool = getattr(args, "cli_tool", "codex")
+        cli_role = "agent" if agent_mode == ActorMode.CLI.value else "SIM"
+        print(f"  {cli_tool} {cli_role}: {token_line}; {egress_line}")
+
     agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
     sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
     extra_explicit = _has_flag_in(argv_for_explicit_check, "--extra-reviewer-model")
@@ -1000,8 +1262,10 @@ def _launch_screen(
         current_agent=getattr(args, "agent_model", ""),
         current_sim=getattr(args, "sim_model", ""),
         current_extra=getattr(args, "extra_reviewer_model", None),
-        pick_agent=not agent_explicit,
-        pick_sim=not sim_explicit,
+        # Only pick an OpenRouter model for a role that actually runs opencode;
+        # a codex role ignores it.
+        pick_agent=(agent_mode == ActorMode.OPENCODE.value) and not agent_explicit,
+        pick_sim=(sim_mode == ActorMode.OPENCODE.value) and not sim_explicit,
         pick_extra=not extra_explicit,
         # `extra_reviewer_model = "skip"` in defaults.toml flips the
         # extra-reviewer Enter behavior from "accept the suggestion" to
@@ -1114,8 +1378,32 @@ def _launch_screen(
     print(f"  target          {source_url}")
     print(f"  branch          {base}  {_d(f'({publish})')}")
     print()
-    print(f"  agent           {_b(args.agent_model)}")
-    print(f"  sim             {_b(args.sim_model)}")
+    agent_mode = getattr(args, "actor", ActorMode.OPENCODE.value)
+    sim_mode = getattr(args, "sim_actor", None) or agent_mode
+    codex_model = getattr(args, "codex_model", "gpt-5.5")
+    codex_effort = getattr(args, "codex_effort", "high")
+    cli_tool = getattr(args, "cli_tool", "codex")
+    sim_cli_tool = getattr(args, "sim_cli_tool", None) or cli_tool
+    claude_model = getattr(args, "claude_model", "")
+    claude_effort = getattr(args, "claude_effort", "high")
+    _label_kw = dict(
+        codex_model=codex_model,
+        codex_effort=codex_effort,
+        claude_model=claude_model,
+        claude_effort=claude_effort,
+    )
+    if agent_mode != sim_mode or cli_tool != sim_cli_tool:
+        agent_lbl = agent_mode if agent_mode != ActorMode.CLI.value else cli_tool
+        sim_lbl = sim_mode if sim_mode != ActorMode.CLI.value else sim_cli_tool
+        print(f"  runtime         {_b(f'agent={agent_lbl}, sim={sim_lbl}')}")
+    print(
+        f"  agent           "
+        f"{_b(role_model_label(actor_mode=agent_mode, opencode_model=args.agent_model, cli_tool=cli_tool, **_label_kw))}"
+    )
+    print(
+        f"  sim             "
+        f"{_b(role_model_label(actor_mode=sim_mode, opencode_model=args.sim_model, cli_tool=sim_cli_tool, **_label_kw))}"
+    )
     if extra_model:
         print(f"  extra           {_b(extra_model)}")
     if cli_reviewer_choice in ("codex", "claude"):
@@ -1269,21 +1557,27 @@ def _probe_zen_model(model: str, *, timeout: float = 10.0) -> tuple[str, str | N
 
 
 def _ensure_default_image_built(config: RunConfig) -> int:
-    """Auto-build a known contremaitre image before opencode-mode runs.
+    """Auto-build a known contremaitre image before any real (non-fake) run.
 
-    Fires for `--actor opencode` and any image name that matches a shipped
-    variant. Rebuilds when:
+    Fires whenever the agent OR the SIM needs a container — `--actor opencode`,
+    `--actor cli` (codex), or a mixed/composite pair — and the image name
+    matches a shipped variant. The image is shared by both roles, so a single
+    build covers the mix. Rebuilds when:
     - The image doesn't exist, OR
     - Its `contremaitre.dockerfile-sha256` label is missing or mismatches the
       current Dockerfile contents (catches "Dockerfile edited, image not
-      rebuilt" — the failure mode that left python3/uv missing in the live
-      image even after the Dockerfile was updated).
+      rebuilt" — the failure mode that left python3/uv missing, and would
+      otherwise leave codex missing from a stale pre-codex image).
 
     Custom / third-party images are the operator's responsibility — preflight
     will surface a clean failure with the build hint.
     """
 
-    if config.actor_mode != ActorMode.OPENCODE:
+    # Build whenever any active role needs a container; only a pure-fake run
+    # (no agent and no SIM container) skips. Mirrors preflight's union check
+    # in `preflight.run_preflight`.
+    modes = {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    if modes <= {ActorMode.FAKE}:
         return 0
     auto_build_map = {
         _DEFAULT_IMAGE: _VARIANT_DOCKERFILES["base"],
@@ -1621,6 +1915,13 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         extra_reviewer_model=getattr(args, "extra_reviewer_model", None),
         cli_reviewer=getattr(args, "cli_reviewer", "none"),
         actor_mode=ActorMode(args.actor),
+        cli_tool=getattr(args, "cli_tool", "codex"),
+        codex_model=getattr(args, "codex_model", "gpt-5.5"),
+        codex_effort=getattr(args, "codex_effort", "high"),
+        claude_model=getattr(args, "claude_model", ""),
+        claude_effort=getattr(args, "claude_effort", "high"),
+        sim_actor_mode=(ActorMode(args.sim_actor) if getattr(args, "sim_actor", None) else None),
+        sim_cli_tool=getattr(args, "sim_cli_tool", None),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
         extra_reviewer_scenario=getattr(args, "extra_reviewer_scenario", "approved"),
@@ -1715,6 +2016,50 @@ def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
         # (treated as explicit) and never ask the operator.
         args.cli_reviewer = saved.cli_reviewer
         args._defaults_cli_reviewer_prefill = saved.cli_reviewer
+    # Runtime selection: a saved `actor`/`sim_actor` seeds the launch-screen
+    # runtime picker (and the non-interactive default). Already normalized to
+    # runtime values by `_defaults.load` ("codex" → "cli").
+    if saved.actor and not _has_flag_in(argv, "--actor") and hasattr(args, "actor"):
+        args.actor = saved.actor
+    if saved.sim_actor and not _has_flag_in(argv, "--sim-actor") and hasattr(args, "sim_actor"):
+        args.sim_actor = saved.sim_actor
+    # The operator-facing actor name ("codex"/"claude") carries the CLI tool; a
+    # saved `actor = "claude"` thus seeds args.cli_tool, since both normalize to
+    # the "cli" runtime above.
+    if saved.cli_tool and not _has_flag_in(argv, "--cli-tool") and hasattr(args, "cli_tool"):
+        args.cli_tool = saved.cli_tool
+    # `sim_actor = "claude"` (or "codex") in defaults.toml carries the SIM's CLI
+    # tool, enabling a saved cross-CLI mix.
+    if (
+        saved.sim_cli_tool
+        and not _has_flag_in(argv, "--sim-cli-tool")
+        and hasattr(args, "sim_cli_tool")
+    ):
+        args.sim_cli_tool = saved.sim_cli_tool
+    if (
+        saved.codex_model
+        and not _has_flag_in(argv, "--codex-model")
+        and hasattr(args, "codex_model")
+    ):
+        args.codex_model = saved.codex_model
+    if (
+        saved.codex_effort
+        and not _has_flag_in(argv, "--codex-effort")
+        and hasattr(args, "codex_effort")
+    ):
+        args.codex_effort = saved.codex_effort
+    if (
+        saved.claude_model
+        and not _has_flag_in(argv, "--claude-model")
+        and hasattr(args, "claude_model")
+    ):
+        args.claude_model = saved.claude_model
+    if (
+        saved.claude_effort
+        and not _has_flag_in(argv, "--claude-effort")
+        and hasattr(args, "claude_effort")
+    ):
+        args.claude_effort = saved.claude_effort
 
 
 def _extract_flag_value(args: list[str], flag: str, default: str) -> str:
@@ -1734,6 +2079,33 @@ def _has_flag_in(argv: list[str], flag: str) -> bool:
 
     prefix = f"{flag}="
     return any(item == flag or item.startswith(prefix) for item in argv)
+
+
+def _remove_flag(args: list[str], flag: str) -> None:
+    """Drop every `--flag value` / `--flag=value` occurrence from a passthrough
+    list, in place."""
+
+    prefix = f"{flag}="
+    i = 0
+    while i < len(args):
+        if args[i] == flag:
+            del args[i : i + 2]  # the flag and its separate value
+        elif args[i].startswith(prefix):
+            del args[i]
+        else:
+            i += 1
+
+
+def _set_flag_value(args: list[str], flag: str, value: str) -> None:
+    """Replace (or append) a `--flag value` pair in a passthrough list, in place.
+
+    Used to fold an interactive choice back into the flags forwarded to the
+    `contremaitre run` subprocess without leaving a duplicate the operator may
+    have passed explicitly.
+    """
+
+    _remove_flag(args, flag)
+    args.extend([flag, value])
 
 
 def _fetch_free_models() -> list[dict] | None:
@@ -1827,6 +2199,13 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         forwarded, "--cli-reviewer", _saved.cli_reviewer or "auto"
     )
     docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
+    # The TUI is a real-run surface: default the agent runtime to a real actor
+    # (opencode) rather than `contremaitre run`'s `fake` fixture default, so the
+    # per-role runtime picker actually appears on a bare `tui run` (the picker
+    # early-returns on a `fake` default). An explicit `--actor fake` still
+    # forces a fixture run.
+    actor = _extract_flag_value(forwarded, "--actor", _saved.actor or ActorMode.OPENCODE.value)
+    sim_actor = _extract_flag_value(forwarded, "--sim-actor", _saved.sim_actor or "") or None
     # Confirmation has to happen BEFORE the subprocess spawn, because once
     # Textual attaches, stdin is owned by the TUI and an `input()` in the
     # subprocess would block invisibly. Pass --yes downstream so the
@@ -1864,6 +2243,11 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         sim_model=sim_model,
         extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer_choice,
+        actor=actor,
+        sim_actor=sim_actor,
+        cli_tool=_extract_flag_value(forwarded, "--cli-tool", _saved.cli_tool or "codex"),
+        sim_cli_tool=_extract_flag_value(forwarded, "--sim-cli-tool", "")
+        or (_saved.sim_cli_tool or None),
         allow_open_egress=("--allow-open-egress" in forwarded),
         docker_network=_extract_flag_value(forwarded, "--docker-network", "") or None,
         http_proxy=_extract_flag_value(forwarded, "--http-proxy", "") or None,
@@ -1900,19 +2284,70 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     sim_model = _extract_flag_value(forwarded, "--sim-model", sim_model)
     extra_reviewer_model = _extract_flag_value(forwarded, "--extra-reviewer-model", "") or None
     cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", cli_reviewer_choice)
+    # Fold the per-role runtime choice (the picker may have changed it) back
+    # into the subprocess flags. The picker writes confirm_args.actor /
+    # .sim_actor; `contremaitre run` reads --actor / --sim-actor.
+    _set_flag_value(forwarded, "--actor", getattr(confirm_args, "actor", actor))
+    resolved_sim = getattr(confirm_args, "sim_actor", sim_actor)
+    if resolved_sim:
+        _set_flag_value(forwarded, "--sim-actor", resolved_sim)
+    else:
+        _remove_flag(forwarded, "--sim-actor")
+    # The picker also sets confirm_args.cli_tool (codex vs claude) when a CLI
+    # runtime is chosen; fold it back too. `contremaitre run` reads --cli-tool,
+    # and without this the subprocess silently defaults to codex even when the
+    # operator picked claude (and the TUI header would mislabel the role).
+    resolved_actor_value = getattr(confirm_args, "actor", actor)
+    if ActorMode.CLI.value in (resolved_actor_value, resolved_sim or resolved_actor_value):
+        _set_flag_value(forwarded, "--cli-tool", getattr(confirm_args, "cli_tool", "codex"))
+    # The SIM may run a DIFFERENT CLI tool (codex agent + claude SIM, or reverse);
+    # fold that back too, or clear it when the SIM shares the agent's tool.
+    resolved_sim_cli_tool = getattr(confirm_args, "sim_cli_tool", None)
+    if resolved_sim_cli_tool:
+        _set_flag_value(forwarded, "--sim-cli-tool", resolved_sim_cli_tool)
+    else:
+        _remove_flag(forwarded, "--sim-cli-tool")
     if "--yes" not in forwarded and "-y" not in forwarded:
         forwarded.append("--yes")
     if "--repo-cache" not in " ".join(forwarded):
         forwarded.extend(["--repo-cache", str(cache_path)])
     run_cmd = [sys.executable, "-m", "contremaitre", "run", *forwarded]
+    # TUI header labels: a codex role shows its model + effort, not the (ignored)
+    # opencode slug carried in agent_model/sim_model.
+    resolved_actor = getattr(confirm_args, "actor", actor)
+    resolved_sim_mode = resolved_sim or resolved_actor
+    codex_model = _extract_flag_value(forwarded, "--codex-model", _saved.codex_model or "gpt-5.5")
+    codex_effort = _extract_flag_value(forwarded, "--codex-effort", _saved.codex_effort or "high")
+    cli_tool = _extract_flag_value(forwarded, "--cli-tool", _saved.cli_tool or "codex")
+    sim_cli_tool = _extract_flag_value(forwarded, "--sim-cli-tool", "") or cli_tool
+    claude_model = _extract_flag_value(forwarded, "--claude-model", _saved.claude_model or "")
+    claude_effort = _extract_flag_value(
+        forwarded, "--claude-effort", _saved.claude_effort or "high"
+    )
+    _label_kw = dict(
+        codex_model=codex_model,
+        codex_effort=codex_effort,
+        claude_model=claude_model,
+        claude_effort=claude_effort,
+    )
     return tui.spawn_and_attach(
         runs_root=runs_root,
         run_slug=slugify(run_slug),
         run_cmd=run_cmd,
         refresh_hz=args.refresh_hz,
         discover_timeout_s=args.discover_timeout,
-        agent_model=agent_model,
-        sim_model=sim_model,
+        agent_model=role_model_label(
+            actor_mode=resolved_actor,
+            opencode_model=agent_model,
+            cli_tool=cli_tool,
+            **_label_kw,
+        ),
+        sim_model=role_model_label(
+            actor_mode=resolved_sim_mode,
+            opencode_model=sim_model,
+            cli_tool=sim_cli_tool,
+            **_label_kw,
+        ),
         extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer_choice,
         docker_image=docker_image,

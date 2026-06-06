@@ -110,7 +110,6 @@
 
   const TABS = [
     ["overview",     "overview"],
-    ["chat",         "chat"],
     ["conversation", "conversation"],
     ["timeline",     "timeline"],
     ["subagents",    "sub-agents"],
@@ -173,6 +172,9 @@
 
     <h2>initial prompt</h2>
     <div class="turn"><div class="turn-body"><pre>${esc(DATA.initial_prompt || "—")}</pre></div></div>
+
+    <h2>full conversation</h2>
+    <div id="chat-mount"></div>
   `;
 
   // ----- conversation -----
@@ -308,7 +310,9 @@
   // ----- chat (bubble + tool trace per turn) -----
 
   const chat = DATA.chat || { turns: [], totals: {}, duration: 0 };
-  const chatSec = document.getElementById("chat");
+  // The chat now lives inline in the overview, mounted under the initial
+  // prompt — there is no longer a standalone "chat" tab.
+  const chatSec = document.getElementById("chat-mount");
 
   function clock(s) {
     s = Math.round(s || 0);
@@ -423,7 +427,7 @@
         <div class="chat-turn ${role}">
           <div class="who-line">
             <span class="who">${role}</span>
-            <span class="when">+${clock(turn.rel || 0)}</span>
+            <span class="when"${turn.ts_synthetic ? ' title="approximate — codex emits no per-event timestamps"' : ""}>${turn.ts_synthetic ? "~" : "+"}${clock(turn.rel || 0)}</span>
           </div>
           <div class="chat-bubble ${text.trim() ? "" : "empty"}">${esc(text)}</div>
           ${trace}
