@@ -204,3 +204,40 @@ class PreflightTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CliNetworkPolicyTest(unittest.TestCase):
+    """F4: a CLI role's egress preflight must require BOTH an internal network AND
+    an https proxy (matching cli_actor._assert_egress_locked) — a half-configured
+    run that passes a generic 'either' check would be refused on the first turn."""
+
+    def _cfg(self, **over):
+        return RunConfig(
+            repo=Path("/tmp"), base="main", runs_root=Path("/tmp/runs"), run_slug="t",
+            actor_mode=ActorMode.CLI, **over,
+        )
+
+    def test_cli_only_network_fails(self):
+        self.assertEqual(_check_network_policy(self._cfg(docker_network="net")).status, "FAIL")
+
+    def test_cli_only_proxy_fails(self):
+        self.assertEqual(
+            _check_network_policy(self._cfg(https_proxy="http://p:3128")).status, "FAIL"
+        )
+
+    def test_cli_both_layers_pass(self):
+        cfg = self._cfg(docker_network="net", https_proxy="http://p:3128")
+        self.assertEqual(_check_network_policy(cfg).status, "PASS")
+
+    def test_cli_allow_open_egress_warns(self):
+        self.assertEqual(
+            _check_network_policy(self._cfg(allow_open_egress=True)).status, "WARN"
+        )
+
+    def test_opencode_still_accepts_either(self):
+        # Unchanged for opencode: a single network OR proxy is sufficient.
+        cfg = RunConfig(
+            repo=Path("/tmp"), base="main", runs_root=Path("/tmp/runs"), run_slug="t",
+            actor_mode=ActorMode.OPENCODE, docker_network="net",
+        )
+        self.assertEqual(_check_network_policy(cfg).status, "PASS")

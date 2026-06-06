@@ -54,6 +54,19 @@ class ActorMode(str, Enum):
     CLI = "cli"
 
 
+def is_zen_model(model: str) -> bool:
+    """True for a free OpenCode Zen model (`opencode/...`), which the opencode
+    binary reaches via built-in access — no `OPENROUTER_API_KEY` needed.
+
+    The single source of truth for "does this opencode model need the key", shared
+    by preflight (`_check_openrouter_key`) and the runner (`build_docker_command`)
+    so a green preflight can't turn into a runtime "key required" failure. Any
+    other slug (OpenRouter, incl. `...:free`) goes through the keyed API.
+    """
+
+    return bool(model) and model.startswith("opencode/")
+
+
 def role_model_label(
     *,
     actor_mode,

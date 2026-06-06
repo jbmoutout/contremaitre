@@ -350,14 +350,17 @@ class CodexAuthCheckTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
             self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "FAIL")
 
-    def test_fail_when_near_expiry(self):
+    def test_near_expiry_warns_not_fails(self):
+        # Near-expiry is RECOVERABLE: the runner host-refreshes in prepare_home
+        # before each turn (and hard-fails there if it can't). Failing preflight
+        # would abort before that refresh ever runs, so it must WARN, not FAIL.
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
             home = Path(tmp) / ".codex"
             home.mkdir(parents=True)
             (home / "auth.json").write_text(
                 json.dumps({"tokens": {"access_token": _fake_jwt(int(time.time()) + 60)}})
             )
-            self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "FAIL")
+            self.assertEqual(_check_codex_auth(_cli_config(Path(tmp))).status, "WARN")
 
 
 class TokenUsageRollupTest(unittest.TestCase):
@@ -1138,6 +1141,53 @@ class ActiveCliToolsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _cli_config(Path(tmp), cli_tool="claude", sim_actor_mode=ActorMode.OPENCODE)
             self.assertEqual(_active_cli_tools(cfg), {"claude"})
+
+
+# ===== F3: CLI turns emit the actor-start guardrail (telemetry parity) =====
+
+
+class CliActorStartEventTest(unittest.TestCase):
+    def _guardrails(self, paths):
+        return [
+            json.loads(line)
+            for line in paths.guardrail_events.read_text().splitlines()
+            if line.strip()
+        ]
+
+    def test_agent_turn_emits_actor_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, paths = _make_runner(Path(tmp), allow_open_egress=True)
+            runner.driver.parse_events = lambda *a, **k: ("ok", None, None, None)
+            with patch(
+                "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
+            ):
+                runner.agent_turn("hello")
+            starts = [e for e in self._guardrails(paths) if e.get("event") == "opencode_actor_start"]
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(starts[0]["role"], "agent")
+            self.assertEqual(starts[0]["tool"], "codex")
+            self.assertNotIn("reviewer_id", starts[0])  # only review turns tag it
+
+    def test_sim_review_emits_actor_start_with_reviewer_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, paths = _make_runner(Path(tmp), allow_open_egress=True)
+            d = Path(tmp) / "diff.patch"
+            d.write_text("diff")
+            sd = Path(tmp) / "settled.md"
+            sd.write_text("design")
+            runner.driver.parse_events = lambda *a, **k: ("LOOKS_GOOD", None, None, None)
+            with patch(
+                "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
+            ):
+                runner.sim_review(
+                    diff_file=d, settled_file=sd, scenario="approved", attempt=1, reviewer_id="extra"
+                )
+            starts = [
+                e
+                for e in self._guardrails(paths)
+                if e.get("event") == "opencode_actor_start" and e.get("role") == "review"
+            ]
+            self.assertEqual(starts[0]["reviewer_id"], "extra")
 
 
 if __name__ == "__main__":

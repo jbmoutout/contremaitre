@@ -71,8 +71,9 @@ import time
 from pathlib import Path
 from typing import Protocol
 
+from . import events
 from .actors import ActorError, ActorOutput, _run_detached_container
-from .jsonlog import append_transcript
+from .jsonlog import append_jsonl, append_transcript
 from .models import RunConfig, RunPaths
 
 # codex REQUIRES tokens.refresh_token present and non-empty (parser + refresh
@@ -703,6 +704,7 @@ class CliActorRunner:
             timeout_seconds=self.config.sim_timeout_seconds,
             phase="REVIEW",
             speaker="sim",
+            reviewer_id=reviewer_id,
             extra_mounts=((review_dir, "/review", "ro"),),
         )
 
@@ -743,6 +745,7 @@ class CliActorRunner:
         timeout_seconds: int,
         phase: str,
         speaker: str,
+        reviewer_id: str | None = None,
         extra_mounts: tuple[tuple[Path, str, str], ...] = (),
     ) -> ActorOutput:
         self._assert_egress_locked()
@@ -768,6 +771,22 @@ class CliActorRunner:
             extra_mounts=extra_mounts,
         )
         env = self.driver.container_env(self._docker_env())
+        # Emit the runtime-agnostic actor-start guardrail (legacy name
+        # OPENCODE_ACTOR_START — predates the CLI actors) BEFORE launch, exactly
+        # like OpencodeActorRunner. TUI phase tracking, turn separators, review
+        # round counters, and flow_use metrics all key off this event; without it
+        # a CLI run has blank telemetry. One start = one turn = one invocation.
+        start_event: dict[str, object] = {
+            "event": events.OPENCODE_ACTOR_START,
+            "role": role,
+            "mount_mode": mount_mode,
+            "model": model,
+            "timeout_seconds": timeout_seconds,
+            "tool": self.tool,
+        }
+        if reviewer_id is not None:
+            start_event["reviewer_id"] = reviewer_id  # routes per-reviewer panes / round dedup
+        append_jsonl(self.paths.guardrail_events, start_event)
         # Bracket the container with wall-clock so we can back-fill real
         # timestamps onto the (clockless) CLI event slice it appends.
         t_start = time.time()

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .jsonlog import write_json
-from .models import ActorMode, RunConfig, RunPaths
+from .models import ActorMode, RunConfig, RunPaths, is_zen_model
 
 
 class PreflightError(RuntimeError):
@@ -212,6 +212,28 @@ def _check_readonly_mount(config: RunConfig) -> PreflightCheck:
 
 
 def _check_network_policy(config: RunConfig) -> PreflightCheck:
+    cli_active = ActorMode.CLI in {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    # A CLI role's egress is locked by default and the runner requires BOTH layers
+    # — an `--internal` docker network AND an allowlisting https proxy (exactly
+    # `cli_actor._assert_egress_locked`). A generic "either is set" check would
+    # pass a half-configured run that the first CLI turn then refuses, so gate on
+    # BOTH here. `_maybe_provision_cli_egress` normally sets both before we land.
+    if cli_active and not config.allow_open_egress:
+        if config.docker_network and config.https_proxy:
+            return _pass(
+                "network_policy",
+                "CLI egress locked (internal docker network + allowlist https proxy)",
+                {"docker_network": config.docker_network, "https_proxy": True},
+            )
+        return _fail(
+            "network_policy",
+            "CLI role requires BOTH an --internal docker_network and an "
+            "allowlisting --https-proxy (or --allow-open-egress); auto-provisioning "
+            "did not set both — check Docker is up.",
+            {"docker_network": config.docker_network, "https_proxy": bool(config.https_proxy)},
+        )
+    # opencode (or a CLI role explicitly opened): either a proxy or a network is
+    # acceptable; `--allow-open-egress` is the explicit open override.
     explicit_proxy = bool(config.http_proxy or config.https_proxy)
     explicit_network = bool(config.docker_network)
     if explicit_proxy or explicit_network:
@@ -224,26 +246,10 @@ def _check_network_policy(config: RunConfig) -> PreflightCheck:
                 "https_proxy": bool(config.https_proxy),
             },
         )
-    # `--allow-open-egress` is the explicit override for BOTH runtimes (for a
-    # codex role it means the operator accepts the exfiltratable-token risk —
-    # warned, bounded by the neutered refresh token).
     if config.allow_open_egress:
         return _warn(
             "network_policy",
             "open container egress explicitly allowed by --allow-open-egress",
-            {},
-        )
-    # A CLI role defaults to a locked egress (the token is exfiltratable).
-    # `_maybe_provision_cli_egress` normally sets an internal network + allowlist
-    # proxy before we get here; landing here without one means provisioning
-    # failed — refuse rather than run a CLI container open.
-    cli_active = ActorMode.CLI in {config.actor_mode, config.sim_actor_mode or config.actor_mode}
-    if cli_active:
-        return _fail(
-            "network_policy",
-            "CLI role defaults to a locked egress (internal docker network + "
-            "allowlist proxy) and auto-provisioning did not set one — check "
-            "Docker is up, or pass --allow-open-egress to run open.",
             {},
         )
     return _fail(
@@ -301,9 +307,16 @@ def _check_codex_auth(config: RunConfig) -> PreflightCheck:
         return _warn("codex_auth", "codex access token present (opaque; expiry unknown)", {})
     remaining = exp - int(time.time())
     if remaining <= 24 * 3600:
-        return _fail(
+        # WARN, not FAIL: a near-expiry (or expired) token is RECOVERABLE — the
+        # runner host-refreshes it in `CodexDriver.prepare_home` before each turn
+        # (real refresh_token, host-side, never in a container) and hard-fails
+        # there if it can't renew. Failing preflight would abort the run before
+        # that refresh ever runs (preflight precedes actor setup), making the
+        # recovery path unreachable.
+        return _warn(
             "codex_auth",
-            f"codex access token expires in ~{remaining // 3600}h; refresh it on the host",
+            f"codex access token expires in ~{remaining // 3600}h; the runner will "
+            "attempt a host-side refresh before launch (run `codex login` if it can't).",
             {"remaining_s": remaining},
         )
     return _pass(
@@ -324,7 +337,7 @@ def _check_openrouter_key(config: RunConfig) -> PreflightCheck:
     # failure behind a corporate/self-signed-cert proxy, must not block a
     # Zen-only or pure-CLI run).
     selected = [m for m in (config.agent_model, config.sim_model, config.extra_reviewer_model) if m]
-    non_free = [m for m in selected if not m.startswith("opencode/")]
+    non_free = [m for m in selected if not is_zen_model(m)]
     key = os.environ.get(config.openrouter_env_var)
     if not non_free:
         note = "present but unused" if key else "not set"

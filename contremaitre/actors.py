@@ -31,7 +31,7 @@ from typing import Protocol
 
 from . import events
 from .jsonlog import append_jsonl, append_text_event, append_transcript, read_jsonl
-from .models import ActorMode, RunConfig, RunPaths
+from .models import ActorMode, RunConfig, RunPaths, is_zen_model
 
 
 class ActorError(RuntimeError):
@@ -580,8 +580,12 @@ def build_docker_command(
 ) -> tuple[list[str], dict[str, str]]:
     env = os.environ.copy()
     env_var = config.openrouter_env_var
-    if env_var not in env:
-        raise ActorError(f"{env_var} is required for opencode actor mode")
+    # Free OpenCode Zen models (`opencode/...`) use the opencode binary's built-in
+    # access — no key. Only a keyed (OpenRouter) model requires the env var. This
+    # mirrors preflight's `_check_openrouter_key` (both via `is_zen_model`), so a
+    # Zen-only run that passes preflight doesn't then fail here.
+    if not is_zen_model(model) and env_var not in env:
+        raise ActorError(f"{env_var} is required for opencode model {model!r}")
     proxy_vars: list[str] = []
     if config.http_proxy:
         env["HTTP_PROXY"] = config.http_proxy
