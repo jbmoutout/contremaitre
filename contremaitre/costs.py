@@ -45,10 +45,10 @@ def sum_token_usage(*paths: Path) -> dict[str, int]:
 
     Handles opencode `step_finish` (`part.tokens`), codex `--json`
     `turn.completed` (`usage`), and claude `stream-json` `result` (`usage`).
-    Returns input/output/reasoning/cache_read totals. A subscription CLI has no
-    metered USD for codex, so this token rollup — not a dollar figure — is the
-    usage signal surfaced for codex runs (claude additionally reports
-    `total_cost_usd`, picked up by `estimate_recorded_cost_usd`).
+    Returns input/output/reasoning/cache_read totals. A subscription CLI (codex
+    or claude) has no metered USD — claude's `total_cost_usd` is a notional
+    API-equivalent, deliberately ignored by `estimate_recorded_cost_usd` (see
+    `_sum_costs`) — so this token rollup, not a dollar figure, is the usage signal.
     """
 
     totals = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0}
@@ -84,16 +84,19 @@ def sum_token_usage(*paths: Path) -> dict[str, int]:
 
 
 def _sum_costs(value: Any) -> float:
+    # NB: `total_cost_usd` (and `costUSD`) from a claude `result` event are
+    # deliberately NOT summed. The CLI actor drives claude on the operator's
+    # OAuth subscription (apiKeySource=none, ANTHROPIC_API_KEY scrubbed), so that
+    # figure is a NOTIONAL API-equivalent, not metered spend — counting it would
+    # show a misleading "$" in the TUI footer and could trip the cost cap on a
+    # subscription run. claude's real usage signal is the token rollup
+    # (`sum_token_usage`) + the footer's rate-limit window, mirroring codex.
     if isinstance(value, dict):
         subtotal = 0.0
         for key, child in value.items():
-            if key.lower() in {
-                "cost",
-                "cost_usd",
-                "usd",
-                "total_cost",
-                "total_cost_usd",  # claude `result` event reports spend directly
-            } and isinstance(child, (int, float)):
+            if key.lower() in {"cost", "cost_usd", "usd", "total_cost"} and isinstance(
+                child, (int, float)
+            ):
                 subtotal += float(child)
             else:
                 subtotal += _sum_costs(child)

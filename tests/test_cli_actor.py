@@ -1002,18 +1002,28 @@ class ClaudeTokenUsageTest(unittest.TestCase):
                 {"input": 100, "output": 10, "reasoning": 0, "cache_read": 80},
             )
 
-    def test_sums_total_cost_usd(self):
+    def test_total_cost_usd_not_counted_as_spend(self):
+        # claude runs on the OAuth subscription (no metered USD), so its
+        # `result.total_cost_usd` is a NOTIONAL API-equivalent and must NOT be
+        # summed as real spend (else the footer shows a misleading $ and the cost
+        # cap could trip on a subscription run). costUSD in modelUsage too.
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "raw.jsonl"
             p.write_text(
                 "\n".join(
                     [
-                        json.dumps({"type": "result", "total_cost_usd": 0.05}),
+                        json.dumps(
+                            {
+                                "type": "result",
+                                "total_cost_usd": 0.05,
+                                "modelUsage": {"claude-sonnet-4-6": {"costUSD": 0.05}},
+                            }
+                        ),
                         json.dumps({"type": "result", "total_cost_usd": 0.02}),
                     ]
                 )
             )
-            self.assertAlmostEqual(estimate_recorded_cost_usd(p), 0.07)
+            self.assertEqual(estimate_recorded_cost_usd(p), 0.0)
 
 
 class ClaudeRoleModelLabelTest(unittest.TestCase):
