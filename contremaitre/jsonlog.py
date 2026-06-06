@@ -45,6 +45,16 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(enriched, sort_keys=True) + "\n")
 
 
+def read_json(path: Path) -> dict[str, Any] | None:
+    """Return the parsed JSON object in `path`, or None on missing/unreadable."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
