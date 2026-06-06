@@ -26,7 +26,6 @@ import shutil
 import signal
 import time
 import dataclasses
-from dataclasses import dataclass
 from pathlib import Path
 
 from . import events, prompts
@@ -69,6 +68,7 @@ from .scaffolds import (
     derive_commit_message,
 )
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
+from .work_session import WorkSession, _WorktreeSnapshot
 
 # Paths held out of the host commit. `.contremaitre/` / `opencode.json` are
 # orchestration-internal; the rest are conventionally-gitignored build output
@@ -85,28 +85,13 @@ _HOST_COMMIT_EXCLUDES = (
 )
 
 
-@dataclass(frozen=True)
-class _WorktreeSnapshot:
-    """One pair of git read-only queries shared across the two per-turn records.
-
-    Without this, every turn ran `git status --porcelain` and `git diff --stat`
-    twice — once for the worktree-state log, once for the no-progress key.
-    """
-
-    status: str
-    diff_stat: str
-
-
 class Orchestrator:
     def __init__(self, config: RunConfig):
         self.config = config
         self.run_id = new_run_id(config.run_slug)
         self.paths = build_run_paths(config.runs_root, self.run_id)
         self.started = time.monotonic()
-        self.turns = 0
         self.trajectory: list[dict[str, object]] = []
-        self.no_progress_streak = 0
-        self._last_progress_key: tuple[str, str] | None = None
         # SHA of `origin/<base>` captured at worktree creation, right
         # after `git fetch origin <base>` and before any remote rewiring.
         # Used as the diff base by all later operations — pinning to a
@@ -120,6 +105,20 @@ class Orchestrator:
         # threading a wider return type through the publication-gate path.
         self._last_sim_parsed: ParsedVerdict | None = None
         self._last_extra_parsed: ParsedVerdict | None = None
+        # Created in _review_rounds after make_actor_runner; None before that.
+        self._session: WorkSession | None = None
+
+    @property
+    def turns(self) -> int:
+        """Total turn count across all WORK and review rounds.
+
+        Delegates to the session when one exists so _write_eval,
+        _write_final_stats, and _transition always see the live counter.
+        Returns 0 before _review_rounds initialises the session (e.g. during
+        the INIT transition or a pre-session SIGTERM).
+        """
+
+        return self._session.turns if self._session is not None else 0
 
     @property
     def _diff_base(self) -> str:
@@ -229,6 +228,28 @@ class Orchestrator:
     def _review_rounds(
         self, *, actor: ActorRunner, worktree_git: GitRepo, branch: str
     ) -> RunResult:
+        self._session = WorkSession(
+            actor=actor,
+            caps=self.config.caps,
+            started=self.started,
+            is_done=self._implementation_complete,
+            emit=self._work_session_emit,
+            cost_estimate=lambda: estimate_recorded_cost_usd(
+                self.paths.raw_export, self.paths.sim_raw_export
+            ),
+            write_cost_report=lambda cost: write_json(
+                self.paths.cost_report,
+                {
+                    "recorded_cost_usd": cost,
+                    "max_cost_usd": self.config.caps.max_cost_usd,
+                    "note": "Recorded stream cost only; provider-side limit remains the primary spend guardrail.",
+                },
+            ),
+            record_agent_snapshot=lambda label: self._record_worktree_state(
+                GitRepo(self.paths.worktree, self.paths.git_log), label
+            ),
+        )
+
         last_required_changes: list[str] = []
         last_parsed: ParsedVerdict | None = None
         last_sim: ParsedVerdict | None = None
@@ -236,19 +257,21 @@ class Orchestrator:
 
         for review_round in range(1, self.config.caps.max_review_rounds + 1):
             self._transition(State.WORK, f"WORK session round {review_round}")
-            outcome = self._run_work_session(
-                actor=actor,
-                review_round=review_round,
-                required_changes=last_required_changes,
-                sim_parsed=last_sim,
-                extra_parsed=last_extra,
-            )
-            self._emit(events.WORK_SESSION_END, round=review_round, outcome=outcome)
+            if review_round == 1:
+                first_message = prompts.INITIAL_PROMPT
+            else:
+                first_message = prompts.revision_followup(
+                    last_required_changes,
+                    sim=last_sim,
+                    extra=last_extra,
+                )
+            result = self._session.run(first_message)
+            self._emit(events.WORK_SESSION_END, round=review_round, outcome=result.stop_reason)
 
             if not self._implementation_complete():
                 return self._terminal_no_pr(
                     TerminalVerdict.NO_PR_NEEDS_HUMAN,
-                    f"WORK ended without IMPLEMENTATION_COMPLETE ({outcome})",
+                    f"WORK ended without IMPLEMENTATION_COMPLETE ({result.stop_reason})",
                     branch=branch,
                 )
             if self._cap_tripped():
@@ -328,76 +351,6 @@ class Orchestrator:
             branch=branch,
             sim_verdict=last_parsed,
         )
-
-    # ----- WORK multi-turn loop -----
-
-    def _run_work_session(
-        self,
-        *,
-        actor: ActorRunner,
-        review_round: int,
-        required_changes: list[str],
-        sim_parsed: ParsedVerdict | None,
-        extra_parsed: ParsedVerdict | None,
-    ) -> str:
-        """Run the multi-turn WORK session until terminal or cap.
-
-        Returns a short reason string describing why the loop exited.
-        """
-
-        if review_round == 1:
-            first_message = prompts.INITIAL_PROMPT
-        else:
-            first_message = prompts.revision_followup(
-                required_changes,
-                sim=sim_parsed,
-                extra=extra_parsed,
-            )
-
-        agent_text = self._agent_turn(actor, first_message)
-        if self._implementation_complete():
-            return "implementation_complete_turn_1"
-        if self._cap_tripped():
-            return "cap_tripped_turn_1"
-
-        sim_first = True
-        for turn in range(2, self.config.caps.max_turns + 1):
-            sim_message = (
-                prompts.sim_first_turn(agent_text)
-                if sim_first
-                else prompts.sim_subsequent_turn(agent_text)
-            )
-            sim_text = self._sim_turn(actor, sim_message)
-            sim_first = False
-            if self._implementation_complete():
-                return f"implementation_complete_after_sim_turn_{turn}"
-            if self._cap_tripped():
-                return f"cap_tripped_after_sim_turn_{turn}"
-
-            agent_text = self._agent_turn(actor, sim_text)
-            if self._implementation_complete():
-                return f"implementation_complete_turn_{turn}"
-            if self._cap_tripped():
-                return f"cap_tripped_after_agent_turn_{turn}"
-
-        return "max_turns"
-
-    def _agent_turn(self, actor: ActorRunner, message: str) -> str:
-        # Actor owns raw_export + transcript writes for its own turn.
-        self._before_turn()
-        output = actor.agent_turn(message)
-        text = output.text
-        worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
-        label = f"after-agent-turn-{self.turns}"
-        snapshot = self._record_worktree_state(worktree_git, label)
-        self._record_progress(snapshot, label, text)
-        return text
-
-    def _sim_turn(self, actor: ActorRunner, message: str) -> str:
-        # Actor owns raw_export + transcript writes for its own turn.
-        self._before_turn()
-        output = actor.sim_turn(message)
-        return output.text
 
     # ----- review pass -----
 
@@ -1101,59 +1054,32 @@ class Orchestrator:
         self.trajectory.append(record)
         append_jsonl(self.paths.timeline, record)
 
+    def _work_session_emit(self, event: str, **fields: object) -> None:
+        """Emit callback injected into WorkSession.
+
+        Routes TURN events to timeline.jsonl (preserving the two-file
+        split) and everything else to guardrail_events.jsonl.
+        """
+
+        record = {"event": event, **fields}
+        if event == events.TURN:
+            append_jsonl(self.paths.timeline, record)
+        else:
+            append_jsonl(self.paths.guardrail_events, record)
+
     def _before_turn(self) -> None:
-        self.turns += 1
-        append_jsonl(self.paths.timeline, {"event": events.TURN, "turn": self.turns})
+        assert self._session is not None
+        self._session.before_turn()
 
     def _cap_tripped(self) -> bool:
-        wall_minutes = (time.monotonic() - self.started) / 60.0
-        if self.turns >= self.config.caps.max_turns:
-            self._emit(events.TURN_CAP, turns=self.turns)
-            return True
-        if wall_minutes >= self.config.caps.max_wall_minutes:
-            self._emit(events.WALL_CAP, wall_minutes=wall_minutes)
-            return True
-        recorded_cost = estimate_recorded_cost_usd(self.paths.raw_export, self.paths.sim_raw_export)
-        write_json(
-            self.paths.cost_report,
-            {
-                "recorded_cost_usd": recorded_cost,
-                "max_cost_usd": self.config.caps.max_cost_usd,
-                "note": "Recorded stream cost only; provider-side limit remains the primary spend guardrail.",
-            },
-        )
-        if recorded_cost >= self.config.caps.max_cost_usd:
-            self._emit(
-                events.RECORDED_COST_CAP,
-                recorded_cost_usd=recorded_cost,
-                max_cost_usd=self.config.caps.max_cost_usd,
-            )
-            return True
-        if self.no_progress_streak >= self.config.caps.no_progress_turns:
-            self._emit(
-                events.NO_PROGRESS_CAP,
-                no_progress_streak=self.no_progress_streak,
-                no_progress_turns=self.config.caps.no_progress_turns,
-            )
-            return True
-        return False
+        assert self._session is not None
+        return self._session.cap_tripped()
 
     def _snapshot_worktree(self, repo: GitRepo) -> _WorktreeSnapshot:
         return _WorktreeSnapshot(
             status=repo.run("status", "--porcelain", check=False).stdout,
             diff_stat=repo.run("diff", "--stat", f"{self._diff_base}...HEAD", check=False).stdout,
         )
-
-    def _record_progress(self, snapshot: _WorktreeSnapshot, label: str, text: str) -> None:
-        key = (snapshot.status + "\n" + snapshot.diff_stat, str(len(text.strip())))
-        if self._last_progress_key is None or key != self._last_progress_key:
-            self.no_progress_streak = 0
-            self._last_progress_key = key
-            event = events.PROGRESS
-        else:
-            self.no_progress_streak += 1
-            event = events.NO_PROGRESS
-        self._emit(event, label=label, no_progress_streak=self.no_progress_streak)
 
     def _record_worktree_state(self, repo: GitRepo, label: str) -> _WorktreeSnapshot:
         """Snapshot + log + return for reuse by callers needing the same data."""
