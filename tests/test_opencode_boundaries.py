@@ -482,12 +482,23 @@ class ZenKeyClassificationTest(unittest.TestCase):
             worktree = root / "wt"
             worktree.mkdir()
             config = RunConfig(
-                repo=root, base="main", runs_root=root / "runs", run_slug="t",
-                actor_mode=ActorMode.OPENCODE, docker_image="img",
+                repo=root,
+                base="main",
+                runs_root=root / "runs",
+                run_slug="t",
+                actor_mode=ActorMode.OPENCODE,
+                docker_image="img",
             )
             return build_docker_command(
-                config=config, paths=paths, worktree=worktree, state_dir=root,
-                mount_mode="rw", model=model, prompt="p", session_id=None, role="agent",
+                config=config,
+                paths=paths,
+                worktree=worktree,
+                state_dir=root,
+                mount_mode="rw",
+                model=model,
+                prompt="p",
+                session_id=None,
+                role="agent",
             )
 
     def test_zen_model_needs_no_key(self):

@@ -239,7 +239,9 @@ def _claude_turn_events(command, output, message, *, input_tokens=100, output_to
         },
         {
             "type": "user",
-            "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": output}]},
+            "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": output}]
+            },
         },
         {
             "type": "result",

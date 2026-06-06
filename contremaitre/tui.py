@@ -1841,7 +1841,15 @@ def _claude_event_rows(event: dict[str, Any], ts: str) -> list:
         if event.get("subtype") == "init":
             label = f"{event.get('session_id', '')}  {event.get('model', '')}".strip()
             return [("", ts, Text("session", style="dim"), "", Text(label, style="dim"))]
-        return [("", ts, Text("system", style="dim"), "", Text(str(event.get("subtype") or ""), style="dim"))]
+        return [
+            (
+                "",
+                ts,
+                Text("system", style="dim"),
+                "",
+                Text(str(event.get("subtype") or ""), style="dim"),
+            )
+        ]
 
     if t == "assistant":
         rows: list = []

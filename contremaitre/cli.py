@@ -2321,7 +2321,9 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     cli_tool = _extract_flag_value(forwarded, "--cli-tool", _saved.cli_tool or "codex")
     sim_cli_tool = _extract_flag_value(forwarded, "--sim-cli-tool", "") or cli_tool
     claude_model = _extract_flag_value(forwarded, "--claude-model", _saved.claude_model or "")
-    claude_effort = _extract_flag_value(forwarded, "--claude-effort", _saved.claude_effort or "high")
+    claude_effort = _extract_flag_value(
+        forwarded, "--claude-effort", _saved.claude_effort or "high"
+    )
     _label_kw = dict(
         codex_model=codex_model,
         codex_effort=codex_effort,

@@ -1745,8 +1745,12 @@ def test_render_event_survives_claude_iso_string_timestamp():
         "type": "user",
         "message": {
             "content": [
-                {"type": "tool_result", "content": "<tool_use_error>boom</tool_use_error>",
-                 "is_error": True, "tool_use_id": "t1"}
+                {
+                    "type": "tool_result",
+                    "content": "<tool_use_error>boom</tool_use_error>",
+                    "is_error": True,
+                    "tool_use_id": "t1",
+                }
             ]
         },
         "timestamp": "2026-06-06T12:49:25.658Z",
@@ -1770,7 +1774,9 @@ def test_model_from_init_events_surfaces_claude_model():
 # ===== claude footer usage (window + reset; no % — claude exposes none) =====
 
 
-def _rate_limit_line(rate_type="five_hour", status="allowed", resets_at=9_999_999_999, overage=False):
+def _rate_limit_line(
+    rate_type="five_hour", status="allowed", resets_at=9_999_999_999, overage=False
+):
     return json.dumps(
         {
             "type": "rate_limit_event",
@@ -1815,7 +1821,12 @@ def test_claude_usage_token_formats_window_and_reset():
     from contremaitre.tui import _claude_usage_token
 
     tok = _claude_usage_token(
-        {"status": "allowed", "rateLimitType": "five_hour", "resetsAt": 3722, "isUsingOverage": False},
+        {
+            "status": "allowed",
+            "rateLimitType": "five_hour",
+            "resetsAt": 3722,
+            "isUsingOverage": False,
+        },
         now=0.0,
     )
     assert tok is not None

@@ -213,8 +213,12 @@ class CliNetworkPolicyTest(unittest.TestCase):
 
     def _cfg(self, **over):
         return RunConfig(
-            repo=Path("/tmp"), base="main", runs_root=Path("/tmp/runs"), run_slug="t",
-            actor_mode=ActorMode.CLI, **over,
+            repo=Path("/tmp"),
+            base="main",
+            runs_root=Path("/tmp/runs"),
+            run_slug="t",
+            actor_mode=ActorMode.CLI,
+            **over,
         )
 
     def test_cli_only_network_fails(self):
@@ -230,14 +234,16 @@ class CliNetworkPolicyTest(unittest.TestCase):
         self.assertEqual(_check_network_policy(cfg).status, "PASS")
 
     def test_cli_allow_open_egress_warns(self):
-        self.assertEqual(
-            _check_network_policy(self._cfg(allow_open_egress=True)).status, "WARN"
-        )
+        self.assertEqual(_check_network_policy(self._cfg(allow_open_egress=True)).status, "WARN")
 
     def test_opencode_still_accepts_either(self):
         # Unchanged for opencode: a single network OR proxy is sufficient.
         cfg = RunConfig(
-            repo=Path("/tmp"), base="main", runs_root=Path("/tmp/runs"), run_slug="t",
-            actor_mode=ActorMode.OPENCODE, docker_network="net",
+            repo=Path("/tmp"),
+            base="main",
+            runs_root=Path("/tmp/runs"),
+            run_slug="t",
+            actor_mode=ActorMode.OPENCODE,
+            docker_network="net",
         )
         self.assertEqual(_check_network_policy(cfg).status, "PASS")

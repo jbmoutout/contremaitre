@@ -762,8 +762,9 @@ class ClaudeModelArgTest(unittest.TestCase):
 
 class ClaudeBuildCommandTest(unittest.TestCase):
     def test_first_turn_no_session_flag(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {_CLAUDE_OAUTH_ENV: "SECRET-TOKEN"}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: "SECRET-TOKEN"}),
         ):
             runner, _ = _make_claude_runner(
                 Path(tmp),
@@ -799,9 +800,7 @@ class ClaudeBuildCommandTest(unittest.TestCase):
             self.assertEqual(cmd[-1], "do it")
 
     def test_resume_turn_uses_resume_not_session_id(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {_CLAUDE_OAUTH_ENV: "t"}
-        ):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: "t"}):
             runner, _ = _make_claude_runner(
                 Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
             )
@@ -817,9 +816,7 @@ class ClaudeBuildCommandTest(unittest.TestCase):
             self.assertNotIn("--session-id", cmd)
 
     def test_review_mounts_worktree_readonly(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {_CLAUDE_OAUTH_ENV: "t"}
-        ):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: "t"}):
             runner, _ = _make_claude_runner(
                 Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
             )
@@ -839,8 +836,11 @@ class ClaudeBuildCommandTest(unittest.TestCase):
 
 class ClaudeContainerEnvTest(unittest.TestCase):
     def test_injects_token_and_scrubs_api_keys(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {_CLAUDE_OAUTH_ENV: "SECRET-TOKEN", "ANTHROPIC_API_KEY": "paid"}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                os.environ, {_CLAUDE_OAUTH_ENV: "SECRET-TOKEN", "ANTHROPIC_API_KEY": "paid"}
+            ),
         ):
             runner, _ = _make_claude_runner(Path(tmp))
             env = runner.driver.container_env({})
@@ -859,16 +859,15 @@ class ClaudeContainerEnvTest(unittest.TestCase):
 
 class ClaudeEnsureReadyTest(unittest.TestCase):
     def test_raises_without_token(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {_CLAUDE_OAUTH_ENV: ""}
-        ):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: ""}):
             runner, _ = _make_claude_runner(Path(tmp))
             with self.assertRaises(Exception):
                 runner.driver.ensure_ready()
 
     def test_passes_with_token(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {_CLAUDE_OAUTH_ENV: "tok"}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: "tok"}),
         ):
             runner, _ = _make_claude_runner(Path(tmp))
             runner.driver.ensure_ready()  # no raise
@@ -917,7 +916,11 @@ class ClaudeParseEventsTest(unittest.TestCase):
                     "subtype": "success",
                     "is_error": False,
                     "result": "FINAL",
-                    "usage": {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 80},
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 10,
+                        "cache_read_input_tokens": 80,
+                    },
                     "total_cost_usd": 0.05,
                 }
             ),
@@ -969,17 +972,16 @@ class ClaudeParseEventsTest(unittest.TestCase):
 
 class ClaudeAuthCheckTest(unittest.TestCase):
     def test_pass_when_token_set(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {_CLAUDE_OAUTH_ENV: "tok"}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: "tok"}),
         ):
             cfg = _cli_config(Path(tmp), cli_tool="claude")
             self.assertEqual(_check_claude_auth(cfg).status, "PASS")
             self.assertEqual(_check_cli_auth(cfg).status, "PASS")  # dispatch
 
     def test_fail_when_token_missing(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {_CLAUDE_OAUTH_ENV: ""}
-        ):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: ""}):
             cfg = _cli_config(Path(tmp), cli_tool="claude")
             self.assertEqual(_check_claude_auth(cfg).status, "FAIL")
 
@@ -1162,7 +1164,9 @@ class CliActorStartEventTest(unittest.TestCase):
                 "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
             ):
                 runner.agent_turn("hello")
-            starts = [e for e in self._guardrails(paths) if e.get("event") == "opencode_actor_start"]
+            starts = [
+                e for e in self._guardrails(paths) if e.get("event") == "opencode_actor_start"
+            ]
             self.assertEqual(len(starts), 1)
             self.assertEqual(starts[0]["role"], "agent")
             self.assertEqual(starts[0]["tool"], "codex")
@@ -1180,7 +1184,11 @@ class CliActorStartEventTest(unittest.TestCase):
                 "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
             ):
                 runner.sim_review(
-                    diff_file=d, settled_file=sd, scenario="approved", attempt=1, reviewer_id="extra"
+                    diff_file=d,
+                    settled_file=sd,
+                    scenario="approved",
+                    attempt=1,
+                    reviewer_id="extra",
                 )
             starts = [
                 e
