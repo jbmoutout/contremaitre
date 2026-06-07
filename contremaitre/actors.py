@@ -817,11 +817,26 @@ def _run_detached_container(
             )
         return returncode, stderr_bytes.decode("utf-8", errors="replace"), fast_fail_reason
     finally:
-        subprocess.run(
-            ["docker", "rm", "-f", container_id],
-            capture_output=True,
-            timeout=15,
-        )
+        # `docker rm -f` on a container that is still stopping (SIGTERM sent but
+        # not yet dead) can block until the kernel delivers SIGKILL and the
+        # container exits — empirically up to several minutes after a long run.
+        # Use a generous timeout and swallow any failure so that (a) the cleanup
+        # attempt is as thorough as possible and (b) a timeout here never escapes
+        # the finally block and replaces the original exception (the bug that left
+        # container afae7f275dd0 stranded after a 1800s timeout hit).
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container_id],
+                capture_output=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            # subprocess.run already killed its child on TimeoutExpired; the
+            # container will be stale on the host — the caller's infra_failure
+            # path handles reporting.
+            pass
+        except Exception:
+            pass
 
 
 _QUOTA_ERROR_MARKERS = ("FreeUsageLimitError",)
