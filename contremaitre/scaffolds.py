@@ -13,6 +13,40 @@ from pathlib import Path
 SETTLED_RELPATH = Path(".contremaitre") / "SETTLED_DESIGN.md"
 IMPLEMENTATION_COMPLETE_RELPATH = Path(".contremaitre") / "IMPLEMENTATION_COMPLETE"
 
+# Single canonical source of truth for what counts as "orchestration-internal"
+# in the worktree. Two consumers derive from this:
+#   - HOST_COMMIT_EXCLUDES: bare names for `:(exclude)` git-add pathspecs
+#   - only_contremaitre_changes(): predicate on `git status --porcelain` output
+# Updating this tuple is the only place to change when a new internal path is added.
+_CONTREMAITRE_INTERNALS: tuple[str, ...] = (
+    ".contremaitre",
+    "opencode.json",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    "__pycache__",
+)
+
+HOST_COMMIT_EXCLUDES: tuple[str, ...] = _CONTREMAITRE_INTERNALS
+
+
+def only_contremaitre_changes(porcelain: str) -> bool:
+    """True iff every `git status --porcelain` row is orchestration-internal.
+
+    Files excluded from commits by pathspec (`.contremaitre/*`, `opencode.json`)
+    are deliberately untracked in the worktree. Both the host-commit step and the
+    clean-worktree hard gate need to treat a worktree whose only changes are in
+    these paths as "clean for our purposes". Empty porcelain is also clean.
+    """
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:].strip().strip('"')
+        if not any(path == name or path.startswith(name + "/") for name in _CONTREMAITRE_INTERNALS):
+            return False
+    return True
+
 
 def derive_commit_message(worktree: Path, run_id: str) -> tuple[str, str]:
     """Read SETTLED_DESIGN.md and turn it into (commit title, commit body).

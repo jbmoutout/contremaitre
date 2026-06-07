@@ -34,13 +34,12 @@ from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
 from .costs import estimate_recorded_cost_usd, sum_token_usage
-from .diffscan import DiffScanResult, scan_diff
 from .evaluator import (
     combined_review_summary,
-    hard_gate_payload,
     sim_review_summary,
     write_eval_reports,
 )
+from .gates import DefaultGateRunner, GateResult, GateRunner
 from .extract import extract_run_artifacts
 from .viewer import build_viewer
 from .git_utils import GitRepo
@@ -65,26 +64,13 @@ from .publisher import (
     record_publication,
 )
 from .scaffolds import (
+    HOST_COMMIT_EXCLUDES,
     IMPLEMENTATION_COMPLETE_RELPATH,
     SETTLED_RELPATH,
     derive_commit_message,
+    only_contremaitre_changes,
 )
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
-
-# Paths held out of the host commit. `.contremaitre/` / `opencode.json` are
-# orchestration-internal; the rest are conventionally-gitignored build output
-# that some agents produce as a verification step (the worktree may not carry
-# the upstream .gitignore for all of them, so we belt-and-suspenders).
-_HOST_COMMIT_EXCLUDES = (
-    ".contremaitre",
-    "opencode.json",
-    "dist",
-    "build",
-    "out",
-    ".next",
-    "__pycache__",
-)
-
 
 @dataclass(frozen=True)
 class _WorktreeSnapshot:
@@ -99,7 +85,7 @@ class _WorktreeSnapshot:
 
 
 class Orchestrator:
-    def __init__(self, config: RunConfig):
+    def __init__(self, config: RunConfig, *, gate_runner: GateRunner | None = None):
         self.config = config
         self.run_id = new_run_id(config.run_slug)
         self.paths = build_run_paths(config.runs_root, self.run_id)
@@ -121,6 +107,7 @@ class Orchestrator:
         # threading a wider return type through the publication-gate path.
         self._last_sim_parsed: ParsedVerdict | None = None
         self._last_extra_parsed: ParsedVerdict | None = None
+        self._gate_runner: GateRunner = gate_runner if gate_runner is not None else DefaultGateRunner()
 
     @property
     def _diff_base(self) -> str:
@@ -728,62 +715,51 @@ class Orchestrator:
         if self.config.simulate_drift_after_approval:
             self._commit_drift(worktree_git)
 
-        recomputed_hash = diff_hash(worktree_git, self._diff_base)
-        diff_hash_matched = recomputed_hash == approved_hash
-        diff_scan = scan_diff(worktree_git, self._diff_base)
-        # `.contremaitre/*` is excluded from staging by design and stays
-        # untracked in the worktree for the SIM to read across rounds —
-        # don't count it against clean-worktree.
-        clean = _only_contremaitre_changes(worktree_git.status_porcelain())
-        hard_gates = hard_gate_payload(
-            diff_scan=diff_scan,
-            clean_worktree=clean,
-            diff_hash_matched=diff_hash_matched,
+        gate = self._gate_runner.run(
+            worktree_git=worktree_git,
+            base=self._diff_base,
+            approved_hash=approved_hash,
+            checks=checks,
         )
         self._emit(
             events.HARD_GATES_CHECKED,
-            passed=bool(hard_gates["passed"]),
-            diff_hash_matched=diff_hash_matched,
-            diff_scan_passed=diff_scan.passed if diff_scan else False,
-            clean_worktree=clean,
-            changed_files=len(diff_scan.changed_files) if diff_scan else 0,
+            passed=gate.passed,
+            diff_hash_matched=gate.diff_hash_matched,
+            diff_scan_passed=gate.diff_scan.passed if gate.diff_scan else False,
+            clean_worktree=gate.clean_worktree,
+            changed_files=len(gate.diff_scan.changed_files) if gate.diff_scan else 0,
         )
-        # L1 executable-check gate: blocks only on a configured-and-failing
-        # check. No --check-cmd → empty results → no-op (operator opted out;
-        # SIM approval + L0 hard gates still apply).
-        checks_failed = any(not check.passed for check in checks)
 
-        if not hard_gates["passed"]:
+        # L0 and L1 are checked separately to preserve distinct reason strings.
+        # L1: blocks only on a configured-and-failing check. No --check-cmd →
+        # empty checks → checks_failed=False → no-op (operator opted out).
+        if not bool(gate.payload["passed"]):
             return self._blocked_by_gates(
                 branch=branch,
                 approved_hash=approved_hash,
-                current_hash=recomputed_hash,
+                gate=gate,
                 checks=checks,
-                diff_scan=diff_scan,
-                hard_gates=hard_gates,
                 reason="hard gate failed",
                 sim_verdict=parsed,
             )
-        if checks_failed:
+        if gate.checks_failed:
             return self._blocked_by_gates(
                 branch=branch,
                 approved_hash=approved_hash,
-                current_hash=recomputed_hash,
+                gate=gate,
                 checks=checks,
-                diff_scan=diff_scan,
-                hard_gates=hard_gates,
                 reason="executable checks failed",
                 sim_verdict=parsed,
             )
 
         # Write eval BEFORE publish so `_derive_pr_metadata` can read the
-        # scorecard into the PR body. Safe because eval inputs (hard_gates,
-        # checks, parsed) are all in scope here, and `reason` is unused
-        # downstream when `sim_verdict` is set (always the case on this path).
+        # scorecard into the PR body. Safe because eval inputs (gate, checks,
+        # parsed) are all in scope here, and `reason` is unused downstream
+        # when `sim_verdict` is set (always the case on this path).
         self._write_eval(
             verdict=TerminalVerdict.READY_FOR_DRAFT_PR,
             checks=checks,
-            hard_gates=hard_gates,
+            hard_gates=gate.payload,
             needs_human=[],
             sim_verdict=parsed,
             reason="approved",
@@ -838,18 +814,16 @@ class Orchestrator:
         *,
         branch: str,
         approved_hash: str,
-        current_hash: str,
+        gate: GateResult,
         checks: list[CheckResult],
-        diff_scan: DiffScanResult,
-        hard_gates: dict[str, object],
         reason: str,
         sim_verdict: ParsedVerdict | None,
     ) -> RunResult:
         self._emit(
             events.PUBLICATION_BLOCKED,
             reason=reason,
-            hard_gates=hard_gates,
-            forbidden_files=diff_scan.forbidden_files,
+            hard_gates=gate.payload,
+            forbidden_files=gate.diff_scan.forbidden_files if gate.diff_scan else [],
         )
         record_publication(
             self.paths,
@@ -860,14 +834,14 @@ class Orchestrator:
                 reason=reason,
                 branch=branch,
                 approved_diff_hash=approved_hash,
-                current_diff_hash=current_hash,
+                current_diff_hash=gate.diff_hash,
                 dry_run=True,
             ),
         )
         self._write_eval(
             verdict=TerminalVerdict.NO_PR_NEEDS_HUMAN,
             checks=checks,
-            hard_gates=hard_gates,
+            hard_gates=gate.payload,
             needs_human=[reason],
             sim_verdict=sim_verdict,
             reason=reason,
@@ -1052,7 +1026,7 @@ class Orchestrator:
         self._emit(events.SIMULATED_DIFF_DRIFT)
 
     def _commit_agent_changes(self, repo: GitRepo) -> None:
-        if _only_contremaitre_changes(repo.status_porcelain()):
+        if only_contremaitre_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
         title, body = derive_commit_message(self.paths.worktree, self.run_id)
@@ -1063,7 +1037,7 @@ class Orchestrator:
         # treats `:(exclude)X` as an explicit mention of X, and the add
         # aborts when X is also gitignored ("paths are ignored").
         excludes = [
-            f":(exclude){path}" for path in _HOST_COMMIT_EXCLUDES if not _is_gitignored(repo, path)
+            f":(exclude){path}" for path in HOST_COMMIT_EXCLUDES if not _is_gitignored(repo, path)
         ]
         repo.run("add", "--", ".", *excludes)
         repo.run("commit", "-m", title, "-m", body)
@@ -1355,41 +1329,6 @@ def _is_gitignored(repo: GitRepo, path: str) -> bool:
     """
 
     return repo.run("check-ignore", "-q", "--", path, check=False).returncode == 0
-
-
-def _only_contremaitre_changes(porcelain: str) -> bool:
-    """True iff every `git status --porcelain` row is orchestration-internal.
-
-    Files excluded from commits by pathspec (`.contremaitre/*`,
-    `opencode.json`) are deliberately untracked in the worktree. The
-    host-commit step and the clean-worktree hard gate both need to treat
-    a worktree whose only changes are in these paths as "clean for our
-    purposes":
-
-    - host-commit: skip instead of producing an empty PR.
-    - clean-worktree gate: pass.
-
-    Empty porcelain (no changes at all) is also "clean".
-    """
-
-    _INTERNAL_PREFIXES = (
-        ".contremaitre/",
-        ".contremaitre",
-        "opencode.json",
-        "dist/",
-        "build/",
-        "out/",
-        ".next/",
-        "__pycache__/",
-    )
-
-    for line in porcelain.splitlines():
-        if not line.strip():
-            continue
-        path = line[3:].strip().strip('"')
-        if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
-            return False
-    return True
 
 
 _VERDICT_SEVERITY = {
