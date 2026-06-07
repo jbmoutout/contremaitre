@@ -439,7 +439,14 @@ def _safe_key_details(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(cmd, 127, "", str(exc))
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else str(exc)
+        return subprocess.CompletedProcess(cmd, 124, stdout, stderr)
 
 
 def _proc_details(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
