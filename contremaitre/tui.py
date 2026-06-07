@@ -116,6 +116,29 @@ def _short_model(model: str) -> str:
     return model.split("/")[-1] if model else "?"
 
 
+def _model_effort_display(label: str | None) -> str:
+    """One display shape for an agent/SIM model label: `<short-model> <effort>`.
+
+    Collapses the verbose labels `role_model_label` builds
+    (`"gpt-5.5 (codex, effort=high)"`, `"opus (claude, effort=max)"`) and bare
+    opencode slugs (`"openrouter/x/y"`) to a single form — short model name
+    plus the effort word, or just the short model when there is no effort
+    (opencode roles). Drops the `codex`/`claude` tool word and the `effort=`
+    prefix: `gpt-5.5 high`, `claude-opus-4-8 max`, `deepseek-v4-flash`.
+    Empty/unknown → `"?"`.
+    """
+
+    if not label or label == "?":
+        return "?"
+    name, _, annot = label.partition(" (")
+    effort = ""
+    if annot:
+        m = re.search(r"effort=(\w+)", annot)
+        if m:
+            effort = m.group(1)
+    return f"{_short_model(name)} {effort}".strip()
+
+
 def _short_repo(url_or_path: str | None) -> str:
     """Normalize a git URL or local path to `owner/repo` for display.
 
@@ -265,8 +288,8 @@ def _render_pane_subheader(
 
     sub = Text()
     if state == "active":
-        sub.append(spinner, style="bold green")
-        sub.append(" streaming", style="green")
+        sub.append(spinner, style=f"bold {_PAL_SUCCESS}")
+        sub.append(" streaming", style=_PAL_SUCCESS)
     elif state == "thinking":
         sub.append(spinner, style="bold cyan")
         sub.append(" thinking…", style="cyan")
@@ -1011,6 +1034,24 @@ def _model_from_init_events(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _relabel_with_real_model(label: str, real_model: str) -> str:
+    """Splice the stream-reported model into a role label, KEEPING its
+    ` (claude, effort=…)` annotation.
+
+    `role_model_label` builds `"<model> (claude, effort=high)"`; when
+    `claude_model` is empty the pre-run `<model>` is the placeholder
+    "claude default". Back-filling the real model must not drop the
+    parenthetical — otherwise the header loses the effort the moment the
+    run starts (the bug this guards against). Splits on the first " ("
+    so only the model name is replaced; a bare label (no annotation)
+    simply becomes the real model.
+    """
+
+    paren = label.find(" (")
+    suffix = label[paren:] if paren != -1 else ""
+    return f"{real_model}{suffix}"
+
+
 def _task_count(events: list[dict[str, Any]]) -> int:
     return sum(
         1
@@ -1503,22 +1544,39 @@ def _codex_usage_token(
     return text
 
 
-# claude exposes its rate limit differently from codex: the `--output-format
-# stream-json` stdout (captured to *_raw_export.jsonl) carries `rate_limit_event`s
-# with the active window, its reset epoch, and a status/overage flag — but NO
-# remaining-percentage. So the footer surfaces the window + reset countdown,
-# reddened on a warning/overage status, rather than a "% left" like codex.
-_CLAUDE_WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d", "weekly": "7d", "monthly": "30d"}
+# claude exposes Claude.ai subscription windows through its documented statusLine
+# input (`rate_limits.five_hour` / `rate_limits.seven_day`), not through the
+# `stream-json` stdout we tail for chat/tool events. ClaudeDriver installs a
+# tiny per-run statusLine command that whitelists those fields into
+# `claude-*-home/.contremaitre/statusline.jsonl`; the TUI tails that snapshot.
 
 
-def _fmt_claude_window(rate_limit_type: Any) -> str:
-    if not isinstance(rate_limit_type, str) or not rate_limit_type:
-        return ""
-    return _CLAUDE_WINDOW_LABELS.get(rate_limit_type, rate_limit_type.replace("_", " "))
+def _claude_usage_from_statusline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize a Claude Code statusLine snapshot to codex-like windows."""
+
+    rate_limits = snapshot.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return None
+
+    def _window(name: str, minutes: int) -> dict[str, Any] | None:
+        raw = rate_limits.get(name)
+        if not isinstance(raw, dict) or not isinstance(raw.get("used_percentage"), (int, float)):
+            return None
+        return {
+            "used_percent": float(raw["used_percentage"]),
+            "window_minutes": minutes,
+            "resets_at": raw.get("resets_at"),
+        }
+
+    primary = _window("five_hour", 300)
+    secondary = _window("seven_day", 10080)
+    if primary is None and secondary is None:
+        return None
+    return {"primary": primary, "secondary": secondary}
 
 
-def _last_rate_limit_info(path: Path) -> dict[str, Any] | None:
-    """The most recent `rate_limit_event`'s `rate_limit_info` in a stream file."""
+def _last_claude_statusline_usage(path: Path) -> dict[str, Any] | None:
+    """Latest populated statusLine usage snapshot in one claude home."""
 
     try:
         size = path.stat().st_size
@@ -1531,37 +1589,38 @@ def _last_rate_limit_info(path: Path) -> dict[str, Any] | None:
         return None
     for line in reversed(tail.splitlines()):
         line = line.strip()
-        if not line or '"rate_limit_event"' not in line:
+        if not line or '"rate_limits"' not in line:
             continue
         try:
-            ev = json.loads(line)
+            snapshot = json.loads(line)
         except json.JSONDecodeError:
             continue
-        info = ev.get("rate_limit_info")
-        if isinstance(info, dict):
-            return info
+        if isinstance(snapshot, dict):
+            usage = _claude_usage_from_statusline(snapshot)
+            if usage is not None:
+                return usage
     return None
 
 
 def _read_claude_usage(run_dir: Path) -> dict[str, Any] | None:
-    """Latest claude rate-limit snapshot for `run_dir`, or None.
+    """Latest claude statusLine rate-limit snapshot for `run_dir`, or None.
 
-    Scans the actor streams (newest first) for the most recent `rate_limit_event`
-    — agent / SIM / extra-reviewer — so a claude role in any position is covered
-    (incl. a mixed codex+claude run). Returns None for a non-claude run.
+    Covers claude in any role (agent / SIM / review) by scanning all per-run
+    claude homes newest first. Returns None until Claude Code has produced a
+    statusLine snapshot with subscription rate_limits, or for non-claude runs.
     """
 
-    streams: list[tuple[float, Path]] = []
-    for name in ("raw_export.jsonl", "sim_raw_export.jsonl", "extra_reviewer_raw_export.jsonl"):
-        p = run_dir / name
+    snapshots: list[tuple[float, Path]] = []
+    for home in run_dir.glob("claude-*-home"):
+        p = home / ".contremaitre" / "statusline.jsonl"
         try:
-            streams.append((p.stat().st_mtime, p))
+            snapshots.append((p.stat().st_mtime, p))
         except OSError:
             continue
-    for _mtime, p in sorted(streams, reverse=True):
-        info = _last_rate_limit_info(p)
-        if info is not None:
-            return info
+    for _mtime, p in sorted(snapshots, reverse=True):
+        usage = _last_claude_statusline_usage(p)
+        if usage is not None:
+            return usage
     return None
 
 
@@ -1570,31 +1629,30 @@ def _claude_usage_token(
     *,
     now: float | None = None,
 ) -> "Text | None":
-    """The `claude 5h ↻1h02m` footer fragment, or None when no data.
-
-    claude's stream carries the active window + reset + status but no remaining
-    percentage, so this surfaces the window and a reset countdown, reddened when
-    the status isn't `allowed` or the account is into overage.
-    """
+    """The `claude 5h 25% left (↻1h02m)` footer fragment, or None."""
 
     if not usage:
         return None
+    head = usage.get("primary") or usage.get("secondary")
+    if not head:
+        return None
     now = time.time() if now is None else now
-    win = _fmt_claude_window(usage.get("rateLimitType")) or "limit"
-    overage = bool(usage.get("isUsingOverage"))
-    status = usage.get("status")
-    if overage:
-        style, win = _PAL_ERROR, f"{win} overage"
-    elif status and status != "allowed":
-        style = _PAL_WARN
-    else:
-        style = _PAL_TEXT
+    other = usage.get("secondary") if head is usage.get("primary") else None
+    rem_p = max(0.0, 100.0 - head["used_percent"])
+    win_p = _fmt_window_minutes(head.get("window_minutes")) or "limit"
     text = Text()
     text.append("claude ", style=_PAL_DIM)
-    text.append(win, style=style)
-    reset = _fmt_reset(usage.get("resetsAt"), now)
+    text.append(f"{win_p} ", style=_PAL_VDIM)
+    text.append(f"{round(rem_p)}% left", style=_usage_pct_style(rem_p))
+    reset = _fmt_reset(head.get("resets_at"), now)
     if reset:
         text.append(f" ({reset})", style=_PAL_VDIM)
+    if other:
+        rem_s = max(0.0, 100.0 - other["used_percent"])
+        if rem_s < rem_p:
+            win_s = _fmt_window_minutes(other.get("window_minutes")) or "7d"
+            text.append(f" · {win_s} ", style=_PAL_VDIM)
+            text.append(f"{round(rem_s)}% left", style=_usage_pct_style(rem_s))
     return text
 
 
@@ -2435,7 +2493,7 @@ if _TEXTUAL_AVAILABLE:
             if not self._agent_model_resolved:
                 model = _model_from_init_events(events)
                 if model:
-                    self.agent_model = model
+                    self.agent_model = _relabel_with_real_model(self.agent_model, model)
                     self._agent_model_resolved = True
             widget = self.query_one("#agent-log", RichLog)
             at_bottom = self._at_bottom(widget)
@@ -2734,7 +2792,7 @@ if _TEXTUAL_AVAILABLE:
             header.append("contremaitre · ", style="#6B8AFF")
             header.append(self.run_dir.name)
             header.append(
-                f"  ·  agent={_short_model(self.agent_model)}  sim={_short_model(self.sim_model)}",
+                f"  ·  agent={_model_effort_display(self.agent_model)}  sim={_model_effort_display(self.sim_model)}",
                 style="dim",
             )
             if self.extra_reviewer_model:
@@ -2844,8 +2902,8 @@ if _TEXTUAL_AVAILABLE:
             # ----- Pane titles + active highlight -----
             agent_pane = self.query_one("#agent-pane")
             sim_pane = self.query_one("#sim-pane")
-            agent_pane.border_title = f"CODING AGENT ({_short_model(self.agent_model)})"
-            sim_pane.border_title = f"SIM ({_short_model(self.sim_model)})"
+            agent_pane.border_title = f"CODING AGENT ({_model_effort_display(self.agent_model)})"
+            sim_pane.border_title = f"SIM ({_model_effort_display(self.sim_model)})"
             active = None if terminal else self._determine_active()
             # During the cli_review phase, the post-publish reviewer owns
             # the highlight even before its first stdout chunk lands.
@@ -3141,9 +3199,10 @@ if _TEXTUAL_AVAILABLE:
             else:
                 cost_usd = sum_costs_in_events(agent_events, sim_events)
                 right.append(f"${cost_usd:.4f}", style=_PAL_TEXT if cost_usd > 0 else _PAL_DIM)
-            # Subscription usage — codex (`codex 25% left ↻1h02m`) and/or claude
-            # (`claude 5h ↻1h02m`); only shown when that tool's rate-limit snapshot
-            # exists, so a single-tool run shows exactly one (and a mixed run both).
+            # Subscription usage — codex (`codex 25% left`) and/or claude
+            # (`claude 5h 25% left`); only shown when that tool's rate-limit
+            # snapshot exists, so a single-tool run shows exactly one (and a
+            # mixed run both).
             for usage_token in (
                 _codex_usage_token(self._codex_usage),
                 _claude_usage_token(self._claude_usage),

@@ -107,7 +107,7 @@ All keys are optional; unknown / malformed values degrade silently. `--no-prompt
 - **`--cli-reviewer` is not free.** It calls `claude -p` or `codex exec` on your machine against *your subscription* (Claude Pro/Max, ChatGPT Plus). Each review burns your usage allowance. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are scrubbed from the subprocess env so it can't silently fall through to billed API.
 - **Free models are rate-limited.** OpenCode Zen's free tier is generous but bounded; long runs or many evals eventually hit a daily cap that surfaces as `QUOTA_EXHAUSTED`.
 - **Paid OpenRouter runs cost real money.** A single `n=3` eval cell on `openrouter/anthropic/claude-sonnet-4.6` runs ~$7–10. The default eval config uses free Zen models for a reason.
-- **Subscription CLI runs burn your plan.** A codex/claude role drives the CLI headless on your subscription — no API billing, but it counts against your plan usage. Its egress is locked to the model provider by default (the in-container token is exfiltratable); pass `--allow-open-egress` to run it open when the agent needs to install deps. The blast radius differs by tool: **codex**'s refresh token is neutered, so a leaked in-container token is bounded to ~10-day quota abuse, not account takeover; **claude**'s `CLAUDE_CODE_OAUTH_TOKEN` is long-lived (~1yr) and *can't* be neutered, so the egress lock is its sole protection — keep it locked unless you have a specific reason not to.
+- **Subscription CLI runs burn your plan.** A codex/claude role drives the CLI headless on your subscription — no API billing, but it counts against your plan usage. The TUI footer shows the best available subscription-window signal: codex rollout rate limits, or Claude Code's documented `statusLine.rate_limits` fields when Claude exposes them for the account. Anthropic's Usage & Cost Admin API is for Console organizations, not individual Claude.ai subscriptions, so there is no separate account-usage API key path for Pro/Max here. Egress is locked to the model provider by default (the in-container token is exfiltratable); pass `--allow-open-egress` to run it open when the agent needs to install deps. The blast radius differs by tool: **codex**'s refresh token is neutered, so a leaked in-container token is bounded to ~10-day quota abuse, not account takeover; **claude**'s `CLAUDE_CODE_OAUTH_TOKEN` is long-lived (~1yr) and *can't* be neutered, so the egress lock is its sole protection — keep it locked unless you have a specific reason not to.
 
 ## Other commands
 
@@ -131,7 +131,7 @@ For controlled egress on an **opencode** run (instead of `--allow-open-egress`),
 
 ## Further reading
 
-- [docs/control-plane.md](docs/control-plane.md) — implementation map: actor runtimes (opencode / codex), the codex auth + egress lock, state machine, host-owned boundaries, hard gates, artifact contract, full CLI reference, module map.
+- [docs/control-plane.md](docs/control-plane.md) — implementation map: actor runtimes (opencode / codex / claude), CLI auth + egress lock, state machine, host-owned boundaries, hard gates, artifact contract, full CLI reference, module map.
 - [golden_cases/README.md](golden_cases/README.md) — eval canary: case/config schema, headline panels, single-variable rule, methodology notes, how to add a case.
 - [AGENTS.md](AGENTS.md) — conventions for coding agents modifying this repo.
 

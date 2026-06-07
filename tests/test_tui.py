@@ -1771,46 +1771,106 @@ def test_model_from_init_events_surfaces_claude_model():
     assert _model_from_init_events([{"type": "turn.started"}]) is None
 
 
-# ===== claude footer usage (window + reset; no % — claude exposes none) =====
+def test_relabel_with_real_model_keeps_effort_suffix():
+    from contremaitre.tui import _relabel_with_real_model
+
+    # Back-filling the stream's real model must preserve the effort annotation
+    # built by role_model_label — the header would otherwise lose effort the
+    # moment a claude run starts.
+    assert (
+        _relabel_with_real_model("claude default (claude, effort=high)", "claude-opus-4-8")
+        == "claude-opus-4-8 (claude, effort=high)"
+    )
+    assert (
+        _relabel_with_real_model("opus (claude, effort=max)", "claude-opus-4-8")
+        == "claude-opus-4-8 (claude, effort=max)"
+    )
+    # A bare label (no annotation) just becomes the real model.
+    assert _relabel_with_real_model("opus", "claude-opus-4-8") == "claude-opus-4-8"
 
 
-def _rate_limit_line(
-    rate_type="five_hour", status="allowed", resets_at=9_999_999_999, overage=False
+def test_model_effort_display_is_model_then_effort():
+    from contremaitre.tui import _model_effort_display
+
+    # CLI roles: `<short-model> <effort>` — no tool word, no `effort=`, no nesting.
+    assert _model_effort_display("gpt-5.5 (codex, effort=high)") == "gpt-5.5 high"
+    assert (
+        _model_effort_display("claude-opus-4-8 (claude, effort=max)") == "claude-opus-4-8 max"
+    )
+    # opencode role: short model only (no effort concept).
+    assert (
+        _model_effort_display("openrouter/deepseek/deepseek-v4-flash") == "deepseek-v4-flash"
+    )
+    # Unknown/empty → null sentinel.
+    assert _model_effort_display("?") == "?"
+    assert _model_effort_display(None) == "?"
+    assert _model_effort_display("") == "?"
+
+
+# ===== claude footer usage (statusLine rate-limit indicator) =====
+
+
+def _claude_statusline_line(
+    *,
+    five_hour=80.0,
+    seven_day=20.0,
+    five_hour_reset=9_999_999_999,
+    seven_day_reset=9_999_999_999,
 ):
     return json.dumps(
         {
-            "type": "rate_limit_event",
-            "rate_limit_info": {
-                "status": status,
-                "resetsAt": resets_at,
-                "rateLimitType": rate_type,
-                "isUsingOverage": overage,
-            },
+            "recorded_at": 1,
             "session_id": "s",
+            "rate_limits": {
+                "five_hour": {
+                    "used_percentage": five_hour,
+                    "resets_at": five_hour_reset,
+                }
+                if five_hour is not None
+                else None,
+                "seven_day": {
+                    "used_percentage": seven_day,
+                    "resets_at": seven_day_reset,
+                }
+                if seven_day is not None
+                else None,
+            },
         }
     )
 
 
-def test_read_claude_usage_picks_last_rate_limit_event(tmp_path):
+def test_claude_usage_from_statusline_extracts_windows():
+    from contremaitre.tui import _claude_usage_from_statusline
+
+    usage = _claude_usage_from_statusline(json.loads(_claude_statusline_line()))
+    assert usage is not None
+    assert usage["primary"]["used_percent"] == 80.0
+    assert usage["primary"]["window_minutes"] == 300
+    assert usage["secondary"]["used_percent"] == 20.0
+    assert usage["secondary"]["window_minutes"] == 10080
+
+
+def test_read_claude_usage_picks_last_statusline_snapshot(tmp_path):
     from contremaitre.tui import _read_claude_usage
 
-    (tmp_path / "raw_export.jsonl").write_text(
+    snap = tmp_path / "claude-agent-home" / ".contremaitre" / "statusline.jsonl"
+    snap.parent.mkdir(parents=True)
+    snap.write_text(
         "\n".join(
             [
-                json.dumps({"type": "system", "subtype": "init", "model": "claude-sonnet-4-6"}),
-                _rate_limit_line(resets_at=111),
-                _rate_limit_line(resets_at=222),  # last one wins
+                _claude_statusline_line(five_hour_reset=111),
+                _claude_statusline_line(five_hour_reset=222),  # last one wins
             ]
         )
     )
     usage = _read_claude_usage(tmp_path)
-    assert usage is not None and usage["resetsAt"] == 222
+    assert usage is not None and usage["primary"]["resets_at"] == 222
 
 
 def test_read_claude_usage_none_for_codex_run(tmp_path):
     from contremaitre.tui import _read_claude_usage
 
-    # A codex stream has no rate_limit_event → no claude footer.
+    # A codex stream has no claude statusLine snapshot → no claude footer.
     (tmp_path / "raw_export.jsonl").write_text(
         json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}})
     )
@@ -1822,29 +1882,41 @@ def test_claude_usage_token_formats_window_and_reset():
 
     tok = _claude_usage_token(
         {
-            "status": "allowed",
-            "rateLimitType": "five_hour",
-            "resetsAt": 3722,
-            "isUsingOverage": False,
+            "primary": {
+                "used_percent": 84.0,
+                "window_minutes": 300,
+                "resets_at": 3722,
+            },
+            "secondary": {
+                "used_percent": 20.0,
+                "window_minutes": 10080,
+                "resets_at": 9999,
+            },
         },
         now=0.0,
     )
     assert tok is not None
     plain = tok.plain
-    assert "claude" in plain and "5h" in plain and "↻1h02m" in plain
+    assert plain == "claude 5h 16% left (↻1h02m)"
 
 
-def test_claude_usage_token_marks_overage():
+def test_claude_usage_token_appends_weekly_only_when_tighter():
     from contremaitre.tui import _claude_usage_token
 
     tok = _claude_usage_token(
-        {"status": "allowed", "rateLimitType": "five_hour", "resetsAt": 0, "isUsingOverage": True},
+        {
+            "primary": {"used_percent": 10.0, "window_minutes": 300, "resets_at": 0},
+            "secondary": {"used_percent": 95.0, "window_minutes": 10080, "resets_at": 0},
+        },
         now=0.0,
     )
-    assert tok is not None and "overage" in tok.plain
+    assert tok is not None
+    assert "claude 5h 90% left" in tok.plain
+    assert "7d 5% left" in tok.plain
 
 
 def test_claude_usage_token_none_when_empty():
     from contremaitre.tui import _claude_usage_token
 
     assert _claude_usage_token(None) is None
+    assert _claude_usage_token({"primary": None, "secondary": None}) is None

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
     _CLAUDE_OAUTH_ENV,
+    _CLAUDE_STATUSLINE_SCRIPT_BODY,
     CliActorRunner,
     _access_token_exp,
     _claude_effort_arg,
@@ -785,6 +786,11 @@ class ClaudeBuildCommandTest(unittest.TestCase):
             self.assertIn("--output-format", cmd)
             self.assertIn("stream-json", cmd)
             self.assertIn("--verbose", cmd)
+            self.assertIn("--settings", cmd)
+            self.assertEqual(
+                cmd[cmd.index("--settings") + 1],
+                "/root/.claude/projects/.contremaitre/settings.json",
+            )
             self.assertIn("bypassPermissions", cmd)
             # First turn: no session flag — claude mints its own id (we capture it).
             self.assertNotIn("--session-id", cmd)
@@ -882,6 +888,26 @@ class ClaudePrepareHomeTest(unittest.TestCase):
             # No credential file is ever written (auth is the env token).
             self.assertFalse((home / "auth.json").exists())
             self.assertFalse((home / ".credentials.json").exists())
+
+    def test_seeds_statusline_bridge_without_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, _ = _make_claude_runner(Path(tmp))
+            home = runner.driver.prepare_home(runner.agent_home)
+            statusline_dir = home / ".contremaitre"
+            settings = json.loads((statusline_dir / "settings.json").read_text())
+            script = (statusline_dir / "statusline.py").read_text()
+
+            self.assertEqual(settings["statusLine"]["type"], "command")
+            self.assertIn(
+                "/root/.claude/projects/.contremaitre/statusline.py",
+                settings["statusLine"]["command"],
+            )
+            self.assertIn("/root/.claude/projects/.contremaitre/statusline.jsonl", script)
+            self.assertIn("rate_limits", script)
+            self.assertNotIn(_CLAUDE_OAUTH_ENV, script)
+
+    def test_statusline_bridge_script_is_valid_python(self):
+        compile(_CLAUDE_STATUSLINE_SCRIPT_BODY, "statusline.py", "exec")
 
     def test_reseed_preserves_existing_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
