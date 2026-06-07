@@ -2538,7 +2538,7 @@ if _TEXTUAL_AVAILABLE:
             with Horizontal(id="panes"):
                 with Vertical(classes="pane", id="agent-pane"):
                     yield RichLog(
-                        id="agent-log", auto_scroll=False, markup=False, wrap=True, highlight=False
+                        id="agent-log", auto_scroll=False, markup=False, wrap=True, highlight=False, can_focus=False
                     )
                     yield Static("", classes="pane-sub", id="agent-sub")
                 with Vertical(id="sim-column"):
@@ -2552,6 +2552,7 @@ if _TEXTUAL_AVAILABLE:
                             markup=False,
                             wrap=True,
                             highlight=False,
+                            can_focus=False,
                         )
                         yield Static("", classes="pane-sub", id="sim-sub")
                     with Vertical(classes="sim-subpane", id="extra-reviewer-pane"):
@@ -2561,6 +2562,7 @@ if _TEXTUAL_AVAILABLE:
                             markup=False,
                             wrap=True,
                             highlight=False,
+                            can_focus=False,
                         )
                         yield Static("", classes="pane-sub", id="extra-reviewer-sub")
             # Post-publish CLI reviewer (claude/codex) — full-width row that
@@ -2575,11 +2577,12 @@ if _TEXTUAL_AVAILABLE:
                     markup=False,
                     wrap=True,
                     highlight=False,
+                    can_focus=False,
                 )
                 yield Static("", classes="pane-sub", id="cli-review-sub")
             with Vertical(id="activity-panel"):
                 yield RichLog(
-                    id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False
+                    id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False, can_focus=False
                 )
             with Horizontal(id="footer-bar"):
                 yield Static("", id="footer-left")
