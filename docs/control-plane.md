@@ -206,6 +206,8 @@ REVIEW round N  (N = 1 … max_review_rounds, default 3)
                               ▼
 
 HARD GATES (host, all must pass; deterministic)
+  decision owner: publication.decide_publication — the orchestrator computes
+  the git facts, this Module decides (L0 hard gates win precedence over L1).
 
   1. diff_scan          forbidden paths in diff?  (diffscan.py)
   2. diff_hash_matched  diff hash == hash at APPROVED?  (verdicts.diff_hash)
@@ -383,10 +385,11 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`manifest.py`](../contremaitre/manifest.py) — provenance manifest: model IDs, image digest, dockerfile-sha256, skills-lock hash, prompt hashes, contremaitre git SHA + dirty flag, python + contremaitre versions. Tolerates missing tools (returns `None`, never raises). `manifest_digest()` hashes the fields that define "the system under test".
 - [`model_family.py`](../contremaitre/model_family.py) — coarse family classification (deepseek / qwen / glm / anthropic / openai / nemotron / minimax / etc.) for picker suggestions and TUI labels.
 - [`models.py`](../contremaitre/models.py) — `State`, `ReviewVerdict`, `CliReviewVerdict`, `TerminalVerdict`, `ActorMode` (`fake` / `opencode` / `cli`), `PublishMode` enums; `RunConfig` (incl. `actor_mode`, `sim_actor_mode`, `cli_tool`, `codex_model`, `codex_effort`, `claude_model`, `claude_effort`), `RunPaths`, `Caps`, `DepsVolume`, `ParsedVerdict`, `RunResult` dataclasses. The stable seam between CLI, orchestrator, and actors.
-- [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
+- [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication arms (computes git facts, calls [`publication.decide_publication`](../contremaitre/publication.py), then runs the side-effecting publish/block arm), label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
 - [`paths.py`](../contremaitre/paths.py) — slug validation, run-id generation, contained-path builder (prevents escape outside `run_dir`).
 - [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + codex runs, validated as the per-role union: repo/base ref, Docker image, `:ro` mount, network policy (codex defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), `_check_codex_auth` (codex). See [Preflight](#preflight).
 - [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
+- [`publication.py`](../contremaitre/publication.py) — the **publication decision**: the pure, in-process Module that owns whether a post-approval run may publish. `decide_publication(GateInputs) -> GateDecision` over computed facts (diff scan, clean worktree, diff-hash match, `--check-cmd` results) — hard gates win precedence over executable checks. Also owns the hard-gate payload shape (`hard_gate_payload`, `gates_not_evaluated`). Knows nothing about git I/O (the orchestrator computes the facts) or the SIM verdict (already resolved upstream).
 - [`publisher.py`](../contremaitre/publisher.py) — publication boundary: `StubPublisher` (dry-run) vs `GhPublisher` (real `gh pr create --draft`). PR title + body derived from `.contremaitre/SETTLED_DESIGN.md` + SIM verdict summary; `--pr-title` / `--pr-body` override.
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
 - [`tui.py`](../contremaitre/tui.py) — read-only Textual TUI tailing JSONL artifacts. 7-phase footer (init → exploring → grilling → implementing → reviewing → cli_review → done) + per-reviewer status glyphs + warning tokens + subscription-window usage (codex rollout snapshots / claude statusLine snapshots) + verdict badge.

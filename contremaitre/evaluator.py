@@ -22,7 +22,6 @@ from __future__ import annotations
 from typing import Any
 
 from .checks import CheckResult
-from .diffscan import DiffScanResult
 from .flow_use import compute_flow_use
 from .jsonlog import write_json
 from .models import ParsedVerdict, RunPaths, TerminalVerdict
@@ -101,31 +100,6 @@ def write_eval_reports(
     }
     write_json(paths.pr_eval, payload)
     paths.pr_eval_md.write_text(_render_md(payload), encoding="utf-8")
-
-
-def hard_gate_payload(
-    *,
-    diff_scan: DiffScanResult | None,
-    clean_worktree: bool,
-    diff_hash_matched: bool,
-    draft_only: bool = True,
-) -> dict[str, Any]:
-    # `clean_worktree` is expected to hold trivially in normal flow because the
-    # orchestrator commits agent changes before this gate runs. Kept as a
-    # belt-and-suspenders check: if a downstream change ever moves the commit
-    # boundary or introduces post-commit edits, this fails loud.
-    checks = {
-        "diff_scan": diff_scan.passed if diff_scan else False,
-        "clean_worktree": clean_worktree,
-        "diff_hash_matched": diff_hash_matched,
-        "draft_only": draft_only,
-    }
-    return {
-        "passed": all(checks.values()),
-        "checks": checks,
-        "forbidden_files": diff_scan.forbidden_files if diff_scan else [],
-        "changed_files": diff_scan.changed_files if diff_scan else [],
-    }
 
 
 def sim_review_summary(
