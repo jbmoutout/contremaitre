@@ -149,6 +149,17 @@ def build_manifest(config: RunConfig) -> dict[str, Any]:
         "docker_image": config.docker_image,
         "target_url": config.upstream or config.fork or str(config.repo),
         "base": config.base,
+        # Runtime labels are reconstructable from these additive fields.
+        # Keep agent_model/sim_model as the original SUT slugs so canary
+        # digests and older readers remain stable.
+        "actor_mode": config.actor_mode.value,
+        "sim_actor_mode": config.sim_actor_mode.value if config.sim_actor_mode else None,
+        "cli_tool": config.cli_tool,
+        "sim_cli_tool": config.sim_cli_tool,
+        "codex_model": config.codex_model,
+        "codex_effort": config.codex_effort,
+        "claude_model": config.claude_model,
+        "claude_effort": config.claude_effort,
         # Provenance — for downstream evaluators / canary baselines.
         "contremaitre_git_sha": _git_sha(_PROJECT_ROOT),
         "contremaitre_git_dirty": _git_dirty(_PROJECT_ROOT),

@@ -13,14 +13,17 @@ from unittest.mock import MagicMock, patch
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
     _CLAUDE_OAUTH_ENV,
+    _CLAUDE_STATUSLINE_METER_SCRIPT_BODY,
     _CLAUDE_STATUSLINE_SCRIPT_BODY,
     CliActorRunner,
     _access_token_exp,
     _claude_effort_arg,
+    _claude_meter_model,
     _claude_model_arg,
     _codex_effort_arg,
     _codex_model_arg,
     _parse_claude_events,
+    _parse_claude_model,
     _parse_codex_events,
     _stamp_event_slice,
 )
@@ -760,6 +763,37 @@ class ClaudeModelArgTest(unittest.TestCase):
         self.assertEqual(_claude_effort_arg("max"), ["--effort", "max"])
         self.assertEqual(_claude_effort_arg(""), [])
 
+    def test_parse_claude_model_from_turn_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "claude.jsonl"
+            p.write_text(
+                json.dumps(
+                    {"type": "system", "subtype": "init", "session_id": "OLD", "model": "old"}
+                )
+                + "\n"
+            )
+            off = p.stat().st_size
+            with p.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "type": "system",
+                            "subtype": "init",
+                            "session_id": "S",
+                            "model": "claude-opus-4-8",
+                        }
+                    )
+                    + "\n"
+                )
+                fh.write(json.dumps({"type": "result", "subtype": "success", "result": "ok"}))
+
+            self.assertEqual(_parse_claude_model(p, start_offset=off), "claude-opus-4-8")
+
+    def test_meter_model_prefers_known_or_configured_model_then_sonnet(self):
+        self.assertEqual(_claude_meter_model("claude-opus-4-8", "sonnet"), "claude-opus-4-8")
+        self.assertEqual(_claude_meter_model("openrouter/x", "opus"), "opus")
+        self.assertEqual(_claude_meter_model("", ""), "sonnet")
+
 
 class ClaudeBuildCommandTest(unittest.TestCase):
     def test_first_turn_no_session_flag(self):
@@ -839,6 +873,32 @@ class ClaudeBuildCommandTest(unittest.TestCase):
             self.assertIn(f"{runner.worktree}:/app:ro", joined)
             self.assertIn("/tmp/rev:/review:ro", joined)
 
+    def test_usage_meter_command_uses_interactive_statusline_without_bypass(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: "SECRET-TOKEN"}),
+        ):
+            runner, _ = _make_claude_runner(
+                Path(tmp),
+                docker_network="cmtr-int",
+                https_proxy="http://p:3128",
+            )
+            home = runner.driver.prepare_home(runner.agent_home)
+            cmd = runner._build_claude_statusline_meter_command(home=home, role="agent")
+            joined = " ".join(cmd)
+
+            self.assertIn(f"{home / '.contremaitre' / 'claude.json'}:/root/.claude.json:rw", joined)
+            self.assertIn(f"{home}:/root/.claude/projects:rw", joined)
+            self.assertIn(f"{runner.worktree}:/app:ro", joined)
+            self.assertIn("python3", cmd)
+            self.assertIn("/root/.claude/projects/.contremaitre/statusline_meter.py", cmd)
+            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
+            self.assertIn("CONTREMAITRE_CLAUDE_METER_MODEL", cmd)
+            self.assertIn("CONTREMAITRE_CLAUDE_METER_PROMPT", cmd)
+            self.assertNotIn("SECRET-TOKEN", joined)
+            self.assertNotIn("--permission-mode", cmd)
+            self.assertNotIn("bypassPermissions", cmd)
+
 
 class ClaudeContainerEnvTest(unittest.TestCase):
     def test_injects_token_and_scrubs_api_keys(self):
@@ -896,6 +956,8 @@ class ClaudePrepareHomeTest(unittest.TestCase):
             statusline_dir = home / ".contremaitre"
             settings = json.loads((statusline_dir / "settings.json").read_text())
             script = (statusline_dir / "statusline.py").read_text()
+            meter = (statusline_dir / "statusline_meter.py").read_text()
+            global_config = json.loads((statusline_dir / "claude.json").read_text())
 
             self.assertEqual(settings["statusLine"]["type"], "command")
             self.assertIn(
@@ -905,9 +967,15 @@ class ClaudePrepareHomeTest(unittest.TestCase):
             self.assertIn("/root/.claude/projects/.contremaitre/statusline.jsonl", script)
             self.assertIn("rate_limits", script)
             self.assertNotIn(_CLAUDE_OAUTH_ENV, script)
+            self.assertIn("used_percentage", meter)
+            self.assertNotIn(_CLAUDE_OAUTH_ENV, meter)
+            self.assertTrue(global_config["hasCompletedOnboarding"])
+            self.assertTrue(global_config["projects"]["/app"]["hasTrustDialogAccepted"])
+            self.assertNotIn(_CLAUDE_OAUTH_ENV, json.dumps(global_config))
 
     def test_statusline_bridge_script_is_valid_python(self):
         compile(_CLAUDE_STATUSLINE_SCRIPT_BODY, "statusline.py", "exec")
+        compile(_CLAUDE_STATUSLINE_METER_SCRIPT_BODY, "statusline_meter.py", "exec")
 
     def test_reseed_preserves_existing_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1222,6 +1290,51 @@ class CliActorStartEventTest(unittest.TestCase):
                 if e.get("event") == "opencode_actor_start" and e.get("role") == "review"
             ]
             self.assertEqual(starts[0]["reviewer_id"], "extra")
+
+    def test_claude_successful_turn_refreshes_statusline_meter(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: "tok"}),
+        ):
+            runner, _paths = _make_claude_runner(Path(tmp), allow_open_egress=True)
+            runner.driver.parse_events = lambda *a, **k: ("ok", "SID", None, None)
+
+            def _fake_run_container(**kwargs):
+                if kwargs["role"] == "agent":
+                    kwargs["stdout_path"].write_text(
+                        json.dumps(
+                            {
+                                "type": "system",
+                                "subtype": "init",
+                                "session_id": "SID",
+                                "model": "claude-opus-4-8",
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                return (0, "", None)
+
+            with patch(
+                "contremaitre.cli_actor._run_detached_container", side_effect=_fake_run_container
+            ) as run_container:
+                runner.agent_turn("hello")
+                # Join the background initial-probe thread while the patch is still
+                # active so it doesn't escape and call the real docker runner.
+                for t in runner._initial_meter_threads.values():
+                    t.join(timeout=5)
+
+            # 3 calls: initial background probe + agent turn + post-turn meter
+            self.assertEqual(run_container.call_count, 3)
+            calls = run_container.call_args_list
+            actor_cmd = next(c.kwargs["cmd"] for c in calls if "-p" in c.kwargs["cmd"])
+            meter_calls = [c for c in calls if "statusline_meter.py" in " ".join(c.kwargs["cmd"])]
+            self.assertEqual(len(meter_calls), 2)
+            self.assertIn("--permission-mode", actor_cmd)
+            post_turn_meter = meter_calls[-1]
+            self.assertNotIn("--permission-mode", post_turn_meter.kwargs["cmd"])
+            self.assertEqual(post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_MODEL"], "claude-opus-4-8")
+            self.assertEqual(post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_PROMPT"], "OK")
 
 
 if __name__ == "__main__":

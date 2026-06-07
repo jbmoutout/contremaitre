@@ -1585,20 +1585,20 @@ def test_read_codex_usage_none_without_codex_homes(tmp_path):
 def test_codex_usage_token_shows_remaining_and_reset():
     # 84% used at now → 16% left; resets 1h2m out → `codex 16% left (↻1h02m)`.
     usage = _codex_usage_from_payload(_token_count_event(primary=84.0, resets_at=3722)["payload"])
-    assert _codex_usage_token(usage, now=0.0).plain == "codex 16% left (↻1h02m)"
+    assert _codex_usage_token(usage, now=0.0).plain == "codex 5h 16% left (↻1h02m)"
 
 
-def test_codex_usage_token_appends_weekly_only_when_tighter():
-    # weekly looser than session → hidden (just the session headline).
+def test_codex_usage_token_never_appends_weekly_window():
     loose = _codex_usage_from_payload(_token_count_event(primary=84.0, secondary=20.0)["payload"])
     loose_plain = _codex_usage_token(loose, now=0.0).plain
     assert "wk" not in loose_plain and "7d" not in loose_plain
     assert loose_plain.count("left") == 1
-    # weekly tighter than session → surfaced, labelled, with its own % left.
-    tight = _codex_usage_from_payload(_token_count_event(primary=10.0, secondary=95.0)["payload"])
+    tight = _codex_usage_from_payload(
+        _token_count_event(primary=10.0, secondary=95.0, resets_at=None)["payload"]
+    )
     tok = _codex_usage_token(tight, now=0.0).plain
-    assert "90% left" in tok  # session headline
-    assert "7d 5% left" in tok  # 95% used weekly → 5% left
+    assert tok == "codex 5h 90% left"
+    assert "7d" not in tok
 
 
 def test_codex_usage_token_none_when_no_data():
@@ -1814,6 +1814,34 @@ def test_model_effort_display_shows_runtime_prefix():
     assert _model_effort_display("") == "?"
 
 
+def test_read_run_models_reconstructs_cli_role_labels_from_run_config(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": "opencode/deepseek-v4-flash-free",
+                "sim_model": "openrouter/qwen/qwen3-max",
+                "actor_mode": "cli",
+                "sim_actor_mode": "cli",
+                "cli_tool": "codex",
+                "sim_cli_tool": "claude",
+                "codex_model": "gpt-5.5",
+                "codex_effort": "high",
+                "claude_model": "opus",
+                "claude_effort": "max",
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, _extra, _cli_review, _image, _target, _base = _read_run_models(tmp_path)
+    assert agent == "gpt-5.5 (codex, effort=high)"
+    assert sim == "opus (claude, effort=max)"
+
+
 # ===== claude footer usage (statusLine rate-limit indicator) =====
 
 
@@ -1823,11 +1851,13 @@ def _claude_statusline_line(
     seven_day=20.0,
     five_hour_reset=9_999_999_999,
     seven_day_reset=9_999_999_999,
+    model="claude-sonnet-4-6",
 ):
     return json.dumps(
         {
             "recorded_at": 1,
             "session_id": "s",
+            "model": {"id": model, "display_name": model},
             "rate_limits": {
                 "five_hour": {
                     "used_percentage": five_hour,
@@ -1855,6 +1885,8 @@ def test_claude_usage_from_statusline_extracts_windows():
     assert usage["primary"]["window_minutes"] == 300
     assert usage["secondary"]["used_percent"] == 20.0
     assert usage["secondary"]["window_minutes"] == 10080
+    assert usage["model"] == "claude-sonnet-4-6"
+    assert usage["family"] == "sonnet"
 
 
 def test_read_claude_usage_picks_last_statusline_snapshot(tmp_path):
@@ -1872,6 +1904,26 @@ def test_read_claude_usage_picks_last_statusline_snapshot(tmp_path):
     )
     usage = _read_claude_usage(tmp_path)
     assert usage is not None and usage["primary"]["resets_at"] == 222
+
+
+def test_read_claude_usages_keeps_latest_per_model(tmp_path):
+    from contremaitre.tui import _read_claude_usages
+
+    snap = tmp_path / "claude-agent-home" / ".contremaitre" / "statusline.jsonl"
+    snap.parent.mkdir(parents=True)
+    snap.write_text(
+        "\n".join(
+            [
+                _claude_statusline_line(model="claude-sonnet-4-6", five_hour=80.0),
+                _claude_statusline_line(model="claude-opus-4-8", five_hour=60.0),
+                _claude_statusline_line(model="claude-sonnet-4-6", five_hour=30.0),
+            ]
+        )
+    )
+    usages = _read_claude_usages(tmp_path)
+    by_model = {u["model"]: u for u in usages}
+    assert by_model["claude-sonnet-4-6"]["primary"]["used_percent"] == 30.0
+    assert by_model["claude-opus-4-8"]["primary"]["used_percent"] == 60.0
 
 
 def test_read_claude_usage_none_for_codex_run(tmp_path):
@@ -1901,10 +1953,11 @@ def test_claude_usage_token_formats_window_and_reset():
             },
         },
         now=0.0,
+        model_label="sonnet",
     )
     assert tok is not None
     plain = tok.plain
-    assert plain == "claude 5h 16% left (↻1h02m)"
+    assert plain == "claude sonnet 5h 16% left (↻1h02m)"
 
 
 def test_claude_usage_token_appends_weekly_only_when_tighter():
@@ -1916,9 +1969,10 @@ def test_claude_usage_token_appends_weekly_only_when_tighter():
             "secondary": {"used_percent": 95.0, "window_minutes": 10080, "resets_at": 0},
         },
         now=0.0,
+        model_label="opus",
     )
     assert tok is not None
-    assert "claude 5h 90% left" in tok.plain
+    assert "claude opus 5h 90% left" in tok.plain
     assert "7d 5% left" in tok.plain
 
 
@@ -1927,3 +1981,74 @@ def test_claude_usage_token_none_when_empty():
 
     assert _claude_usage_token(None) is None
     assert _claude_usage_token({"primary": None, "secondary": None}) is None
+
+
+def test_footer_meter_tokens_are_per_role_and_show_unknown_counters():
+    from contremaitre.tui import _footer_meter_tokens
+
+    tokens = _footer_meter_tokens(
+        agent_model="gpt-5.5 (codex, effort=high)",
+        sim_model="claude-sonnet-4-6 (claude, effort=high)",
+        agent_events=[],
+        sim_events=[],
+        codex_usage=None,
+        claude_usages=[],
+        now=0.0,
+    )
+    assert [t.plain for t in tokens] == ["A codex ?", "S claude ?"]
+
+
+def test_footer_meter_tokens_mix_free_paid_codex_and_model_specific_claude():
+    from contremaitre.tui import _claude_usage_from_statusline, _footer_meter_tokens
+
+    codex_usage = _codex_usage_from_payload(
+        _token_count_event(primary=84.0, resets_at=None)["payload"]
+    )
+    claude_usages = [
+        _claude_usage_from_statusline(
+            json.loads(
+                _claude_statusline_line(
+                    model="claude-sonnet-4-6",
+                    five_hour=3.0,
+                    five_hour_reset=None,
+                    seven_day_reset=None,
+                )
+            )
+        ),
+        _claude_usage_from_statusline(
+            json.loads(
+                _claude_statusline_line(
+                    model="claude-opus-4-8",
+                    five_hour=75.0,
+                    five_hour_reset=None,
+                    seven_day_reset=None,
+                )
+            )
+        ),
+    ]
+
+    assert [
+        t.plain
+        for t in _footer_meter_tokens(
+            agent_model="opencode/deepseek-v4-flash-free",
+            sim_model="openrouter/qwen/qwen3-max",
+            agent_events=[],
+            sim_events=[{"type": "step_finish", "part": {"cost_usd": 0.1234}}],
+            codex_usage=codex_usage,
+            claude_usages=[u for u in claude_usages if u],
+            now=0.0,
+        )
+    ] == ["A free (◕‿◕)", "S $0.1234"]
+
+    assert [
+        t.plain
+        for t in _footer_meter_tokens(
+            agent_model="gpt-5.5 (codex, effort=high)",
+            sim_model="claude-opus-4-8 (claude, effort=max)",
+            agent_events=[],
+            sim_events=[],
+            codex_usage=codex_usage,
+            claude_usages=[u for u in claude_usages if u],
+            now=0.0,
+        )
+    ] == ["A codex 5h 16% left", "S claude opus 5h 25% left"]

@@ -38,6 +38,7 @@ from typing import Any
 from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
+from .models import role_model_label
 
 try:
     from rich.table import Table
@@ -188,6 +189,34 @@ def _is_free_model(model: str) -> bool:
         return False
     bare = model.rsplit("/", 1)[-1]
     return bare.endswith("-free") or bare == "big-pickle" or bare.endswith(":free")
+
+
+def _model_name_from_label(label: str | None) -> str:
+    """Strip the runtime annotation from `role_model_label` output."""
+
+    if not label:
+        return ""
+    return label.partition(" (")[0].strip()
+
+
+def _cli_tool_from_model_label(label: str | None) -> str | None:
+    """Return `codex` / `claude` for CLI role labels, else None."""
+
+    if not label or " (" not in label:
+        return None
+    _name, _sep, annot = label.partition(" (")
+    tool = annot.rstrip(")").split(",", 1)[0].strip().lower()
+    return tool if tool in {"codex", "claude"} else None
+
+
+def _model_family(model: str | None) -> str | None:
+    """Claude footer label family from a model id or role label."""
+
+    name = _model_name_from_label(model).lower()
+    for family in ("opus", "sonnet", "haiku"):
+        if family in name:
+            return family
+    return None
 
 
 def _ts_to_ms(ts: object) -> int | None:
@@ -1511,39 +1540,29 @@ def _codex_usage_token(
     tool: str = "codex",
     now: float | None = None,
 ) -> "Text | None":
-    """The `codex 25% left (↻6m)` footer fragment, or None when no data.
+    """The `codex 5h 25% left (↻6m)` footer fragment, or None when no data.
 
-    Headlines the PRIMARY (short / session) window's remaining budget with a
-    reset countdown; the budget number is amber/red when low. The SECONDARY
-    (weekly) window is appended (labelled, since it needs disambiguating) only
-    when it's the tighter constraint, so the footer normally stays compact but
-    never hides the limit a run will actually hit first.
+    Codex sometimes emits both rollout windows, but the footer intentionally
+    shows only the primary short window so the label is stable and comparable
+    across turns.
     """
 
     if not usage:
         return None
-    # Headline the primary (session) window; if only the weekly is populated,
-    # headline that instead rather than show nothing.
-    head = usage.get("primary") or usage.get("secondary")
+    head = usage.get("primary")
     if not head:
         return None
-    other = usage.get("secondary") if head is usage.get("primary") else None
     now = time.time() if now is None else now
 
     rem_p = max(0.0, 100.0 - head["used_percent"])
+    win_p = _fmt_window_minutes(head.get("window_minutes")) or "5h"
     text = Text()
     text.append(f"{tool} ", style=_PAL_DIM)
+    text.append(f"{win_p} ", style=_PAL_VDIM)
     text.append(f"{round(rem_p)}% left", style=_usage_pct_style(rem_p))
     reset = _fmt_reset(head.get("resets_at"), now)
     if reset:
         text.append(f" ({reset})", style=_PAL_VDIM)
-
-    if other:
-        rem_s = max(0.0, 100.0 - other["used_percent"])
-        if rem_s < rem_p:  # the weekly window is the binding limit — surface it too
-            win_s = _fmt_window_minutes(other.get("window_minutes")) or "wk"
-            text.append(f" · {win_s} ", style=_PAL_VDIM)
-            text.append(f"{round(rem_s)}% left", style=_usage_pct_style(rem_s))
     return text
 
 
@@ -1552,6 +1571,18 @@ def _codex_usage_token(
 # `stream-json` stdout we tail for chat/tool events. ClaudeDriver installs a
 # tiny per-run statusLine command that whitelists those fields into
 # `claude-*-home/.contremaitre/statusline.jsonl`; the TUI tails that snapshot.
+
+
+def _statusline_model_id(snapshot: dict[str, Any]) -> str | None:
+    model = snapshot.get("model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    if isinstance(model, dict):
+        for key in ("id", "model", "name", "display_name"):
+            value = model.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
 
 
 def _claude_usage_from_statusline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -1575,11 +1606,18 @@ def _claude_usage_from_statusline(snapshot: dict[str, Any]) -> dict[str, Any] | 
     secondary = _window("seven_day", 10080)
     if primary is None and secondary is None:
         return None
-    return {"primary": primary, "secondary": secondary}
+    model = _statusline_model_id(snapshot)
+    return {
+        "primary": primary,
+        "secondary": secondary,
+        "model": model,
+        "family": _model_family(model),
+        "recorded_at": snapshot.get("recorded_at"),
+    }
 
 
-def _last_claude_statusline_usage(path: Path) -> dict[str, Any] | None:
-    """Latest populated statusLine usage snapshot in one claude home."""
+def _last_claude_statusline_usages(path: Path) -> list[dict[str, Any]]:
+    """Latest populated statusLine usage snapshots per model in one home."""
 
     try:
         size = path.stat().st_size
@@ -1589,7 +1627,9 @@ def _last_claude_statusline_usage(path: Path) -> dict[str, Any] | None:
                 fh.readline()  # drop the partial line the seek landed mid-way
             tail = fh.read().decode("utf-8", errors="replace")
     except OSError:
-        return None
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for line in reversed(tail.splitlines()):
         line = line.strip()
         if not line or '"rate_limits"' not in line:
@@ -1601,8 +1641,40 @@ def _last_claude_statusline_usage(path: Path) -> dict[str, Any] | None:
         if isinstance(snapshot, dict):
             usage = _claude_usage_from_statusline(snapshot)
             if usage is not None:
-                return usage
-    return None
+                key = usage.get("model") or "__unknown__"
+                if key not in seen:
+                    seen.add(key)
+                    out.append(usage)
+    return out
+
+
+def _last_claude_statusline_usage(path: Path) -> dict[str, Any] | None:
+    """Latest populated statusLine usage snapshot in one claude home."""
+
+    usages = _last_claude_statusline_usages(path)
+    return usages[0] if usages else None
+
+
+def _read_claude_usages(run_dir: Path) -> list[dict[str, Any]]:
+    """Latest claude statusLine snapshots for each model in `run_dir`."""
+
+    snapshots: list[tuple[float, Path]] = []
+    for home in run_dir.glob("claude-*-home"):
+        p = home / ".contremaitre" / "statusline.jsonl"
+        try:
+            snapshots.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for _mtime, p in sorted(snapshots, reverse=True):
+        for usage in _last_claude_statusline_usages(p):
+            key = usage.get("model") or "__unknown__"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(usage)
+    return out
 
 
 def _read_claude_usage(run_dir: Path) -> dict[str, Any] | None:
@@ -1613,24 +1685,40 @@ def _read_claude_usage(run_dir: Path) -> dict[str, Any] | None:
     statusLine snapshot with subscription rate_limits, or for non-claude runs.
     """
 
-    snapshots: list[tuple[float, Path]] = []
-    for home in run_dir.glob("claude-*-home"):
-        p = home / ".contremaitre" / "statusline.jsonl"
-        try:
-            snapshots.append((p.stat().st_mtime, p))
-        except OSError:
-            continue
-    for _mtime, p in sorted(snapshots, reverse=True):
-        usage = _last_claude_statusline_usage(p)
-        if usage is not None:
-            return usage
-    return None
+    usages = _read_claude_usages(run_dir)
+    return usages[0] if usages else None
+
+
+def _select_claude_usage(
+    usages: list[dict[str, Any]],
+    model_label: str | None,
+) -> dict[str, Any] | None:
+    """Pick the statusLine snapshot matching a role's active Claude model."""
+
+    if not usages:
+        return None
+    target = _model_name_from_label(model_label)
+    target_norm = target.lower()
+    family = _model_family(target)
+    if target_norm and target_norm not in {"?", "claude default"}:
+        for usage in usages:
+            model = usage.get("model")
+            if isinstance(model, str) and model.lower() == target_norm:
+                return usage
+        if family:
+            for usage in usages:
+                if usage.get("family") == family:
+                    return usage
+            return None
+        return usages[0] if len(usages) == 1 else None
+    return usages[0]
 
 
 def _claude_usage_token(
     usage: dict[str, Any] | None,
     *,
     now: float | None = None,
+    model_label: str | None = None,
 ) -> "Text | None":
     """The `claude 5h 25% left (↻1h02m)` footer fragment, or None."""
 
@@ -1645,6 +1733,8 @@ def _claude_usage_token(
     win_p = _fmt_window_minutes(head.get("window_minutes")) or "limit"
     text = Text()
     text.append("claude ", style=_PAL_DIM)
+    if model_label:
+        text.append(f"{model_label} ", style=_PAL_DIM)
     text.append(f"{win_p} ", style=_PAL_VDIM)
     text.append(f"{round(rem_p)}% left", style=_usage_pct_style(rem_p))
     reset = _fmt_reset(head.get("resets_at"), now)
@@ -1657,6 +1747,62 @@ def _claude_usage_token(
             text.append(f" · {win_s} ", style=_PAL_VDIM)
             text.append(f"{round(rem_s)}% left", style=_usage_pct_style(rem_s))
     return text
+
+
+def _footer_meter_tokens(
+    *,
+    agent_model: str,
+    sim_model: str,
+    agent_events: list[dict[str, Any]],
+    sim_events: list[dict[str, Any]],
+    codex_usage: dict[str, Any] | None,
+    claude_usages: list[dict[str, Any]],
+    now: float | None = None,
+    free_wink: bool = False,
+) -> list["Text"]:
+    """Per-role footer meter tokens for AGENT and SIM."""
+
+    def _with_role(role: str, body: Text) -> Text:
+        text = Text()
+        text.append(f"{role} ", style=_PAL_DIM)
+        text.append(body)
+        return text
+
+    def _unknown(role: str, tool: str) -> Text:
+        text = Text()
+        text.append(f"{role} ", style=_PAL_DIM)
+        text.append(f"{tool} ?", style=_PAL_WARN)
+        return text
+
+    def _free(role: str) -> Text:
+        face = "◕‿-" if free_wink else "◕‿◕"
+        text = Text()
+        text.append(f"{role} ", style=_PAL_DIM)
+        text.append(f"free ({face})", style=_PAL_SUCCESS)
+        return text
+
+    def _paid(role: str, events: list[dict[str, Any]]) -> Text:
+        cost = sum_costs_in_events(events)
+        text = Text()
+        text.append(f"{role} ", style=_PAL_DIM)
+        text.append(f"${cost:.4f}", style=_PAL_TEXT if cost > 0 else _PAL_DIM)
+        return text
+
+    def _role(role: str, model: str, events: list[dict[str, Any]]) -> Text:
+        if _is_free_model(model):
+            return _free(role)
+        tool = _cli_tool_from_model_label(model)
+        if tool == "codex":
+            token = _codex_usage_token(codex_usage, now=now)
+            return _with_role(role, token) if token is not None else _unknown(role, "codex")
+        if tool == "claude":
+            usage = _select_claude_usage(claude_usages, model)
+            label = _model_family(model) or (usage.get("family") if usage else None)
+            token = _claude_usage_token(usage, now=now, model_label=label)
+            return _with_role(role, token) if token is not None else _unknown(role, "claude")
+        return _paid(role, events)
+
+    return [_role("A", agent_model, agent_events), _role("S", sim_model, sim_events)]
 
 
 # ---------- Per-event Rich renderables (only used when textual is loaded) ----------
@@ -2306,6 +2452,7 @@ if _TEXTUAL_AVAILABLE:
             self._agent_idx = 0
             self._agent_model_resolved = False
             self._sim_idx = 0
+            self._sim_model_resolved = False
             self._extra_reviewer_idx = 0
             self._extra_reviewer_mascot_shown = False
             self._guardrail_idx = 0
@@ -2317,7 +2464,7 @@ if _TEXTUAL_AVAILABLE:
             # non-codex runs.
             self._codex_usage: dict[str, Any] | None = None
             self._codex_usage_ts = 0.0
-            self._claude_usage: dict[str, Any] | None = None
+            self._claude_usages: list[dict[str, Any]] = []
             self._showed_initial_prompt = False
             # Snapshot of elapsed / last-write age at terminal state — once
             # stats.json appears the run is over and these numbers should
@@ -2473,7 +2620,7 @@ if _TEXTUAL_AVAILABLE:
                 self._docker_ts = now
             if now - self._codex_usage_ts > CODEX_USAGE_REFRESH_S:
                 self._codex_usage = _read_codex_usage(self.run_dir)
-                self._claude_usage = _read_claude_usage(self.run_dir)
+                self._claude_usages = _read_claude_usages(self.run_dir)
                 self._codex_usage_ts = now
             self._update_turn_separators()
             self._update_agent_log()
@@ -2573,6 +2720,11 @@ if _TEXTUAL_AVAILABLE:
 
         def _update_sim_log(self) -> None:
             events = _read_jsonl(self.paths["sim_raw_export"])
+            if not self._sim_model_resolved:
+                model = _model_from_init_events(events)
+                if model:
+                    self.sim_model = _relabel_with_real_model(self.sim_model, model)
+                    self._sim_model_resolved = True
             widget = self.query_one("#sim-log", RichLog)
             at_bottom = self._at_bottom(widget)
             for e in events[self._sim_idx :]:
@@ -3192,27 +3344,20 @@ if _TEXTUAL_AVAILABLE:
             # to the right edge regardless of left-segment length.
             right = Text()
             right.append(_fmt_elapsed(elapsed), style=_PAL_DIM)
-            right.append(" · ", style=_PAL_VDIM)
-            if _is_free_model(self.agent_model) and _is_free_model(self.sim_model):
-                if self._wink_ticks_remaining > 0:
-                    self._wink_ticks_remaining -= 1
-                    right.append("free (◕‿-)", style=_PAL_SUCCESS)
-                else:
-                    right.append("free (◕‿◕)", style=_PAL_SUCCESS)
-            else:
-                cost_usd = sum_costs_in_events(agent_events, sim_events)
-                right.append(f"${cost_usd:.4f}", style=_PAL_TEXT if cost_usd > 0 else _PAL_DIM)
-            # Subscription usage — codex (`codex 25% left`) and/or claude
-            # (`claude 5h 25% left`); only shown when that tool's rate-limit
-            # snapshot exists, so a single-tool run shows exactly one (and a
-            # mixed run both).
-            for usage_token in (
-                _codex_usage_token(self._codex_usage),
-                _claude_usage_token(self._claude_usage),
-            ):
-                if usage_token is not None:
-                    right.append(" · ", style=_PAL_VDIM)
-                    right.append(usage_token)
+            meter_tokens = _footer_meter_tokens(
+                agent_model=self.agent_model,
+                sim_model=self.sim_model,
+                agent_events=agent_events,
+                sim_events=sim_events,
+                codex_usage=self._codex_usage,
+                claude_usages=self._claude_usages,
+                free_wink=self._wink_ticks_remaining > 0,
+            )
+            if self._wink_ticks_remaining > 0:
+                self._wink_ticks_remaining -= 1
+            for meter_token in meter_tokens:
+                right.append(" · ", style=_PAL_VDIM)
+                right.append(meter_token)
             right.append("     ")
             right.append(status_text, style=status_style)
 
@@ -3453,9 +3598,31 @@ def _read_run_models(
     if config.exists():
         try:
             d = json.loads(config.read_text(encoding="utf-8"))
+            if d.get("actor_mode"):
+                label_kw = dict(
+                    codex_model=d.get("codex_model", ""),
+                    codex_effort=d.get("codex_effort", ""),
+                    claude_model=d.get("claude_model", ""),
+                    claude_effort=d.get("claude_effort", "high"),
+                )
+                agent_model = role_model_label(
+                    actor_mode=d.get("actor_mode"),
+                    opencode_model=d.get("agent_model", "?"),
+                    cli_tool=d.get("cli_tool", "codex"),
+                    **label_kw,
+                )
+                sim_model = role_model_label(
+                    actor_mode=d.get("sim_actor_mode") or d.get("actor_mode"),
+                    opencode_model=d.get("sim_model", "?"),
+                    cli_tool=d.get("sim_cli_tool") or d.get("cli_tool", "codex"),
+                    **label_kw,
+                )
+            else:
+                agent_model = d.get("agent_model", "?")
+                sim_model = d.get("sim_model", "?")
             return (
-                d.get("agent_model", "?"),
-                d.get("sim_model", "?"),
+                agent_model,
+                sim_model,
                 d.get("extra_reviewer_model"),
                 d.get("cli_reviewer", "none"),
                 d.get("docker_image", "?"),

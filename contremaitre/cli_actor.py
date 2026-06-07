@@ -67,6 +67,7 @@ import base64
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Protocol
@@ -91,11 +92,17 @@ _CLAUDE_OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 _CLAUDE_STATUSLINE_DIR = ".contremaitre"
 _CLAUDE_STATUSLINE_SETTINGS = "settings.json"
 _CLAUDE_STATUSLINE_SCRIPT = "statusline.py"
+_CLAUDE_STATUSLINE_METER_SCRIPT = "statusline_meter.py"
+_CLAUDE_STATUSLINE_GLOBAL_CONFIG = "claude.json"
 _CLAUDE_STATUSLINE_CONTAINER_DIR = f"/root/.claude/projects/{_CLAUDE_STATUSLINE_DIR}"
 _CLAUDE_STATUSLINE_SETTINGS_PATH = (
     f"{_CLAUDE_STATUSLINE_CONTAINER_DIR}/{_CLAUDE_STATUSLINE_SETTINGS}"
 )
 _CLAUDE_STATUSLINE_SCRIPT_PATH = f"{_CLAUDE_STATUSLINE_CONTAINER_DIR}/{_CLAUDE_STATUSLINE_SCRIPT}"
+_CLAUDE_STATUSLINE_METER_SCRIPT_PATH = (
+    f"{_CLAUDE_STATUSLINE_CONTAINER_DIR}/{_CLAUDE_STATUSLINE_METER_SCRIPT}"
+)
+_CLAUDE_STATUSLINE_METER_TIMEOUT_SECONDS = 90
 
 _CLAUDE_STATUSLINE_SCRIPT_BODY = """#!/usr/bin/env python3
 from __future__ import annotations
@@ -149,6 +156,115 @@ def main() -> int:
         if used is not None:
             parts.append(f"{label}:{used}% used")
     print("cmtr " + " ".join(parts) if parts else "cmtr")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+_CLAUDE_STATUSLINE_METER_SCRIPT_BODY = """#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import pty
+import select
+import signal
+import subprocess
+import time
+
+
+BASE = "/root/.claude/projects/.contremaitre"
+STATUSLINE = f"{BASE}/statusline.jsonl"
+TTY_LOG = f"{BASE}/statusline_meter_tty.log"
+SETTINGS = f"{BASE}/settings.json"
+PROMPT = os.environ.get("CONTREMAITRE_CLAUDE_METER_PROMPT", "OK")
+MODEL = os.environ.get("CONTREMAITRE_CLAUDE_METER_MODEL", "sonnet")
+TIMEOUT = float(os.environ.get("CONTREMAITRE_CLAUDE_METER_TIMEOUT_SECONDS", "75"))
+# Only count snapshots written after this probe started, so stale data from the
+# preceding agent turn's statusLine hook doesn't cause an immediate false-positive.
+START_TIME = time.time()
+
+
+def _has_usage() -> bool:
+    try:
+        lines = open(STATUSLINE, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            snap = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if snap.get("recorded_at", 0) < START_TIME:
+            continue
+        rate_limits = snap.get("rate_limits")
+        if not isinstance(rate_limits, dict):
+            continue
+        for window in rate_limits.values():
+            if isinstance(window, dict) and isinstance(window.get("used_percentage"), (int, float)):
+                return True
+    return False
+
+
+def main() -> int:
+    cmd = ["claude", "--settings", SETTINGS]
+    if MODEL:
+        cmd += ["--model", MODEL]
+
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        cmd,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        preexec_fn=os.setsid,
+    )
+    os.close(slave)
+
+    sent_at: float | None = None
+    second_enter = False
+    deadline = time.time() + TIMEOUT
+    try:
+        with open(TTY_LOG, "ab", buffering=0) as log:
+            while time.time() < deadline:
+                now = time.time()
+                if sent_at is None:
+                    os.write(master, PROMPT.encode("utf-8") + b"\\r")
+                    sent_at = now
+                elif not second_enter and now - sent_at > 3:
+                    # Some terminals require an extra Enter after the prompt is
+                    # accepted into the input widget; harmless if already sent.
+                    os.write(master, b"\\r")
+                    second_enter = True
+
+                if _has_usage():
+                    return 0
+
+                readable, _, _ = select.select([master], [], [], 0.2)
+                if readable:
+                    try:
+                        log.write(os.read(master, 4096))
+                    except OSError:
+                        break
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                pass
+
     return 0
 
 
@@ -343,6 +459,47 @@ def _parse_claude_events(
         elif session_id is None and ev.get("session_id"):
             session_id = ev.get("session_id")
     return final_text, session_id, usage, error
+
+
+def _parse_claude_model(events_path: Path, *, start_offset: int = 0) -> str | None:
+    """The actual Claude model reported by this turn's stream-json slice."""
+
+    if not events_path.exists():
+        return None
+    try:
+        with events_path.open("r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(start_offset)
+            slice_text = fh.read()
+    except OSError:
+        return None
+    fallback: str | None = None
+    for line in slice_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        model = ev.get("model")
+        if isinstance(model, str) and model:
+            if ev.get("type") == "system" and ev.get("subtype") == "init":
+                return model
+            fallback = fallback or model
+    return fallback
+
+
+def _claude_meter_model(model: str, default: str = "") -> str:
+    """Best model name for the exact Claude usage meter.
+
+    Prefer the model Claude reported in the event stream. If that is missing,
+    mirror `_claude_model_arg`'s configured fallback. With no information, use
+    Sonnet as the cheapest useful statusLine probe rather than the account's
+    unknown interactive default.
+    """
+
+    chosen = model if (model and "/" not in model) else default
+    return chosen or "sonnet"
 
 
 # ===== shared timestamp back-fill =============================================
@@ -620,6 +777,9 @@ class ClaudeDriver:
         script = statusline_dir / _CLAUDE_STATUSLINE_SCRIPT
         script.write_text(_CLAUDE_STATUSLINE_SCRIPT_BODY, encoding="utf-8")
         script.chmod(0o700)
+        meter = statusline_dir / _CLAUDE_STATUSLINE_METER_SCRIPT
+        meter.write_text(_CLAUDE_STATUSLINE_METER_SCRIPT_BODY, encoding="utf-8")
+        meter.chmod(0o700)
         settings = {
             "statusLine": {
                 "type": "command",
@@ -629,6 +789,37 @@ class ClaudeDriver:
         }
         (statusline_dir / _CLAUDE_STATUSLINE_SETTINGS).write_text(
             json.dumps(settings, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+        # Interactive Claude reads onboarding/trust state from ~/.claude.json,
+        # not ~/.claude/projects. The headless actor uses `-p`, but the exact
+        # subscription meter must exercise the interactive statusLine surface;
+        # seed only the non-secret flags needed to get past first-run screens.
+        (statusline_dir / _CLAUDE_STATUSLINE_GLOBAL_CONFIG).write_text(
+            json.dumps(
+                {
+                    "hasCompletedOnboarding": True,
+                    "lastOnboardingVersion": "2.1.165",
+                    "firstStartTime": "2026-01-01T00:00:00.000Z",
+                    "numStartups": 1,
+                    "installMethod": "native",
+                    "tipsHistory": {},
+                    "projects": {
+                        "/app": {
+                            "projectOnboardingSeenCount": 1,
+                            "hasTrustDialogAccepted": True,
+                            "hasClaudeMdExternalIncludesApproved": True,
+                            "hasClaudeMdExternalIncludesWarningShown": True,
+                            "allowedTools": [],
+                            "mcpServers": {},
+                            "enabledMcpjsonServers": [],
+                            "disabledMcpjsonServers": [],
+                        }
+                    },
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
         return home
@@ -720,6 +911,11 @@ class CliActorRunner:
         self.review_home = paths.run_dir / f"{prefix}-review-home"
         self._agent_session: str | None = None
         self._sim_session: str | None = None
+        # Track homes that have already received an initial background meter probe
+        # so we don't double-fire on the second call for the same home.
+        self._meter_primed_homes: set[Path] = set()
+        # Background initial-probe threads indexed by home, for tests to join.
+        self._initial_meter_threads: dict[Path, threading.Thread] = {}
 
     # ----- protocol surface -------------------------------------------------
 
@@ -837,6 +1033,19 @@ class CliActorRunner:
         self._assert_egress_locked()
         self.driver.ensure_ready()
         home = self.driver.prepare_home(home)
+        # Prime the claude subscription meter in the background on the first call
+        # per home so the TUI footer shows real numbers from the start rather than
+        # "?" until the first turn completes. Runs concurrently with the agent turn.
+        if self.driver.name == "claude" and home not in self._meter_primed_homes:
+            self._meter_primed_homes.add(home)
+            prime_model = _claude_meter_model("", self.config.claude_model)
+            t = threading.Thread(
+                target=self._refresh_claude_statusline_usage,
+                kwargs={"home": home, "role": f"{role}-initial", "model": prime_model},
+                daemon=True,
+            )
+            self._initial_meter_threads[home] = t
+            t.start()
         existing_session = getattr(self, session_attr) if session_attr else None
 
         # The CLI's JSON stdout IS the event stream; we point the detached
@@ -908,6 +1117,13 @@ class CliActorRunner:
         # final reply (TUI renders it) and usage (costs roll it up). Transcript
         # stays the curated, human-readable record of the final reply per turn.
         append_transcript(self.paths.transcript, speaker=speaker, phase=phase, text=final_text)
+        if self.driver.name == "claude":
+            reported_model = _parse_claude_model(raw_export, start_offset=start_offset)
+            meter_model = _claude_meter_model(
+                reported_model or model,
+                self.config.claude_model,
+            )
+            self._refresh_claude_statusline_usage(home=home, role=role, model=meter_model)
         return ActorOutput(text=final_text, stderr=stderr, returncode=returncode)
 
     def _build_command(
@@ -966,6 +1182,95 @@ class CliActorRunner:
         for name in self.driver.container_env_names():
             cmd += ["-e", name]
         cmd += ["-w", "/app", self.config.docker_image, *inner]
+        return cmd
+
+    def _refresh_claude_statusline_usage(self, *, home: Path, role: str, model: str) -> None:
+        """Best-effort exact Claude.ai subscription meter refresh.
+
+        Claude's `-p --output-format stream-json` mode exposes only reset/status
+        rate-limit events. The exact percentages are available through
+        interactive `statusLine.rate_limits`, so after a successful claude turn
+        we run a tiny no-bypass interactive probe that writes into the same
+        `statusline.jsonl` the TUI already tails. Meter failures must not fail a
+        productive actor turn; they only mean the footer stays stale/empty.
+        """
+
+        statusline_dir = home / _CLAUDE_STATUSLINE_DIR
+        stdout_path = statusline_dir / "statusline_meter_stdout.log"
+        error_path = statusline_dir / "statusline_meter_error.log"
+        try:
+            cmd = self._build_claude_statusline_meter_command(home=home, role=role)
+            env = self.driver.container_env(self._docker_env())
+            env["TERM"] = "xterm-256color"
+            env["CONTREMAITRE_CLAUDE_METER_MODEL"] = model
+            env["CONTREMAITRE_CLAUDE_METER_PROMPT"] = "OK"
+            env["CONTREMAITRE_CLAUDE_METER_TIMEOUT_SECONDS"] = "75"
+            returncode, stderr, _fast_fail = _run_detached_container(
+                cmd=cmd,
+                env=env,
+                stdout_path=stdout_path,
+                timeout_seconds=_CLAUDE_STATUSLINE_METER_TIMEOUT_SECONDS,
+                role=f"{role} claude usage meter",
+                stdout_stall_seconds=None,
+            )
+            if returncode != 0:
+                error_path.write_text(
+                    f"claude usage meter exited {returncode}: {stderr[:500]}",
+                    encoding="utf-8",
+                )
+        except Exception as exc:  # best-effort: never break the completed actor turn
+            error_path.write_text(f"{type(exc).__name__}: {exc}", encoding="utf-8")
+
+    def _build_claude_statusline_meter_command(self, *, home: Path, role: str) -> list[str]:
+        """`docker run -d` argv for the exact Claude statusLine usage probe."""
+
+        statusline_dir = home / _CLAUDE_STATUSLINE_DIR
+        global_config = statusline_dir / _CLAUDE_STATUSLINE_GLOBAL_CONFIG
+        cmd = [
+            "docker",
+            "run",
+            "-d",
+            "--label",
+            f"contremaitre.run-id={self.paths.run_id}",
+            "--label",
+            f"contremaitre.role={role}-claude-meter",
+        ]
+        if self.config.docker_network:
+            cmd += ["--network", self.config.docker_network]
+        if self.config.container_user:
+            cmd += ["--user", self.config.container_user]
+        cmd += [
+            "-v",
+            f"{global_config}:/root/.claude.json:rw",
+            "-v",
+            f"{home}:{self.driver.home_mount_target}:rw",
+            "-v",
+            f"{self.worktree}:/app:ro",
+        ]
+        for var, val in (
+            ("HTTP_PROXY", self.config.http_proxy),
+            ("HTTPS_PROXY", self.config.https_proxy),
+            ("NO_PROXY", self.config.no_proxy),
+        ):
+            if val:
+                cmd += ["-e", var]
+        for name in self.driver.container_env_names():
+            cmd += ["-e", name]
+        cmd += [
+            "-e",
+            "TERM",
+            "-e",
+            "CONTREMAITRE_CLAUDE_METER_MODEL",
+            "-e",
+            "CONTREMAITRE_CLAUDE_METER_PROMPT",
+            "-e",
+            "CONTREMAITRE_CLAUDE_METER_TIMEOUT_SECONDS",
+            "-w",
+            "/app",
+            self.config.docker_image,
+            "python3",
+            _CLAUDE_STATUSLINE_METER_SCRIPT_PATH,
+        ]
         return cmd
 
     def _docker_env(self) -> dict[str, str]:
