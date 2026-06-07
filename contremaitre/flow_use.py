@@ -98,9 +98,10 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     """
     if agent_events is None:
         agent_events = read_jsonl(paths.raw_export)
-    tool_calls = [e for e in agent_events if e.get("type") == "tool_use"]
-    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
-    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
+    # Mode-agnostic write detection: opencode `tool_use` + claude `assistant`
+    # tool_use blocks. (Codex has no per-event timestamp — see below.)
+    settled_event = _find_write_event(agent_events, _SETTLED_RE)
+    impl_event = _find_write_event(agent_events, _IMPL_COMPLETE_RE)
     settled_ms = _timestamp_ms(settled_event)
     impl_ms = _timestamp_ms(impl_event)
 
@@ -117,17 +118,39 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
         starts.append((ts, role))
     starts.sort()
 
+    # max(round), not len(): with the extra reviewer enabled, review_cycles
+    # carries two entries per round plus optional `unavailable` entries; the
+    # round number is the canonical counter. Always recoverable.
+    cycles = read_jsonl(paths.review_cycles)
+    review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
+
+    # The grilling/impl split needs BOTH the SETTLED write timestamp and at
+    # least one agent turn boundary. Neither is present for codex (no
+    # per-event ts) or for pre-`actor-start` CLI runs (no agent
+    # opencode_actor_start logged). In those cases the split is genuinely
+    # unrecoverable, so emit None — an honest "unknown" the readouts render
+    # as "—", instead of the min-of-total-turns garbage the old code
+    # returned when settled_ms was None.
+    has_agent_turn = any(role == "agent" for _, role in starts)
+    if settled_ms is None or not has_agent_turn:
+        return {
+            "pre_settled_agent_turns": None,
+            "pre_settled_sim_turns": None,
+            "grilling_exchanges": None,
+            "impl_turns": None,
+            "review_rounds": review_rounds,
+        }
+
     # Identify the impl-start turn: the agent turn whose lifetime contains
     # the SETTLED write (start_ts ≤ settled_ms < next_start_ts).
     impl_start_idx: int | None = None
-    if settled_ms is not None:
-        for i, (ts, role) in enumerate(starts):
-            if role != "agent":
-                continue
-            next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
-            if ts <= settled_ms < next_ts:
-                impl_start_idx = i
-                break
+    for i, (ts, role) in enumerate(starts):
+        if role != "agent":
+            continue
+        next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
+        if ts <= settled_ms < next_ts:
+            impl_start_idx = i
+            break
 
     if impl_start_idx is None:
         pre = starts
@@ -139,12 +162,6 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     pre_settled_agent = sum(1 for _, r in pre if r == "agent")
     pre_settled_sim = sum(1 for _, r in pre if r == "sim")
     impl_agent = sum(1 for ts, r in post if r == "agent" and (impl_ms is None or ts <= impl_ms))
-
-    # max(round), not len(): with the extra reviewer enabled, review_cycles
-    # carries two entries per round plus optional `unavailable` entries; the
-    # round number is the canonical counter.
-    cycles = read_jsonl(paths.review_cycles)
-    review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
 
     return {
         "pre_settled_agent_turns": pre_settled_agent,
@@ -391,6 +408,56 @@ def _find_write_to(tool_calls: list[dict], pattern: re.Pattern) -> dict | None:
     return None
 
 
+# claude stream-json names its file-writing tools with leading caps.
+_CLAUDE_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
+def _find_write_event(events: list[dict], pattern: re.Pattern) -> dict | None:
+    """First event that WRITES a path matching `pattern`, across runtimes.
+
+    Handles opencode `tool_use` (write/edit/apply_patch) and claude
+    `assistant` events whose `message.content[]` carries a `tool_use` block
+    (Write/Edit/…). Both shapes carry an extractable timestamp, so the
+    caller can time-anchor the phase split.
+
+    Codex is intentionally NOT handled: its `--json` stream carries no
+    per-event timestamp (and writes files via opaque `command_execution`
+    bash), so even a detected write can't anchor a time-based split. The
+    caller treats a missing settled event as "unknown" and emits None
+    rather than a wrong number — see `compute_phases`.
+    """
+
+    for e in events:
+        etype = e.get("type")
+        if etype == "tool_use":  # opencode
+            part = e.get("part") or {}
+            if part.get("tool") not in ("write", "edit", "apply_patch"):
+                continue
+            if (part.get("state") or {}).get("status") != "completed":
+                continue
+            inp = _inp(e)
+            target = (
+                inp.get("filePath")
+                or inp.get("path")
+                or inp.get("patchText")
+                or inp.get("patch")
+                or ""
+            )
+            if pattern.search(str(target)):
+                return e
+        elif etype == "assistant":  # claude stream-json
+            for block in (e.get("message") or {}).get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                if block.get("name") not in _CLAUDE_WRITE_TOOLS:
+                    continue
+                inp = block.get("input") or {}
+                target = inp.get("file_path") or inp.get("path") or ""
+                if pattern.search(str(target)):
+                    return e
+    return None
+
+
 def _find_first_code_edit(tool_calls: list[dict]) -> dict | None:
     """First write/edit/apply_patch to a path outside .contremaitre/."""
     for e in tool_calls:
@@ -479,6 +546,9 @@ def _timestamp_ms(e: dict | None) -> float | None:
         except ValueError:
             pass
     ts = e.get("ts")
+    if isinstance(ts, int | float):
+        # claude stream-json stamps each event with an epoch-ms integer.
+        return float(ts)
     if isinstance(ts, str):
         try:
             return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
