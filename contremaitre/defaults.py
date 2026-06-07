@@ -1,11 +1,10 @@
 """Operator defaults read from a hand-edited TOML file.
 
-Holds the operator's preferred picker values (agent / sim / extra-reviewer
-model strings + cli_reviewer choice) so `contremaitre run` doesn't re-ask
-on every invocation. The launch screen reads these as the picker's
-prefilled defaults; the operator confirms with Enter per run. Passing
-`--no-prompt` to `run` skips the picker entirely and uses the saved
-values verbatim.
+Holds the operator's preferred picker values (agent / sim model strings +
+cli_reviewer choice) so `contremaitre run` doesn't re-ask on every
+invocation. The launch screen reads these as the picker's prefilled
+defaults; the operator confirms with Enter per run. Passing `--no-prompt`
+to `run` skips the picker entirely and uses the saved values verbatim.
 
 Lookup order:
     1. `./.contremaitre/defaults.toml`  (cwd-local, next to `runs/`)
@@ -32,12 +31,7 @@ Schema (all keys optional):
     claude_effort = "high"  # low | medium | high | max
     agent_model = "opencode/big-pickle"   # used when a role is opencode
     sim_model = "opencode/big-pickle"
-    extra_reviewer_model = "opencode/nemotron-3-super-free"  # or "skip"
-    cli_reviewer = "both"   # auto | codex | claude | both | none
-
-The `extra_reviewer_model = "skip"` sentinel disables the second-SIM
-picker prompt entirely (equivalent to hitting `s` every run). Without
-it, the picker still asks even when no slug is set.
+    cli_reviewer = "claude" # auto | codex | claude | both | none
 """
 
 from __future__ import annotations
@@ -70,17 +64,11 @@ _VALID_CLAUDE_EFFORT = ("low", "medium", "high", "max")
 class Defaults:
     """Operator-level picker prefills. All fields optional.
 
-    `extra_reviewer_skip` is the parsed form of `extra_reviewer_model =
-    "skip"` in the file — the slug field stays `None` and this boolean
-    signals "don't even ask in the picker."
-
     `actor` / `sim_actor` are normalized to runtime values ("codex" → "cli").
     """
 
     agent_model: str | None = None
     sim_model: str | None = None
-    extra_reviewer_model: str | None = None
-    extra_reviewer_skip: bool = False
     cli_reviewer: str | None = None
     actor: str | None = None
     sim_actor: str | None = None
@@ -138,13 +126,9 @@ def load(path: Path | None = None) -> Defaults:
     if not isinstance(data, dict):
         return Defaults()
 
-    extra_raw = _clean_str(data.get("extra_reviewer_model"))
-    extra_skip = extra_raw == "skip"
     return Defaults(
         agent_model=_clean_str(data.get("agent_model")),
         sim_model=_clean_str(data.get("sim_model")),
-        extra_reviewer_model=None if extra_skip else extra_raw,
-        extra_reviewer_skip=extra_skip,
         cli_reviewer=_clean_cli_reviewer(data.get("cli_reviewer")),
         actor=_clean_actor(data.get("actor")),
         sim_actor=_clean_actor(data.get("sim_actor")),

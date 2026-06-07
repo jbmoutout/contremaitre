@@ -474,12 +474,12 @@ def _verdict_glyph(verdict: str | None) -> tuple[str, str]:
     return "·", _PAL_DIM
 
 
-def _round_verdicts(
+def _round_verdict(
     review_cycles: list[dict[str, Any]], round_n: int
-) -> tuple[str | None, str | None]:
-    """`(sim_verdict, extra_verdict)` for the given round; either may be None."""
+) -> str | None:
+    """SIM verdict for the given round, or None."""
 
-    sim = next(
+    return next(
         (
             r.get("verdict")
             for r in review_cycles
@@ -489,36 +489,16 @@ def _round_verdicts(
         ),
         None,
     )
-    extra = next(
-        (
-            r.get("verdict")
-            for r in review_cycles
-            if (r.get("round") or 0) == round_n
-            and r.get("reviewer") == "extra"
-            and not r.get("unavailable")
-        ),
-        None,
-    )
-    return sim, extra
 
 
 def _current_review_round(guardrails: list[dict[str, Any]]) -> int:
-    """Round number derived from the count of REVIEW-SIM actor starts.
-
-    Each review round opens with one `opencode_actor_start role=review`
-    where `reviewer_id != "extra"` (that one is the primary SIM reviewer).
-    Counting those gives the current round number — robust across
-    multi-round runs even when verdicts haven't landed in
-    `review_cycles.jsonl` yet (which lags by the duration of the
-    reviewer's actual work).
-    """
+    """Round number derived from the count of REVIEW-SIM actor starts."""
 
     return sum(
         1
         for g in guardrails
         if g.get("event") == "opencode_actor_start"
         and g.get("role") == "review"
-        and g.get("reviewer_id") != "extra"
     )
 
 
@@ -527,9 +507,8 @@ def _reviewer_status(
     round_n: int,
     review_cycles: list[dict[str, Any]],
     guardrails: list[dict[str, Any]],
-    is_extra: bool,
 ) -> str:
-    """Per-reviewer status for the given round.
+    """SIM reviewer status for the given round.
 
     Returns one of:
       - `idle`         — reviewer hasn't started for this round yet
@@ -538,24 +517,12 @@ def _reviewer_status(
       - `changes_req`  — verdict CHANGES_REQUESTED
       - `needs_human`  — verdict NEEDS_HUMAN
       - `unavailable`  — marked unavailable in review_cycles
-                         (degenerate; surfaced as a dot)
-
-    Round identification:
-      - SIM-review starts (reviewer_id != "extra") are counted in order;
-        the Nth start corresponds to round N's SIM reviewer.
-      - Extra-review starts (reviewer_id == "extra") are counted in
-        order; the Nth such start corresponds to round N's extra
-        reviewer (rounds where extra is skipped/disabled have no entry).
     """
 
-    reviewer_name = "extra" if is_extra else "sim"
-
-    # Verdict present? Use it.
     for cycle in review_cycles:
         if (cycle.get("round") or 0) != round_n:
             continue
-        cycle_reviewer = cycle.get("reviewer", "sim")
-        if cycle_reviewer != reviewer_name:
+        if cycle.get("reviewer", "sim") != "sim":
             continue
         if cycle.get("unavailable"):
             return "unavailable"
@@ -566,17 +533,12 @@ def _reviewer_status(
             return "changes_req"
         if v == "NEEDS_HUMAN":
             return "needs_human"
-        # Malformed-but-recorded — treat as streaming-still rather than
-        # introduce a separate state the operator has to learn.
         return "streaming"
 
-    # No verdict yet — has the Nth matching actor start fired?
     matching_starts = [
         g
         for g in guardrails
-        if g.get("event") == "opencode_actor_start"
-        and g.get("role") == "review"
-        and (g.get("reviewer_id") == "extra") == is_extra
+        if g.get("event") == "opencode_actor_start" and g.get("role") == "review"
     ]
     if len(matching_starts) >= round_n:
         return "streaming"
@@ -628,24 +590,16 @@ def _cli_review_status_glyph(
 def _review_status_tail(
     *,
     sim_review_statuses: list[str],
-    extra_review_statuses: list[str],
-    extra_enabled: bool,
     cli_review_status: str | None = None,
     cli_review_tool: str = "",
     cli_review_verdict: str | None = None,
     cli_review_states: list[tuple[str, str, str | None]] | None = None,
 ) -> Text:
-    """The `Review ✓ ✓  Extra Review ✓ ✓  CODEX Review ⏵` footer tail.
-
-    Rendered the same way in every phase past REVIEW so the operator's
-    gatekeeper verdicts stay visible through cli_review and done, instead
-    of disappearing the moment the phase transitions out of "Reviewing".
+    """The `Review ✓ ✓  CODEX Review ⏵` footer tail.
 
     `cli_review_states` (a list of `(tool, status, verdict)`) is the
     multi-tool path — used by `cli_reviewer="both"` to render two
-    glyphs in execution order (e.g. `CLAUDE Review ✓  CODEX Review ⏵`).
-    The single-tool fields are normalised into the same shape when the
-    multi-tool list isn't provided, so the renderer has one code path.
+    glyphs in execution order.
     """
 
     tail = Text()
@@ -656,15 +610,6 @@ def _review_status_tail(
                 tail.append(" ", style=_PAL_TEXT)
             g, st = _reviewer_glyph(s)
             tail.append(g, style=st)
-    if extra_enabled:
-        extras = [s for s in extra_review_statuses if s != "idle"]
-        if extras:
-            tail.append("  Extra Review ", style=_PAL_TEXT)
-            for i, s in enumerate(extras):
-                if i:
-                    tail.append(" ", style=_PAL_TEXT)
-                g, st = _reviewer_glyph(s)
-                tail.append(g, style=st)
     states = cli_review_states
     if states is None and cli_review_status is not None:
         states = [(cli_review_tool, cli_review_status, cli_review_verdict)]
@@ -691,8 +636,6 @@ def _current_phase_label(
     pr_title: str | None = None,
     current_review_round: int = 0,
     sim_review_statuses: list[str] | None = None,
-    extra_review_statuses: list[str] | None = None,
-    extra_enabled: bool = False,
     cli_review_status: str | None = None,
     cli_review_tool: str = "",
     cli_review_verdict: str | None = None,
@@ -763,8 +706,6 @@ def _current_phase_label(
         text.append(
             _review_status_tail(
                 sim_review_statuses=sim_review_statuses or [],
-                extra_review_statuses=extra_review_statuses or [],
-                extra_enabled=extra_enabled,
                 cli_review_status=cli_review_status,
                 cli_review_tool=cli_review_tool,
                 cli_review_verdict=cli_review_verdict,
@@ -794,8 +735,6 @@ def _current_phase_label(
         text.append(
             _review_status_tail(
                 sim_review_statuses=sim_review_statuses or [],
-                extra_review_statuses=extra_review_statuses or [],
-                extra_enabled=extra_enabled,
                 cli_review_status=cli_review_status,
                 cli_review_tool=cli_review_tool,
                 cli_review_verdict=cli_review_verdict,
@@ -820,8 +759,6 @@ def _current_phase_label(
         text.append(
             _review_status_tail(
                 sim_review_statuses=sim_review_statuses or [],
-                extra_review_statuses=extra_review_statuses or [],
-                extra_enabled=extra_enabled,
                 cli_review_status=cli_review_status,
                 cli_review_tool=cli_review_tool,
                 cli_review_verdict=cli_review_verdict,
@@ -866,7 +803,7 @@ def _persistent_review_token(
     if not review_cycles:
         return None
     last_round = max((r.get("round") or 0) for r in review_cycles)
-    sim_verdict, _extra = _round_verdicts(review_cycles, last_round)
+    sim_verdict = _round_verdict(review_cycles, last_round)
     if not sim_verdict or sim_verdict.upper() != "CHANGES_REQUESTED":
         return None
     text = Text()
@@ -878,16 +815,8 @@ def _warnings_token(
     *,
     recoveries: list[dict[str, Any]],
     test_runs: list[dict[str, Any]],
-    review_cycles: list[dict[str, Any]],
-    extra_enabled: bool,
 ) -> Text | None:
-    """Compact warning tokens. Returns None when there's nothing to surface.
-
-    Only LOUD signals appear here: `↻N` recoveries, `tests ✗` on failure,
-    `extra:disagreed` on cross-reviewer mismatch. Quiet signals (zero
-    recoveries, all tests passing, reviewers agreed) are hidden so the
-    operator's eye goes straight to noise when there is noise.
-    """
+    """Compact warning tokens. Returns None when there's nothing to surface."""
 
     parts: list[Text] = []
     rec_n = len(recoveries)
@@ -899,13 +828,6 @@ def _warnings_token(
         t = Text()
         t.append("tests ✗", style=f"bold {_PAL_ERROR}")
         parts.append(t)
-    if extra_enabled and review_cycles:
-        last_round = max((r.get("round") or 0) for r in review_cycles)
-        sim, extra = _round_verdicts(review_cycles, last_round)
-        if sim and extra and sim.upper() != extra.upper():
-            t = Text()
-            t.append("extra:disagreed", style=f"bold {_PAL_WARN}")
-            parts.append(t)
     if not parts:
         return None
     out = Text()
@@ -2378,7 +2300,6 @@ if _TEXTUAL_AVAILABLE:
         #sim-column { width: 1fr; layout: vertical; }
         .sim-subpane { width: 1fr; height: 1fr; border: round white; }
         .sim-subpane.active { border: round yellow; }
-        #extra-reviewer-pane.hidden { display: none; }
         #cli-review-pane {
             width: 100%;
             height: 8;
@@ -2423,7 +2344,6 @@ if _TEXTUAL_AVAILABLE:
             *,
             agent_model: str = "?",
             sim_model: str = "?",
-            extra_reviewer_model: str | None = None,
             cli_reviewer: str = "none",
             docker_image: str = "?",
             target_url: str | None = None,
@@ -2435,7 +2355,6 @@ if _TEXTUAL_AVAILABLE:
             self.run_dir = run_dir
             self.agent_model = agent_model
             self.sim_model = sim_model
-            self.extra_reviewer_model = extra_reviewer_model
             # `"codex"`, `"claude"`, `"both"`, or `"none"`. When set
             # (other than `"none"`), the post-publish cli-review row
             # mounts and shows the subscription-bound CLI reviewer's
@@ -2453,8 +2372,6 @@ if _TEXTUAL_AVAILABLE:
             self._agent_model_resolved = False
             self._sim_idx = 0
             self._sim_model_resolved = False
-            self._extra_reviewer_idx = 0
-            self._extra_reviewer_mascot_shown = False
             self._guardrail_idx = 0
             self._recoveries_idx = 0
             self._docker_state: dict[str, Any] = {}
@@ -2517,7 +2434,6 @@ if _TEXTUAL_AVAILABLE:
             return {
                 "raw_export": self.run_dir / "raw_export.jsonl",
                 "sim_raw_export": self.run_dir / "sim_raw_export.jsonl",
-                "extra_reviewer_raw_export": self.run_dir / "extra_reviewer_raw_export.jsonl",
                 "claude_review_raw_export": self.run_dir / "claude_review_raw_export.jsonl",
                 "codex_review_raw_export": self.run_dir / "codex_review_raw_export.jsonl",
                 "guardrail_events": self.run_dir / "guardrail_events.jsonl",
@@ -2542,9 +2458,6 @@ if _TEXTUAL_AVAILABLE:
                     )
                     yield Static("", classes="pane-sub", id="agent-sub")
                 with Vertical(id="sim-column"):
-                    # SIM on top; EXTRA REVIEWER stacked below when configured
-                    # (CSS .hidden on #extra-reviewer-pane collapses it so the
-                    # SIM region uses the full right column in single-SIM mode).
                     with Vertical(classes="sim-subpane", id="sim-pane"):
                         yield RichLog(
                             id="sim-log",
@@ -2555,16 +2468,6 @@ if _TEXTUAL_AVAILABLE:
                             can_focus=False,
                         )
                         yield Static("", classes="pane-sub", id="sim-sub")
-                    with Vertical(classes="sim-subpane", id="extra-reviewer-pane"):
-                        yield RichLog(
-                            id="extra-reviewer-log",
-                            auto_scroll=False,
-                            markup=False,
-                            wrap=True,
-                            highlight=False,
-                            can_focus=False,
-                        )
-                        yield Static("", classes="pane-sub", id="extra-reviewer-sub")
             # Post-publish CLI reviewer (claude/codex) — full-width row that
             # appears BELOW the main panes (not inside the Horizontal) the
             # moment the first chunk arrives. WORK/REVIEW phases get the
@@ -2601,19 +2504,8 @@ if _TEXTUAL_AVAILABLE:
             self.title = f"contremaitre · {self.run_dir.name}"
             refresh_s = 1.0 / max(0.5, min(20.0, self.refresh_hz))
             self.set_interval(refresh_s, self._tick)
-            # Extra-reviewer subpane: stays hidden until the orchestrator
-            # actually starts the extra reviewer (first actor-start event
-            # with reviewer_id=extra). When `extra_reviewer_model` is unset,
-            # the pane stays hidden for the whole run. When set, the pane
-            # only reveals at the moment of the first extra-reviewer turn,
-            # mirroring the cli_review lazy-show pattern — empty panes
-            # don't clutter the layout during phases they're not active in.
-            self.query_one("#extra-reviewer-pane").set_class(True, "hidden")
-            # CLI-review pane is hidden unconditionally on mount; the row
-            # only takes vertical space once the post-publish reviewer
-            # actually writes its first chunk (see `_update_cli_review_log`).
-            # WORK / REVIEW phases get the uncompressed 2-column layout the
-            # whole time, which is most of the run.
+            # CLI-review pane hidden on mount; reveals once the post-publish
+            # reviewer starts (see `_update_cli_review_log`).
             self.query_one("#cli-review-pane").set_class(True, "hidden")
 
         def _tick(self) -> None:
@@ -2628,8 +2520,6 @@ if _TEXTUAL_AVAILABLE:
             self._update_turn_separators()
             self._update_agent_log()
             self._update_sim_log()
-            if self.extra_reviewer_model:
-                self._update_extra_reviewer_log()
             if self.cli_reviewer in ("codex", "claude", "both"):
                 self._update_cli_review_log()
             self._update_activity_log()
@@ -2736,35 +2626,6 @@ if _TEXTUAL_AVAILABLE:
             if at_bottom:
                 widget.scroll_end(animate=False)
 
-        def _update_extra_reviewer_log(self) -> None:
-            # Unhide the pane as soon as the orchestrator starts the extra
-            # reviewer's first turn, even before any stdout arrives. Same
-            # pattern as `_update_cli_review_log` — file-age alone would
-            # leave the pane hidden during the model's spin-up window.
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
-            if any(
-                g.get("event") == "opencode_actor_start" and g.get("reviewer_id") == "extra"
-                for g in guardrails
-            ):
-                pane = self.query_one("#extra-reviewer-pane")
-                if pane.has_class("hidden"):
-                    pane.set_class(False, "hidden")
-            events = _read_jsonl(self.paths["extra_reviewer_raw_export"])
-            widget = self.query_one("#extra-reviewer-log", RichLog)
-            at_bottom = self._at_bottom(widget)
-            # First-tick mascot: rendered once into an empty pane so the
-            # operator sees a friendly "I'm here, just not triggered yet"
-            # signal instead of a blank box. Survives once events arrive
-            # since it stays at the top of the log's scrollback.
-            if not events and not self._extra_reviewer_mascot_shown:
-                widget.write(Text("┬┴┬┴┤･ω･)ﾉ", style="dim"))
-                self._extra_reviewer_mascot_shown = True
-            for e in events[self._extra_reviewer_idx :]:
-                widget.write(_render_event(e))
-            self._extra_reviewer_idx = len(events)
-            if at_bottom:
-                widget.scroll_end(animate=False)
-
         def _update_turn_separators(self) -> None:
             # Drive handover separators off `opencode_actor_start` in
             # guardrail_events. Runs BEFORE the per-pane log updates so
@@ -2779,21 +2640,11 @@ if _TEXTUAL_AVAILABLE:
                 for e in guardrails
                 if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
             ]
-            # SIM pane: SIM-work + SIM-review only. Filter out extra
-            # reviewer starts (tagged reviewer_id="extra") so the SIM
-            # pane doesn't get a phantom `turn N · reviewer ✓` divider
-            # every time the extra reviewer kicks off.
             sim_starts = [
                 e
                 for e in guardrails
                 if e.get("event") == "opencode_actor_start"
                 and e.get("role") in ("sim", "review")
-                and e.get("reviewer_id") != "extra"
-            ]
-            extra_starts = [
-                e
-                for e in guardrails
-                if e.get("event") == "opencode_actor_start" and e.get("reviewer_id") == "extra"
             ]
             agent_widget = self.query_one("#agent-log", RichLog)
             sim_widget = self.query_one("#sim-log", RichLog)
@@ -2813,18 +2664,6 @@ if _TEXTUAL_AVAILABLE:
                 agent_widget.scroll_end(animate=False)
             if sim_at_bottom:
                 sim_widget.scroll_end(animate=False)
-            # Extra reviewer pane separators — only when the pane exists.
-            # Label is "extra" so the divider reads `turn N · extra ✓`,
-            # distinct from `reviewer ✓` in the SIM pane.
-            if self.extra_reviewer_model:
-                extra_widget = self.query_one("#extra-reviewer-log", RichLog)
-                extra_at_bottom = self._at_bottom(extra_widget)
-                while self._extra_separators_rendered < len(extra_starts) - 1:
-                    n = self._extra_separators_rendered + 2
-                    extra_widget.write(_turn_separator(n, "extra"))
-                    self._extra_separators_rendered += 1
-                if extra_at_bottom:
-                    extra_widget.scroll_end(animate=False)
 
         def _update_activity_log(self) -> None:
             widget = self.query_one("#activity-log", RichLog)
@@ -2855,12 +2694,9 @@ if _TEXTUAL_AVAILABLE:
             for name, key in (
                 ("agent", "raw_export"),
                 ("sim", "sim_raw_export"),
-                ("extra", "extra_reviewer_raw_export"),
                 ("cli_review", "claude_review_raw_export"),
                 ("cli_review", "codex_review_raw_export"),
             ):
-                if name == "extra" and not self.extra_reviewer_model:
-                    continue
                 if name == "cli_review" and self.cli_reviewer not in ("codex", "claude"):
                     continue
                 age = _file_age(self.paths[key])
@@ -2953,11 +2789,6 @@ if _TEXTUAL_AVAILABLE:
                 f"  ·  agent={_model_effort_display(self.agent_model)}  sim={_model_effort_display(self.sim_model)}",
                 style="dim",
             )
-            if self.extra_reviewer_model:
-                header.append(
-                    f"  extra={_short_model(self.extra_reviewer_model)}",
-                    style="dim",
-                )
             if img:
                 header.append(f"  ·  {self.docker_image} built {img}", style="dim")
             self.query_one("#header", Static).update(header)
@@ -2977,37 +2808,13 @@ if _TEXTUAL_AVAILABLE:
             ag = self._docker_state.get("agent_container")
             sm = self._docker_state.get("sim_container")
             sim_file_age = _file_age(self.paths["sim_raw_export"])
-            extra_file_age = (
-                _file_age(self.paths["extra_reviewer_raw_export"])
-                if self.extra_reviewer_model
-                else None
-            )
-            # SIM-review and extra-review run sequentially and share the
-            # docker RO-mount slot, so `sm` could belong to either. The
-            # freshest file ages tells us who owns it; the other one is
-            # idle (or not enabled).
-            extra_owns_container = (
-                bool(sm)
-                and extra_file_age is not None
-                and (sim_file_age is None or extra_file_age <= sim_file_age)
-            )
-            sim_owns_container = bool(sm) and not extra_owns_container
-
             agent_state = _activity_state(
                 container_present=bool(ag),
                 file_age=_file_age(self.paths["raw_export"]),
             )
             sim_state = _activity_state(
-                container_present=sim_owns_container,
+                container_present=bool(sm),
                 file_age=sim_file_age,
-            )
-            extra_state = (
-                _activity_state(
-                    container_present=extra_owns_container,
-                    file_age=extra_file_age,
-                )
-                if self.extra_reviewer_model
-                else "idle"
             )
             # Tick the spinner only while at least one pane is non-idle;
             # otherwise a finished run would keep visually animating
@@ -3030,7 +2837,6 @@ if _TEXTUAL_AVAILABLE:
             if (
                 agent_state != "idle"
                 or sim_state != "idle"
-                or extra_state != "idle"
                 or cli_review_running_state != "idle"
             ):
                 self._spin_tick = (self._spin_tick + 1) % len(_SPINNER_FRAMES)
@@ -3080,26 +2886,6 @@ if _TEXTUAL_AVAILABLE:
             self._prev_active = active
             agent_pane.set_class(active == "agent", "active")
             sim_pane.set_class(active == "sim", "active")
-
-            # ----- Extra reviewer subpane (only when configured) -----
-            if self.extra_reviewer_model:
-                extra_events = _read_jsonl(self.paths["extra_reviewer_raw_export"])
-                extra_turns_n = _text_event_count(extra_events)
-                self.query_one("#extra-reviewer-sub", Static).update(
-                    _render_pane_subheader(
-                        state=extra_state,
-                        spinner=spinner,
-                        turns=extra_turns_n,
-                        pending_tool=_latest_pending_tool(extra_events),
-                        container_id=None,
-                        container_uptime=None,
-                    )
-                )
-                extra_pane = self.query_one("#extra-reviewer-pane")
-                extra_pane.border_title = (
-                    f"EXTRA REVIEWER ({_short_model(self.extra_reviewer_model)})"
-                )
-                extra_pane.set_class(active == "extra", "active")
 
             # ----- CLI review column (only when configured) -----
             # `cli_reviewer` is the operator's choice from launch screen
@@ -3257,7 +3043,6 @@ if _TEXTUAL_AVAILABLE:
             # (used to disappear at terminal — losing the most scannable
             # "did every reviewer agree" signal right when the operator
             # wants to verify).
-            extra_enabled = bool(self.extra_reviewer_model)
             if review_started:
                 current_review_round = _current_review_round(guardrails)
                 sim_review_statuses = [
@@ -3265,27 +3050,12 @@ if _TEXTUAL_AVAILABLE:
                         round_n=r,
                         review_cycles=review_cycles,
                         guardrails=guardrails,
-                        is_extra=False,
                     )
                     for r in range(1, current_review_round + 1)
                 ]
-                extra_review_statuses = (
-                    [
-                        _reviewer_status(
-                            round_n=r,
-                            review_cycles=review_cycles,
-                            guardrails=guardrails,
-                            is_extra=True,
-                        )
-                        for r in range(1, current_review_round + 1)
-                    ]
-                    if extra_enabled
-                    else []
-                )
             else:
                 current_review_round = 0
                 sim_review_statuses = []
-                extra_review_statuses = []
 
             # CLI-review aggregate status derived from per-tool states.
             # Only fed into the single-tool legacy path (`cli_review_status`)
@@ -3318,8 +3088,6 @@ if _TEXTUAL_AVAILABLE:
                     pr_title=pr_title,
                     current_review_round=current_review_round,
                     sim_review_statuses=sim_review_statuses,
-                    extra_review_statuses=extra_review_statuses,
-                    extra_enabled=extra_enabled,
                     cli_review_status=cli_review_status,
                     cli_review_tool=self._cli_review_tool
                     or (self.cli_reviewer if self.cli_reviewer in ("codex", "claude") else ""),
@@ -3335,8 +3103,6 @@ if _TEXTUAL_AVAILABLE:
             warn_token = _warnings_token(
                 recoveries=recoveries,
                 test_runs=test_runs,
-                review_cycles=review_cycles,
-                extra_enabled=bool(self.extra_reviewer_model),
             )
             if warn_token is not None:
                 left.append("     ")
@@ -3490,7 +3256,6 @@ def attach(run_dir: Path, *, refresh_hz: float = 5.0) -> int:
     (
         agent_model,
         sim_model,
-        extra_reviewer_model,
         cli_reviewer,
         docker_image,
         target_url,
@@ -3500,7 +3265,6 @@ def attach(run_dir: Path, *, refresh_hz: float = 5.0) -> int:
         run_dir,
         agent_model=agent_model,
         sim_model=sim_model,
-        extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer,
         docker_image=docker_image,
         target_url=target_url,
@@ -3522,7 +3286,6 @@ def spawn_and_attach(
     discover_timeout_s: float = 30.0,
     agent_model: str = "?",
     sim_model: str = "?",
-    extra_reviewer_model: str | None = None,
     cli_reviewer: str = "none",
     docker_image: str = "?",
     target_url: str | None = None,
@@ -3573,7 +3336,6 @@ def spawn_and_attach(
         run_dir,
         agent_model=agent_model,
         sim_model=sim_model,
-        extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer,
         docker_image=docker_image,
         target_url=target_url,
@@ -3588,9 +3350,8 @@ def spawn_and_attach(
 
 def _read_run_models(
     run_dir: Path,
-) -> tuple[str, str, str | None, str, str, str | None, str | None]:
-    """Return (agent_model, sim_model, extra_reviewer_model, cli_reviewer,
-    docker_image, target_url, base).
+) -> tuple[str, str, str, str, str | None, str | None]:
+    """Return (agent_model, sim_model, cli_reviewer, docker_image, target_url, base).
 
     Prefers `run_config.json` (written at orchestrator start — available
     immediately, even for attach against an in-flight run). Falls back to
@@ -3626,7 +3387,6 @@ def _read_run_models(
             return (
                 agent_model,
                 sim_model,
-                d.get("extra_reviewer_model"),
                 d.get("cli_reviewer", "none"),
                 d.get("docker_image", "?"),
                 d.get("target_url"),
@@ -3641,7 +3401,6 @@ def _read_run_models(
             return (
                 d.get("agent_model", "?"),
                 d.get("sim_model", "?"),
-                d.get("extra_reviewer_model"),
                 d.get("cli_reviewer", "none"),
                 "?",
                 None,
@@ -3649,4 +3408,4 @@ def _read_run_models(
             )
         except (OSError, json.JSONDecodeError):
             pass
-    return ("?", "?", None, "none", "?", None, None)
+    return ("?", "?", "none", "?", None, None)

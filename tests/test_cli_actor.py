@@ -512,9 +512,7 @@ class TuiRunForwardsRuntimeTest(unittest.TestCase):
         saved = MagicMock(
             agent_model=None,
             sim_model=None,
-            extra_reviewer_model=None,
             cli_reviewer=None,
-            extra_reviewer_skip=False,
             actor=None,
             sim_actor=None,
             cli_tool=None,

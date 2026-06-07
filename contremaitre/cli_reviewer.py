@@ -190,23 +190,20 @@ def resolve_choice(
 # ---------- prompt assembly ----------
 
 
-def build_prompt(*, pr_url: str) -> str:
-    """The prompt handed to `claude -p` / `codex exec`.
+def build_prompt(*, pr_url: str, round_n: int = 1, round_of: int = 1) -> str:
+    """The prompt handed to the CLI reviewer in Docker.
 
     Body lives in `contremaitre/prompts/cli_reviewer_prompt.md` so it can
-    be tuned without touching Python (same convention as `initial_prompt.md`
-    and the SIM prompts). The MD file has one `{pr_url}` placeholder that
-    we substitute here.
+    be tuned without touching Python. The MD file has `{pr_url}`, `{round_n}`,
+    and `{round_of}` placeholders.
 
-    Pointing the agent at a PR URL (rather than pasting the diff) is the
-    empirical sweet spot: it can fetch the full diff, surrounding files,
-    CI status, and linked issues itself via the local `gh` CLI from
-    `cwd=paths.worktree`.
+    Pointing the reviewer at a PR URL lets it fetch the full diff, surrounding
+    files, CI status, and linked issues itself via the local `gh` CLI.
     """
 
     from .prompts import CLI_REVIEWER_PROMPT
 
-    return CLI_REVIEWER_PROMPT.format(pr_url=pr_url)
+    return CLI_REVIEWER_PROMPT.format(pr_url=pr_url, round_n=round_n, round_of=round_of)
 
 
 # ---------- worktree prep ----------
@@ -496,6 +493,31 @@ def post_comment(
 VERDICT_KEYS = ("MUST_FIX", "NEEDS_ATTENTION", "LOOKS_GOOD")
 
 
+def extract_required_changes(markdown: str) -> list[str]:
+    """Extract numbered items from the `## Required changes` section.
+
+    The prompt specifies: numbered list, each item is `path:line — description`.
+    Returns the text of each numbered item (number stripped). Empty when the
+    section is absent or contains no numbered items.
+    """
+
+    in_section = False
+    items: list[str] = []
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("## required changes"):
+            in_section = True
+            continue
+        if in_section:
+            if stripped.startswith("## "):
+                break
+            if stripped and stripped[0].isdigit() and ". " in stripped[:4]:
+                text = stripped.split(". ", 1)[1].strip()
+                if text:
+                    items.append(text)
+    return items
+
+
 def parse_verdict(markdown: str) -> str | None:
     """Return the verdict key (MUST_FIX / NEEDS_ATTENTION / LOOKS_GOOD).
 
@@ -680,18 +702,19 @@ def extract_model(tool: str, jsonl_path: Path) -> str | None:
     return None
 
 
-def format_header(*, tool: str, model: str | None, duration_s: float) -> str:
-    """Tool + model + duration line prepended to the posted PR comment.
+def format_header(
+    *, tool: str, model: str | None, duration_s: float, round_n: int = 1, round_of: int = 1
+) -> str:
+    """Tool + model + round + duration line prepended to the posted PR comment.
 
-    H3 (`###`) — visible enough to give context (who reviewed this PR,
-    with what model, how long it took) without competing with the H1/H2
-    space. Sits at the top so the human gets the source of the review
-    before they read the verdict line.
+    H3 (`###`) — visible enough to give context (who reviewed, what model,
+    which round) without competing with the H1/H2 space.
     """
 
     parts = [f"reviewed by `{tool}`"]
     if model:
         parts.append(f"`{model}`")
+    parts.append(f"round {round_n}/{round_of}")
     parts.append(_fmt_duration_short(duration_s))
     return "### " + " · ".join(parts) + "\n\n"
 

@@ -157,28 +157,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenRouter model string for the SIM (ignored in --actor fake)",
     )
     run_p.add_argument(
-        "--extra-reviewer-model",
-        default=None,
-        help=(
-            "Optional second SIM model run alongside the primary every review "
-            "round. Pick a different model family from --sim-model to get a "
-            "cheap cross-family verdict. Both must APPROVE for the PR to "
-            "publish; if either bounces, the agent gets a merged list of "
-            "required changes and loops within max-review-rounds. Omit for "
-            "single-SIM (back-compat)."
-        ),
-    )
-    run_p.add_argument(
         "--cli-reviewer",
         choices=["auto", "codex", "claude", "both", "none"],
         default="auto",
         help=(
-            "Optional local CLI reviewer run AFTER the Draft PR is published. "
-            "Uses the operator's interactive subscription (claude/codex), not API. "
-            "`auto` (default) detects what's installed and prompts when stdin is a TTY; "
-            "`both` runs codex and claude sequentially (two PR comments); "
-            "`none` skips. The review is posted as a single comment on the PR."
+            "Post-PR revision loop driver. After the draft PR is published, the "
+            "CLI reviewer (operator's claude/codex subscription) reads the PR, "
+            "posts a review comment, and if MUST_FIX re-enters the agent (fresh "
+            "Docker session) until LOOKS_GOOD or --max-cli-review-rounds exhausted. "
+            "`auto` detects what's installed; `none` skips the loop entirely."
         ),
+    )
+    run_p.add_argument(
+        "--max-cli-review-rounds",
+        type=int,
+        default=3,
+        help="Maximum post-PR CLI review + agent revision rounds (default 3).",
     )
     run_p.add_argument(
         "--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value
@@ -242,22 +236,6 @@ def build_parser() -> argparse.ArgumentParser:
         ],
         default="approved",
         help="Fake SIM behavior (ignored in --actor opencode)",
-    )
-    run_p.add_argument(
-        "--extra-reviewer-scenario",
-        choices=[
-            "approved",
-            "changes_requested",
-            "needs_human",
-            "malformed",
-            "malformed_then_approved",
-        ],
-        default="approved",
-        help=(
-            "Fake extra-reviewer behavior (ignored in --actor opencode and "
-            "when --extra-reviewer-model is unset). Lets fixture tests "
-            "exercise asymmetric SIM/extra outcomes."
-        ),
     )
     run_p.add_argument(
         "--agent-scenario",
@@ -789,16 +767,13 @@ def _pick_models_interactive(
     *,
     current_agent: str,
     current_sim: str,
-    current_extra: str | None,
     pick_agent: bool,
     pick_sim: bool,
-    pick_extra: bool,
     allow_custom: bool,
-    extra_default_skip: bool = False,
-) -> tuple[str, str, str | None, list[tuple[str, str]]]:
-    """Run the agent / sim / extra-reviewer picker; return chosen values.
+) -> tuple[str, str, list[tuple[str, str]]]:
+    """Run the agent / sim picker; return chosen values.
 
-    Returns `(agent, sim, extra, picker_args)`. `picker_args` is a list of
+    Returns `(agent, sim, picker_args)`. `picker_args` is a list of
     `(flag, value)` tuples for callers that pass-through flags to a
     spawned subprocess (the `tui run` path); the run-screen caller
     instead reassigns directly onto its `argparse.Namespace`. Either
@@ -813,15 +788,15 @@ def _pick_models_interactive(
     launch with hardcoded defaults.
     """
 
-    if not (pick_agent or pick_sim or pick_extra):
-        return current_agent, current_sim, current_extra, []
+    if not (pick_agent or pick_sim):
+        return current_agent, current_sim, []
 
     free = _fetch_free_models()
     picker_args: list[tuple[str, str]] = []
     if free is None:
         print()
         print(_d("  (model catalog unavailable — using CLI defaults)"))
-        return current_agent, current_sim, current_extra, picker_args
+        return current_agent, current_sim, picker_args
 
     print()
     print(f"  {_b('Pick models')}  {_d('(free OpenCode Zen — no key needed)')}")
@@ -843,7 +818,6 @@ def _pick_models_interactive(
     # that case.
     agent_default = _index_of(current_agent)
     sim_default = _index_of(current_sim)
-    extra_default = _index_of(current_extra)
     width = len(str(len(free) - 1))
     for i, m in enumerate(free):
         roles = []
@@ -851,8 +825,6 @@ def _pick_models_interactive(
             roles.append("agent")
         if sim_default == i:
             roles.append("sim")
-        if extra_default == i:
-            roles.append("extra")
         marker = f"  {_d('← ' + ', '.join(roles))}" if roles else ""
         print(f"    {i:>{width}}  {m['id']}{marker}")
     if allow_custom:
@@ -903,76 +875,7 @@ def _pick_models_interactive(
         sim, sim_idx = _pick_inline("sim", sim_idx)
         picker_args.append(("--sim-model", sim))
 
-    extra = current_extra
-    if pick_extra:
-        from .model_family import model_family
-
-        # Saved extra_reviewer_model wins the suggested-default slot if
-        # it's in the catalog; only fall back to cross-family heuristic
-        # when the operator hasn't saved a preference.
-        suggested_idx: int | None = extra_default
-        if suggested_idx is None:
-            sim_fam = model_family(sim)
-            if sim_fam != "unknown":
-                for i, m in enumerate(free):
-                    if model_family(f"opencode/{m['id']}") not in (sim_fam, "unknown"):
-                        suggested_idx = i
-                        break
-        if suggested_idx is None:
-            for i in range(len(free)):
-                if i != sim_idx:
-                    suggested_idx = i
-                    break
-        opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
-        # `extra_default_skip` flips the Enter behavior to "skip" — the
-        # suggested model is still numerically pickable, but the prompt
-        # makes Enter the no-extra-reviewer path. Set by
-        # `extra_reviewer_model = "skip"` in defaults.toml.
-        enter_skips = extra_default_skip or suggested_idx is None
-        if suggested_idx is not None:
-            suggested_id = free[suggested_idx]["id"]
-            if enter_skips:
-                extra_prompt = (
-                    f"  extra [{suggested_idx} - {suggested_id}] (Enter=skip, {opts}, q): "
-                )
-            else:
-                extra_prompt = f"  extra [{suggested_idx} - {suggested_id}] (Enter=accept, s=skip, {opts}, q): "
-        else:
-            extra_prompt = f"  extra  (Enter=skip, {opts}, q): "
-        while True:
-            try:
-                reply = input(extra_prompt).strip()
-            except EOFError:
-                break
-            low = reply.lower()
-            if low == "":
-                if not enter_skips and suggested_idx is not None:
-                    extra = f"opencode/{free[suggested_idx]['id']}"
-                    picker_args.append(("--extra-reviewer-model", extra))
-                break
-            if low in ("s", "skip"):
-                break
-            if low == "q":
-                raise KeyboardInterrupt
-            if low.isdigit() and 0 <= int(low) < len(free):
-                idx = int(low)
-                extra = f"opencode/{free[idx]['id']}"
-                picker_args.append(("--extra-reviewer-model", extra))
-                break
-            if allow_custom and low == "c":
-                try:
-                    slug = input("  paste OpenRouter model for extra: ").strip()
-                except EOFError:
-                    continue
-                if slug:
-                    extra = _normalize_openrouter_slug(slug)
-                    picker_args.append(("--extra-reviewer-model", extra))
-                    break
-                continue
-            suffix = ", c" if allow_custom else ""
-            print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, s to skip, or q")
-
-    return agent, sim, extra, picker_args
+    return agent, sim, picker_args
 
 
 def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
@@ -1255,27 +1158,19 @@ def _launch_screen(
 
     agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
     sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
-    extra_explicit = _has_flag_in(argv_for_explicit_check, "--extra-reviewer-model")
 
-    # ----- model picker (single list, agent then SIM, then extra) -----
-    agent, sim, extra_model, picker_args = _pick_models_interactive(
+    # ----- model picker (single list, agent then SIM) -----
+    agent, sim, picker_args = _pick_models_interactive(
         current_agent=getattr(args, "agent_model", ""),
         current_sim=getattr(args, "sim_model", ""),
-        current_extra=getattr(args, "extra_reviewer_model", None),
         # Only pick an OpenRouter model for a role that actually runs opencode;
         # a codex role ignores it.
         pick_agent=(agent_mode == ActorMode.OPENCODE.value) and not agent_explicit,
         pick_sim=(sim_mode == ActorMode.OPENCODE.value) and not sim_explicit,
-        pick_extra=not extra_explicit,
-        # `extra_reviewer_model = "skip"` in defaults.toml flips the
-        # extra-reviewer Enter behavior from "accept the suggestion" to
-        # "skip" — the suggestion is still numerically pickable.
-        extra_default_skip=getattr(args, "_defaults_skip_extra", False),
         allow_custom=allow_custom,
     )
     args.agent_model = agent
     args.sim_model = sim
-    args.extra_reviewer_model = extra_model
     if forwarded_to_subprocess is not None:
         for flag, value in picker_args:
             forwarded_to_subprocess.extend([flag, value])
@@ -1319,7 +1214,6 @@ def _launch_screen(
     for role, model in (
         ("agent", args.agent_model),
         ("sim", args.sim_model),
-        ("extra", extra_model),
     ):
         if not model:
             continue
@@ -1404,8 +1298,6 @@ def _launch_screen(
         f"  sim             "
         f"{_b(role_model_label(actor_mode=sim_mode, opencode_model=args.sim_model, cli_tool=sim_cli_tool, **_label_kw))}"
     )
-    if extra_model:
-        print(f"  extra           {_b(extra_model)}")
     if cli_reviewer_choice in ("codex", "claude"):
         print(f"  code-review     {_b(cli_reviewer_choice)}  {_d('(post-publish, subscription)')}")
     elif cli_reviewer_choice == "both":
@@ -1912,8 +1804,8 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         upstream=getattr(args, "upstream", None),
         agent_model=getattr(args, "agent_model", "openrouter/deepseek/deepseek-v4-flash"),
         sim_model=getattr(args, "sim_model", "openrouter/deepseek/deepseek-v4-flash"),
-        extra_reviewer_model=getattr(args, "extra_reviewer_model", None),
         cli_reviewer=getattr(args, "cli_reviewer", "none"),
+        max_cli_review_rounds=getattr(args, "max_cli_review_rounds", 3),
         actor_mode=ActorMode(args.actor),
         cli_tool=getattr(args, "cli_tool", "codex"),
         codex_model=getattr(args, "codex_model", "gpt-5.5"),
@@ -1924,7 +1816,6 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         sim_cli_tool=getattr(args, "sim_cli_tool", None),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
-        extra_reviewer_scenario=getattr(args, "extra_reviewer_scenario", "approved"),
         agent_scenario=getattr(args, "agent_scenario", "normal"),
         publish_mode=PublishMode(getattr(args, "publish_mode", PublishMode.STUB.value)),
         keep_worktree=getattr(args, "keep_worktree", False),
@@ -1988,20 +1879,6 @@ def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
         args.agent_model = saved.agent_model
     if saved.sim_model and not _has_flag_in(argv, "--sim-model") and hasattr(args, "sim_model"):
         args.sim_model = saved.sim_model
-    if (
-        saved.extra_reviewer_model
-        and not _has_flag_in(argv, "--extra-reviewer-model")
-        and hasattr(args, "extra_reviewer_model")
-    ):
-        args.extra_reviewer_model = saved.extra_reviewer_model
-    # `extra_reviewer_model = "skip"` in the file flips the picker's
-    # Enter default from "accept the suggestion" to "skip". The picker
-    # still PROMPTS — the operator can numerically pick a model — but
-    # Enter is the no-extra-reviewer path. `_launch_screen` reads
-    # `args._defaults_skip_extra` and passes it to the picker.
-    if saved.extra_reviewer_skip and not _has_flag_in(argv, "--extra-reviewer-model"):
-        args.extra_reviewer_model = None
-        args._defaults_skip_extra = True
     if (
         saved.cli_reviewer
         and not _has_flag_in(argv, "--cli-reviewer")
@@ -2191,10 +2068,6 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         "--sim-model",
         _saved.sim_model or "openrouter/deepseek/deepseek-v4-flash",
     )
-    extra_reviewer_model = (
-        _extract_flag_value(forwarded, "--extra-reviewer-model", _saved.extra_reviewer_model or "")
-        or None
-    )
     cli_reviewer_choice = _extract_flag_value(
         forwarded, "--cli-reviewer", _saved.cli_reviewer or "auto"
     )
@@ -2241,7 +2114,6 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         max_wall_minutes=_extract_flag_value(forwarded, "--max-wall-minutes", "?"),
         agent_model=agent_model,
         sim_model=sim_model,
-        extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer_choice,
         actor=actor,
         sim_actor=sim_actor,
@@ -2253,12 +2125,6 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         http_proxy=_extract_flag_value(forwarded, "--http-proxy", "") or None,
         https_proxy=_extract_flag_value(forwarded, "--https-proxy", "") or None,
     )
-    # Propagate the `extra_reviewer_model = "skip"` sentinel from
-    # defaults.toml so the picker's Enter-skip behavior matches
-    # `contremaitre run`. Only honor it when the operator didn't pass
-    # --extra-reviewer-model explicitly.
-    if _saved.extra_reviewer_skip and not _has_flag_in(forwarded, "--extra-reviewer-model"):
-        confirm_args._defaults_skip_extra = True
     # Same story for cli_reviewer: a saved value should prefill the
     # picker (Enter accepts it), not short-circuit it. Without this the
     # TUI path would silently apply `cli_reviewer = "both"` from the
@@ -2277,12 +2143,10 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("aborted", file=sys.stderr)
         return 130
-    # Picker may have appended --agent-model / --sim-model /
-    # --extra-reviewer-model to `forwarded`; refresh the locals so the TUI
-    # header displays the chosen models.
+    # Picker may have appended --agent-model / --sim-model to `forwarded`;
+    # refresh the locals so the TUI header displays the chosen models.
     agent_model = _extract_flag_value(forwarded, "--agent-model", agent_model)
     sim_model = _extract_flag_value(forwarded, "--sim-model", sim_model)
-    extra_reviewer_model = _extract_flag_value(forwarded, "--extra-reviewer-model", "") or None
     cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", cli_reviewer_choice)
     # Fold the per-role runtime choice (the picker may have changed it) back
     # into the subprocess flags. The picker writes confirm_args.actor /
@@ -2348,7 +2212,6 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
             cli_tool=sim_cli_tool,
             **_label_kw,
         ),
-        extra_reviewer_model=extra_reviewer_model,
         cli_reviewer=cli_reviewer_choice,
         docker_image=docker_image,
         target_url=source_url,

@@ -258,26 +258,9 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     review_cycles = _read_jsonl(paths.review_cycles)
     test_runs = _read_jsonl(paths.test_runs)
 
-    # Per-reviewer split. Treat missing `reviewer` field as "sim" so old runs
-    # written before the extra-reviewer feature land in the right bucket.
-    sim_cycles = [
-        r for r in review_cycles if r.get("reviewer", "sim") == "sim" and not r.get("unavailable")
-    ]
-    extra_attempted = any(r.get("reviewer") == "extra" for r in review_cycles)
+    sim_cycles = [r for r in review_cycles if not r.get("unavailable")]
     sim = sim_cycles[-1] if sim_cycles else {}
     last_round_value = max((r.get("round") or 0 for r in review_cycles), default=0)
-    last_round_entries = [r for r in review_cycles if (r.get("round") or 0) == last_round_value]
-    last_round_extra = next(
-        (
-            r
-            for r in last_round_entries
-            if r.get("reviewer") == "extra" and not r.get("unavailable")
-        ),
-        None,
-    )
-    last_round_extra_unavailable = any(
-        r.get("reviewer") == "extra" and r.get("unavailable") for r in last_round_entries
-    )
 
     # Phase split — surfaces "design pass actually happened" vs "agent shipped
     # on candidate selection alone". grill≤1 with impl=1 is the skipped-grilling
@@ -299,19 +282,8 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     n_pass = sum(1 for t in test_runs if t.get("returncode") == 0)
 
     lede_parts = [f"֍ **{verdict}**"]
-    if extra_attempted:
-        if last_round_extra is not None:
-            agreement = (sim.get("verdict") or "").upper() == (
-                last_round_extra.get("verdict") or ""
-            ).upper()
-            lede_parts.append("SIM+EXTRA agreed" if agreement else "SIM+EXTRA disagreed")
-        elif last_round_extra_unavailable:
-            lede_parts.append("EXTRA unavailable")
     if confidence is not None:
-        if last_round_extra is not None and last_round_extra.get("confidence") is not None:
-            lede_parts.append(f"confidence {confidence:.2f}/{last_round_extra['confidence']:.2f}")
-        else:
-            lede_parts.append(f"confidence {confidence:.1f}")
+        lede_parts.append(f"confidence {confidence:.1f}")
     if phases.get("grilling_exchanges") is not None:
         lede_parts.append(f"grill {phases['grilling_exchanges']} · impl {phases['impl_turns']}")
     if n_rounds:
@@ -405,20 +377,9 @@ def _build_scorecard_block(pr_eval: dict | None) -> str:
     if hard_gates:
         mark = "✓" if hard_gates == "PASS" else "✗"
         lines.append(f"- Hard gates: {mark} {hard_gates}")
-    sim_conf = scorecard.get("sim_confidence")
-    extra_conf = scorecard.get("extra_reviewer_confidence")
-    cross_family = scorecard.get("cross_family_agreement")
-    if sim_conf is not None or extra_conf is not None:
-        bits = []
-        if sim_conf is not None:
-            bits.append(f"sim {sim_conf:.2f}")
-        if extra_conf is not None:
-            bits.append(f"extra {extra_conf:.2f}")
-        if cross_family is True:
-            bits.append("cross-family agreement")
-        elif cross_family is False:
-            bits.append("cross-family disagreement")
-        lines.append(f"- Reviewer confidence: {' · '.join(bits)}")
+    sim_conf = scorecard.get("sim_review_confidence")
+    if sim_conf is not None:
+        lines.append(f"- Reviewer confidence: {sim_conf:.2f}")
     discipline_bits: list[str] = []
     if scorecard.get("self_verified") is not None:
         discipline_bits.append(f"self-verified {'✓' if scorecard['self_verified'] else '✗'}")

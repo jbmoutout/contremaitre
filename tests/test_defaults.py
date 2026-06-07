@@ -36,7 +36,6 @@ def test_load_reads_all_fields(tmp_path: Path):
             [
                 'agent_model = "opencode/big-pickle"',
                 'sim_model = "openrouter/qwen/qwen3-max"',
-                'extra_reviewer_model = "opencode/nemotron-3-super-free"',
                 'cli_reviewer = "both"',
             ]
         )
@@ -46,7 +45,6 @@ def test_load_reads_all_fields(tmp_path: Path):
     assert out == defaults.Defaults(
         agent_model="opencode/big-pickle",
         sim_model="openrouter/qwen/qwen3-max",
-        extra_reviewer_model="opencode/nemotron-3-super-free",
         cli_reviewer="both",
     )
 
@@ -108,26 +106,6 @@ def test_load_drops_non_string_fields(tmp_path: Path):
     path = tmp_path / "defaults.toml"
     path.write_text("agent_model = 42\n")
     assert defaults.load(path).agent_model is None
-
-
-def test_load_parses_extra_reviewer_skip_sentinel(tmp_path: Path):
-    # `extra_reviewer_model = "skip"` is an explicit "don't ask in the
-    # picker either" signal. Lifted into `extra_reviewer_skip=True` and
-    # the slug field stays None so downstream config doesn't try to
-    # launch an extra reviewer with the literal string "skip".
-    path = tmp_path / "defaults.toml"
-    path.write_text('extra_reviewer_model = "skip"\n')
-    out = defaults.load(path)
-    assert out.extra_reviewer_model is None
-    assert out.extra_reviewer_skip is True
-
-
-def test_load_extra_reviewer_skip_defaults_false_when_absent(tmp_path: Path):
-    path = tmp_path / "defaults.toml"
-    path.write_text('extra_reviewer_model = "opencode/big-pickle"\n')
-    out = defaults.load(path)
-    assert out.extra_reviewer_model == "opencode/big-pickle"
-    assert out.extra_reviewer_skip is False
 
 
 def test_defaults_path_returns_xdg_when_no_file_exists(monkeypatch, tmp_path: Path):

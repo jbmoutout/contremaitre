@@ -34,6 +34,9 @@ class CliReviewVerdict(str, Enum):
 
 class TerminalVerdict(str, Enum):
     READY_FOR_DRAFT_PR = "READY_FOR_DRAFT_PR"
+    # PR created but CLI reviewer never reached LOOKS_GOOD in max_cli_review_rounds.
+    # Yellow: the draft is published; a human should review before merging.
+    PR_NEEDS_HUMAN = "PR_NEEDS_HUMAN"
     NO_PR_CHANGES_REQUESTED = "NO_PR_CHANGES_REQUESTED"
     NO_PR_NEEDS_HUMAN = "NO_PR_NEEDS_HUMAN"
     FAILED_INFRA = "FAILED_INFRA"
@@ -139,12 +142,11 @@ class RunConfig:
     upstream: str | None = None
     agent_model: str = "openrouter/deepseek/deepseek-v4-flash"
     sim_model: str = "openrouter/deepseek/deepseek-v4-flash"
-    extra_reviewer_model: str | None = None
-    # Local CLI reviewer run AFTER the Draft PR is published, posting a code
-    # review comment on the PR using the operator's subscription-bound CLI
-    # (`claude` or `codex`). Optional. `"none"` skips the step entirely;
-    # the orchestrator's hook is a no-op in that case.
+    # CLI reviewer drives a post-PR revision loop: reviews the PR, posts a
+    # comment, and if MUST_FIX re-enters the agent (fresh Docker session) until
+    # LOOKS_GOOD or max_cli_review_rounds exhausted. `"none"` skips entirely.
     cli_reviewer: str = "none"
+    max_cli_review_rounds: int = 3
     check_cmds: tuple[str, ...] = ()
     actor_mode: ActorMode = ActorMode.FAKE
     # Which frontier CLI to drive AS the agent/SIM when actor_mode is CLI:
@@ -173,7 +175,6 @@ class RunConfig:
     # or the reverse). None means the SIM shares `cli_tool`.
     sim_cli_tool: str | None = None
     sim_scenario: str = "approved"
-    extra_reviewer_scenario: str = "approved"
     agent_scenario: str = "normal"
     publish_mode: PublishMode = PublishMode.STUB
     keep_worktree: bool = False
@@ -228,7 +229,6 @@ class RunPaths:
     initial_prompt: Path
     raw_export: Path
     sim_raw_export: Path
-    extra_reviewer_raw_export: Path
     # Post-publish CLI reviewer streams (`claude -p` or `codex exec`). Only
     # one of the two is written per run; the unused path is registered for
     # readers to probe.

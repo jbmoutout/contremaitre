@@ -336,7 +336,7 @@ def _check_openrouter_key(config: RunConfig) -> PreflightCheck:
     # hit the network to verify it (a present-but-unused key, or a verification
     # failure behind a corporate/self-signed-cert proxy, must not block a
     # Zen-only or pure-CLI run).
-    selected = [m for m in (config.agent_model, config.sim_model, config.extra_reviewer_model) if m]
+    selected = [m for m in (config.agent_model, config.sim_model) if m]
     non_free = [m for m in selected if not is_zen_model(m)]
     key = os.environ.get(config.openrouter_env_var)
     if not non_free:

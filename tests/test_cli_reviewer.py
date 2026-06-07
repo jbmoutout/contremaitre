@@ -331,21 +331,21 @@ class BuildPromptTest(unittest.TestCase):
         prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
         self.assertLess(len(prompt), 2000)
 
-    def test_specifies_traffic_light_format(self):
-        # Output format is locked down so reviews start with a scannable
-        # `<glyph> <KEY>` verdict instead of codex/claude's default verbose
-        # preamble. Both halves are specified — the glyph for humans, the
-        # SCREAMING_SNAKE_CASE key for machine parsing.
+    def test_specifies_verdict_format(self):
+        # Output format locks down the three SCREAMING_SNAKE_CASE keys so
+        # machine parsing is unambiguous. No emoji glyphs — just the keys.
         prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
-        self.assertIn("🟢", prompt)
-        self.assertIn("🟠", prompt)
-        self.assertIn("🔴", prompt)
+        self.assertNotIn("🟢", prompt)
+        self.assertNotIn("🟠", prompt)
+        self.assertNotIn("🔴", prompt)
         self.assertIn("LOOKS_GOOD", prompt)
         self.assertIn("NEEDS_ATTENTION", prompt)
         self.assertIn("MUST_FIX", prompt)
         # Conventional-comments labels for the body.
         self.assertIn("**issue:**", prompt)
         self.assertIn("**nit:**", prompt)
+        # Required changes section is documented in the prompt.
+        self.assertIn("## Required changes", prompt)
 
     def test_drops_praise_category(self):
         # Praise is dropped from the standard label list so the agent

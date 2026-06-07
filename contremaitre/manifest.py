@@ -144,7 +144,6 @@ def build_manifest(config: RunConfig) -> dict[str, Any]:
         # Models / image / base — existing fields, kept stable.
         "agent_model": config.agent_model,
         "sim_model": config.sim_model,
-        "extra_reviewer_model": config.extra_reviewer_model,
         "cli_reviewer": config.cli_reviewer,
         "docker_image": config.docker_image,
         "target_url": config.upstream or config.fork or str(config.repo),
@@ -181,12 +180,11 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
     aggregated into one cell. Different digest → different system → fresh
     baseline (or treat the comparison as an experimental delta).
 
-    Includes the model identifiers — `agent_model`, `sim_model`, and
-    `extra_reviewer_model`. These ARE part of the system under test: a
-    Qwen SIM and a deepseek SIM are different systems being evaluated,
-    not different inputs to the same system. The canary's two-variable
-    guard relies on this to catch "you bumped both prompt and model in
-    one cycle" attribution-breaking changes.
+    Includes the model identifiers — `agent_model` and `sim_model`. These
+    ARE part of the system under test: a Qwen SIM and a deepseek SIM are
+    different systems being evaluated, not different inputs to the same
+    system. The canary's two-variable guard relies on this to catch "you
+    bumped both prompt and model in one cycle" attribution-breaking changes.
 
     `cli_reviewer` lives in `input_digest` instead (in eval.py) — it's
     treated as the judge choice, not the SUT.
@@ -202,7 +200,6 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
         manifest.get("skills_lock_sha256") or "",
         manifest.get("agent_model") or "",
         manifest.get("sim_model") or "",
-        manifest.get("extra_reviewer_model") or "",
     ]
     for name, digest in sorted((manifest.get("prompt_hashes") or {}).items()):
         parts.append(f"{name}:{digest}")

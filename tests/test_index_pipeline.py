@@ -64,7 +64,6 @@ def _make_run(
     verdict: str = "READY_FOR_DRAFT_PR",
     turns: int = 10,
     duration: float = 600.0,
-    extra_model: str | None = None,
     diff_stat: str | None = " 2 files changed, 100 insertions(+), 40 deletions(-)\n",
     review_cycles: list[dict] | None = None,
     cli_review_verdict: str | None = None,
@@ -79,7 +78,6 @@ def _make_run(
         {
             "agent_model": agent,
             "sim_model": sim,
-            "extra_reviewer_model": extra_model,
             "actor_mode": actor_mode,
             "verdict": verdict,
             "turns": turns,
@@ -201,25 +199,23 @@ def test_pr_review_verdict_none_when_no_review(tmp_path):
     assert _pr_review_verdict(tmp_path) is None
 
 
-def test_review_signals_distinguishes_sim_and_extra(tmp_path):
+def test_review_signals_sim_rounds_and_changes(tmp_path):
     _write_jsonl(
         tmp_path / "review_cycles.jsonl",
         [
             {"reviewer": "sim", "round": 1, "verdict": "CHANGES_REQUESTED"},
-            {"reviewer": "extra", "round": 1, "verdict": "APPROVED"},
             {"reviewer": "sim", "round": 2, "verdict": "APPROVED"},
-            {"reviewer": "extra", "round": 2, "unavailable": True, "reason": "malformed"},
         ],
     )
     sig = _review_signals(tmp_path)
     assert sig["sim_rounds"] == 2
     assert sig["sim_changes"] is True  # round 1 bounced
-    assert sig["extra_changes"] is False  # only APPROVED (unavailable row ignored)
 
 
 def test_review_signals_all_none_without_cycles(tmp_path):
     sig = _review_signals(tmp_path)
-    assert sig == {"sim_rounds": None, "sim_changes": None, "extra_changes": None}
+    assert sig["sim_rounds"] is None
+    assert sig["sim_changes"] is None
 
 
 # --------------------------------------------------------------------------
@@ -337,11 +333,9 @@ def test_collect_pairings_aggregates_with_coverage(tmp_path):
         verdict="NO_PR_CHANGES_REQUESTED",
         turns=6,
         duration=300.0,
-        extra_model="prov/extraZ",
         diff_stat=" 1 file changed, 20 insertions(+)\n",
         review_cycles=[
             {"reviewer": "sim", "round": 1, "verdict": "APPROVED"},
-            {"reviewer": "extra", "round": 1, "verdict": "CHANGES_REQUESTED"},
         ],
         cli_review_verdict=None,
         output_tokens=100,
@@ -363,9 +357,6 @@ def test_collect_pairings_aggregates_with_coverage(tmp_path):
     assert p["out_tokens"] == (200.0, 2)  # (300 + 100) / 2
     assert p["sim_rounds"] == (1.5, 2)  # (2 + 1) / 2
     assert p["sim_changes"] == (0.5, 2)  # A bounced, B did not
-    # extra only configured in B → coverage 1, rate 1.0
-    assert p["extra_changes"] == (1.0, 1)
-    assert p["extra_any"] is True
     # cli review only in A → coverage 1, MUST_FIX → fail rate 1.0
     assert p["pr_fail"] == (1.0, 1)
     # phases only recoverable in A → coverage 1

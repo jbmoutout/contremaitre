@@ -58,29 +58,45 @@ def revision_followup(
     required_changes: list[str],
     *,
     sim: ParsedVerdict | None = None,
-    extra: ParsedVerdict | None = None,
 ) -> str:
     """Build the message that resumes the agent's WORK session after CHANGES_REQUESTED.
 
-    Forwards each reviewer's natural-language `summary` alongside the merged
-    `required_changes` bullets so the agent gets framing (what's right, what's
-    wrong) rather than just terse instructions.
+    Forwards the SIM's natural-language `summary` alongside the
+    `required_changes` bullets so the agent gets framing (what's right,
+    what's wrong) rather than just terse instructions.
     """
 
     bullets = "\n".join(f"- {item}" for item in required_changes) or "- (none specified)"
-    summary_blocks: list[str] = []
-    if sim is not None:
-        summary_blocks.append(f"[SIM]\n{sim.summary.strip()}")
-    if extra is not None:
-        summary_blocks.append(f"[EXTRA]\n{extra.summary.strip()}")
-    summaries = ("\n\n".join(summary_blocks) + "\n\n") if summary_blocks else ""
+    summary = (f"[SIM]\n{sim.summary.strip()}\n\n") if sim is not None else ""
     return (
         "The review pass returned CHANGES_REQUESTED.\n\n"
-        f"{summaries}"
+        f"{summary}"
         "Required changes:\n"
         f"{bullets}\n\n"
         "Address these items, then re-write "
         "`.contremaitre/IMPLEMENTATION_COMPLETE` when ready for another review."
+    )
+
+
+def cli_revision_followup(
+    required_changes: list[str],
+    *,
+    round_n: int = 1,
+    round_of: int = 3,
+) -> str:
+    """Build the message that resumes the agent's session after a CLI reviewer round.
+
+    Lean context: the agent already has the full codebase in its session
+    memory. The `[CLI]` tag distinguishes this from SIM-driven revisions.
+    `round_n/round_of` lets the agent know how many rounds remain.
+    """
+
+    bullets = "\n".join(f"- {item}" for item in required_changes) or "- (none specified)"
+    return (
+        f"[CLI] Post-PR review round {round_n}/{round_of} did not reach LOOKS_GOOD.\n\n"
+        "Required changes:\n"
+        f"{bullets}\n\n"
+        "Address these items, then re-write `.contremaitre/IMPLEMENTATION_COMPLETE`."
     )
 
 
@@ -91,4 +107,5 @@ __all__ = [
     "sim_first_turn",
     "sim_subsequent_turn",
     "revision_followup",
+    "cli_revision_followup",
 ]
