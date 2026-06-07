@@ -34,21 +34,28 @@ Added (SIM): sim_read_settled, sim_read_diff, sim_read_diff_partial,
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from typing import Any
 
-from .extract import parse_apply_patch
 from .jsonlog import read_jsonl
+from .run_artifacts import (
+    Marker,
+    _CONTREMAITRE_DIR_RE,
+    _timestamp_ms,
+    _tool_paths,
+    compute_phases as _compute_phases,
+    marker_timestamp_ms,
+    marker_tokens_before,
+    marker_write_chars,
+    marker_written,
+)
 
 
 # ---------------------------------------------------------------------------
 # Regex patterns — all anchored to harness contracts, not model prose style
 # ---------------------------------------------------------------------------
 
-_SETTLED_RE = re.compile(r"SETTLED_DESIGN", re.IGNORECASE)
-_IMPL_COMPLETE_RE = re.compile(r"IMPLEMENTATION_COMPLETE")
 _DIFF_RE = re.compile(r"review_diff_round|(?:^|[/\\])diff\.patch$", re.IGNORECASE)
-_CONTREMAITRE_DIR_RE = re.compile(r"[/\\]?\.contremaitre[/\\]")
+_SETTLED_READ_RE = re.compile(r"SETTLED_DESIGN", re.IGNORECASE)
 
 # Test runner patterns — what "self-verification" looks like in bash tool calls
 _TEST_CMD_RE = re.compile(
@@ -96,63 +103,7 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     timestamps in raw_export.jsonl. Surfaced live in the TUI footer Zone 3
     and rolled into the PR body lede.
     """
-    if agent_events is None:
-        agent_events = read_jsonl(paths.raw_export)
-    tool_calls = [e for e in agent_events if e.get("type") == "tool_use"]
-    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
-    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
-    settled_ms = _timestamp_ms(settled_event)
-    impl_ms = _timestamp_ms(impl_event)
-
-    guardrails_path = getattr(paths, "guardrail_events", None)
-    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
-    starts: list[tuple[float, str]] = []
-    for g in guardrails:
-        if g.get("event") != "opencode_actor_start":
-            continue
-        ts = _timestamp_ms(g)
-        role = g.get("role")
-        if ts is None or role not in ("agent", "sim", "review"):
-            continue
-        starts.append((ts, role))
-    starts.sort()
-
-    # Identify the impl-start turn: the agent turn whose lifetime contains
-    # the SETTLED write (start_ts ≤ settled_ms < next_start_ts).
-    impl_start_idx: int | None = None
-    if settled_ms is not None:
-        for i, (ts, role) in enumerate(starts):
-            if role != "agent":
-                continue
-            next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
-            if ts <= settled_ms < next_ts:
-                impl_start_idx = i
-                break
-
-    if impl_start_idx is None:
-        pre = starts
-        post = []
-    else:
-        pre = starts[:impl_start_idx]
-        post = starts[impl_start_idx:]
-
-    pre_settled_agent = sum(1 for _, r in pre if r == "agent")
-    pre_settled_sim = sum(1 for _, r in pre if r == "sim")
-    impl_agent = sum(1 for ts, r in post if r == "agent" and (impl_ms is None or ts <= impl_ms))
-
-    # max(round), not len(): with the extra reviewer enabled, review_cycles
-    # carries two entries per round plus optional `unavailable` entries; the
-    # round number is the canonical counter.
-    cycles = read_jsonl(paths.review_cycles)
-    review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
-
-    return {
-        "pre_settled_agent_turns": pre_settled_agent,
-        "pre_settled_sim_turns": pre_settled_sim,
-        "grilling_exchanges": min(pre_settled_agent, pre_settled_sim),
-        "impl_turns": impl_agent,
-        "review_rounds": review_rounds,
-    }
+    return _compute_phases(paths, agent_events)
 
 
 # ---------------------------------------------------------------------------
@@ -177,35 +128,32 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
         round((event_times[-1] - event_times[0]) / 1000, 1) if len(event_times) > 1 else 0
     )
 
-    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
-    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
     first_code_edit = _find_first_code_edit(tool_calls)
 
     t0 = event_times[0] if event_times else None
-    settled_ts = _timestamp_ms(settled_event)
+    settled_ts = marker_timestamp_ms(events, Marker.SETTLED_DESIGN)
+    impl_ts = marker_timestamp_ms(events, Marker.IMPLEMENTATION_COMPLETE)
     time_to_settled = (
         round((settled_ts - t0) / 1000, 1) if settled_ts is not None and t0 is not None else None
     )
-    tokens_to_settled = _tokens_before(events, settled_event)
+    tokens_to_settled = marker_tokens_before(events, Marker.SETTLED_DESIGN)
 
     settled_chars: int | None = None
-    if settled_event:
-        settled_chars = _write_chars(settled_event, _SETTLED_RE)
+    if marker_written(events, Marker.SETTLED_DESIGN):
+        settled_chars = marker_write_chars(events, Marker.SETTLED_DESIGN)
 
     settled_before_edit: bool | None = None
-    if settled_event and first_code_edit:
+    if settled_ts is not None and first_code_edit:
         first_edit_ts = _timestamp_ms(first_code_edit)
         settled_before_edit = (
             settled_ts < first_edit_ts
             if settled_ts is not None and first_edit_ts is not None
             else None
         )
-    elif settled_event:
+    elif settled_ts is not None:
         settled_before_edit = True
 
-    self_verified, self_verify_pass, runtime_install = _check_self_verification(
-        tool_calls, impl_event
-    )
+    self_verified, self_verify_pass, runtime_install = _check_self_verification(tool_calls, impl_ts)
 
     return {
         "tool_call_count": {"value": len(tool_calls), "extraction": "automatic"},
@@ -252,7 +200,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
             "note": "apt-get/pip/npm install detected — container config gap, not agent quality.",
         },
         "implementation_complete_written": {
-            "value": impl_event is not None,
+            "value": marker_written(events, Marker.IMPLEMENTATION_COMPLETE),
             "extraction": "automatic",
         },
     }
@@ -275,7 +223,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
         by_tool[t] = by_tool.get(t, 0) + 1
 
     sim_read_settled = any(
-        _SETTLED_RE.search(_inp(e).get("filePath", "") or "")
+        _SETTLED_READ_RE.search(_inp(e).get("filePath", "") or "")
         for e in tool_calls
         if _tool_name(e) == "read"
     )
@@ -375,22 +323,6 @@ def _convergence(file_access: dict[str, int]) -> tuple[str, float, int, int]:
     return label, breadth, distinct, total
 
 
-def _find_write_to(tool_calls: list[dict], pattern: re.Pattern) -> dict | None:
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        if (part.get("state") or {}).get("status") != "completed":
-            continue
-        inp = _inp(e)
-        target = (
-            inp.get("filePath") or inp.get("path") or inp.get("patchText") or inp.get("patch") or ""
-        )
-        if pattern.search(str(target)):
-            return e
-    return None
-
-
 def _find_first_code_edit(tool_calls: list[dict]) -> dict | None:
     """First write/edit/apply_patch to a path outside .contremaitre/."""
     for e in tool_calls:
@@ -404,20 +336,8 @@ def _find_first_code_edit(tool_calls: list[dict]) -> dict | None:
     return None
 
 
-def _tokens_before(events: list[dict], target: dict | None) -> int | None:
-    if not target:
-        return None
-    total = 0
-    for e in events:
-        if e is target:
-            break
-        if e.get("type") == "step_finish":
-            total += (e.get("part") or {}).get("tokens", {}).get("total", 0)
-    return total
-
-
 def _check_self_verification(
-    tool_calls: list[dict], impl_event: dict | None
+    tool_calls: list[dict], impl_ts: float | None
 ) -> tuple[bool, bool | None, bool]:
     """Return (self_verified, output_suggests_pass, runtime_install_required).
 
@@ -426,7 +346,7 @@ def _check_self_verification(
     output_suggests_pass: heuristic — no FAILED/error: in any test output.
     runtime_install_required: agent had to install a runtime (container gap).
     """
-    impl_ts = _timestamp_ms(impl_event) if impl_event else float("inf")
+    impl_ts = impl_ts if impl_ts is not None else float("inf")
 
     last_edit_ts: float | None = None
     for e in tool_calls:
@@ -465,49 +385,6 @@ def _check_self_verification(
         not _TEST_FAIL_RE.search(out) and not _ZERO_TESTS_RE.search(out) for out in test_outputs
     )
     return True, all_pass, runtime_install
-
-
-def _timestamp_ms(e: dict | None) -> float | None:
-    if not e:
-        return None
-    raw = e.get("timestamp")
-    if isinstance(raw, int | float):
-        return float(raw)
-    if isinstance(raw, str):
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    ts = e.get("ts")
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
-        except ValueError:
-            return None
-    return None
-
-
-def _tool_paths(e: dict) -> list[str]:
-    inp = _inp(e)
-    tool = _tool_name(e)
-    if tool == "apply_patch":
-        patch = inp.get("patchText") or inp.get("patch") or ""
-        return [fp for _, fp, _ in parse_apply_patch(str(patch))]
-    fp = inp.get("filePath") or inp.get("path") or ""
-    return [str(fp)] if fp else []
-
-
-def _write_chars(e: dict, pattern: re.Pattern) -> int:
-    inp = _inp(e)
-    tool = _tool_name(e)
-    if tool == "write":
-        return len(inp.get("content") or "")
-    if tool == "edit":
-        return len(inp.get("newString") or "")
-    if tool == "apply_patch":
-        patch = inp.get("patchText") or inp.get("patch") or ""
-        return sum(len(body) for _, fp, body in parse_apply_patch(str(patch)) if pattern.search(fp))
-    return 0
 
 
 def _read_limit(e: dict) -> int:

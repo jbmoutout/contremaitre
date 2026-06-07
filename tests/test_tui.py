@@ -23,6 +23,7 @@ from contremaitre.tui import (
     _PHASES,
     _codex_usage_from_payload,
     _codex_usage_token,
+    _compute_phases_for_tui,
     _fmt_reset,
     _fmt_window_minutes,
     _read_codex_usage,
@@ -1101,6 +1102,25 @@ def test_self_verified_counts_apply_patch_as_code_edit():
 
     evts.append(_completed_bash(timestamp=3_000, command="pytest -q"))
     assert _self_verified_in(evts)
+
+
+def test_compute_phases_for_tui_uses_max_review_round_not_len():
+    agent_events = [
+        _write_tool_event("write", "/worktree/.contremaitre/SETTLED_DESIGN.md"),
+    ]
+    agent_events[0]["timestamp"] = 1_500
+    guardrails = [
+        _g(events.OPENCODE_ACTOR_START, role="agent", ts="2026-01-01T00:00:01.000Z"),
+        _g(events.OPENCODE_ACTOR_START, role="review", ts="2026-01-01T00:00:02.000Z"),
+    ]
+    review_cycles = [
+        {"round": 1, "reviewer": "sim"},
+        {"round": 1, "reviewer": "extra"},
+    ]
+
+    phases = _compute_phases_for_tui(agent_events, guardrails, review_cycles)
+
+    assert phases["review_rounds"] == 1
 
 
 # ===== _latest_pending_tool =====
