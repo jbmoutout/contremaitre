@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from contremaitre.viewer.index import (
+    _canonical_model,
     _collect_pipeline_pairings,
     _diffstat_loc,
     _pipeline_run_metrics,
@@ -119,6 +120,43 @@ def _make_run(
 
 
 # --------------------------------------------------------------------------
+# Canonical model normalization
+# --------------------------------------------------------------------------
+
+
+def test_canonical_model_normalizes_across_runtimes():
+    # opencode/OpenRouter slugs → final path segment, runtime "opencode"
+    assert _canonical_model("openrouter/deepseek/deepseek-v4-flash") == (
+        "deepseek-v4-flash",
+        "opencode",
+    )
+    assert _canonical_model("opencode/deepseek-v4-flash-free") == (
+        "deepseek-v4-flash-free",
+        "opencode",
+    )
+    # CLI labels (the deterministic role_model_label format) → model + runtime
+    assert _canonical_model("gpt-5.5 (codex, effort=high)") == ("gpt-5.5", "codex")
+    assert _canonical_model("claude default (claude, effort=high)") == (
+        "claude-default",
+        "claude",
+    )
+    assert _canonical_model(None) == (None, None)
+
+
+def test_collect_pairings_merges_differently_spelled_same_model(tmp_path):
+    # Two runs whose agent slug differs only by provider prefix must land in
+    # ONE pairing — the old split("/", 1) left a stray vendor and split them.
+    runs = tmp_path / "runs"
+    _make_run(runs, "20260101-000200-run", agent="openrouter/deepseek/deepseek-v4-flash", sim="z/s")
+    _make_run(runs, "20260101-000201-run", agent="opencode/deepseek-v4-flash", sim="z/s")
+    pairings = _collect_pipeline_pairings(runs)
+    assert len(pairings) == 1
+    assert pairings[0]["agent"] == "deepseek-v4-flash"
+    assert pairings[0]["agent_rt"] == "opencode"
+    assert pairings[0]["n"] == 2
+
+
+# --------------------------------------------------------------------------
 # Pure extractors
 # --------------------------------------------------------------------------
 
@@ -219,6 +257,49 @@ def test_pipeline_run_metrics_skips_fake_mode(tmp_path):
     runs = tmp_path / "runs"
     _make_run(runs, "20260101-000002-run", agent="prov/a", sim="prov/b", actor_mode="fake")
     assert _pipeline_run_metrics(runs / "20260101-000002-run") is None
+
+
+def test_pipeline_run_metrics_marks_infra_failures(tmp_path):
+    # Infra runs are kept as a lightweight marker (not None) so the
+    # aggregator can count them, but flagged so they're excluded from rates.
+    runs = tmp_path / "runs"
+    _make_run(runs, "20260101-000003-run", agent="prov/a", sim="prov/b", verdict="FAILED_INFRA")
+    _make_run(runs, "20260101-000004-run", agent="prov/a", sim="prov/b", verdict="QUOTA_EXHAUSTED")
+    for rid in ("20260101-000003-run", "20260101-000004-run"):
+        m = _pipeline_run_metrics(runs / rid)
+        assert m["infra"] is True
+        assert "turns" not in m  # metric extraction skipped
+
+
+def test_collect_pairings_excludes_infra_from_rates(tmp_path):
+    # An infra failure must not count toward the metrics or drag PR-land:
+    # 2 real runs (1 lands) + 1 infra → n=2, pr_land=0.5, infra_n=1.
+    runs = tmp_path / "runs"
+    _make_run(runs, "20260101-000300-run", agent="p/a", sim="p/b", verdict="READY_FOR_DRAFT_PR")
+    _make_run(
+        runs, "20260101-000301-run", agent="p/a", sim="p/b", verdict="NO_PR_CHANGES_REQUESTED"
+    )
+    _make_run(runs, "20260101-000302-run", agent="p/a", sim="p/b", verdict="FAILED_INFRA")
+    pairings = _collect_pipeline_pairings(runs)
+    assert len(pairings) == 1
+    assert pairings[0]["n"] == 2
+    assert pairings[0]["pr_land"] == 0.5
+    assert pairings[0]["infra_n"] == 1
+
+
+def test_infra_only_pairing_is_dropped_but_surfaced(tmp_path):
+    from contremaitre.viewer.index import _infra_only_pairings
+
+    # A pairing whose only runs are infra failures must NOT appear in the
+    # main table but MUST surface in the infra-only footnote list.
+    runs = tmp_path / "runs"
+    _make_run(runs, "20260101-000400-run", agent="x/gpt-5.4", sim="x/dsv4", verdict="FAILED_INFRA")
+    _make_run(runs, "20260101-000401-run", agent="x/gpt-5.4", sim="x/dsv4", verdict="FAILED_INFRA")
+    assert _collect_pipeline_pairings(runs) == []
+    infra_only = _infra_only_pairings(runs)
+    assert len(infra_only) == 1
+    assert infra_only[0]["agent"] == "gpt-5.4"
+    assert infra_only[0]["infra_n"] == 2
 
 
 # --------------------------------------------------------------------------

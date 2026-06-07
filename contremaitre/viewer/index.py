@@ -290,6 +290,38 @@ def _short_model(model: str | None) -> str | None:
     return model.split("/", 1)[-1]
 
 
+# `<model> (codex, effort=high)` / `claude default (claude, effort=high)` —
+# the fixed shape `models.role_model_label` emits for a CLI role. We treat it
+# as a parse contract, not freeform prose: it is the ONLY place a run records
+# its codex/claude model (run_config.json keeps only the ignored opencode
+# slug; the raw stream never echoes the model id).
+_CLI_LABEL_RE = re.compile(r"^(?P<model>.+?)\s*\((?P<runtime>codex|claude),\s*effort=[^)]*\)\s*$")
+
+
+def _canonical_model(label: str | None) -> tuple[str | None, str | None]:
+    """Uniform `(name, runtime)` for a role's model — provider/effort agnostic.
+
+    Normalizes the three runtimes to one naming scheme so the same model
+    groups and sorts consistently regardless of how it was spelled:
+      - CLI roles (the deterministic `… (codex|claude, effort=…)` label):
+        strip the effort suffix, tag the runtime, collapse spaces so
+        `claude default` → `claude-default`.
+      - everything else is an opencode/OpenRouter slug `provider/…/model`;
+        take the final path segment so `openrouter/deepseek/deepseek-v4-flash`
+        and `opencode/deepseek-v4-flash-free` normalize the same way (the old
+        `split("/", 1)` left a stray `deepseek/` vendor on the former).
+
+    Returns `(None, None)` for an empty label.
+    """
+
+    if not label:
+        return None, None
+    m = _CLI_LABEL_RE.match(label)
+    if m:
+        return m.group("model").strip().replace(" ", "-"), m.group("runtime")
+    return label.rsplit("/", 1)[-1], "opencode"
+
+
 def _slug_from_pr_url(url: str | None) -> str | None:
     if not url:
         return None
@@ -471,6 +503,7 @@ def _render_html(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
 .pipeline-table td.num {{ text-align: right; padding-right: 16px; font-variant-numeric: tabular-nums; }}
 .pipeline-table .pair-cell {{ color: var(--text-bright); padding-left: 0; padding-right: 20px; }}
 .pipeline-table .pair-cell .sep {{ color: var(--text-muted); margin: 0 8px; }}
+.pipeline-table .rt-tag {{ margin-left: 5px; padding: 0 5px; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border: 1px solid var(--surface-2); border-radius: 3px; vertical-align: 1px; }}
 .pipeline-table .grp-start {{ border-left: 1px solid var(--surface-2); padding-left: 16px; }}
 .pipeline-table .cell.partial {{ color: var(--text-muted); opacity: 0.7; }}
 .pipeline-table .cell.sev-amber {{ color: var(--warning); }}
@@ -517,6 +550,14 @@ document.querySelectorAll('.tab').forEach(function (tab) {{
 _PAIRING_MIN_RUNS = 2
 _INSERTIONS_RE = re.compile(r"(\d+)\s+insertions?\(\+\)")
 _DELETIONS_RE = re.compile(r"(\d+)\s+deletions?\(-\)")
+
+# Verdicts where the pipeline died for reasons unrelated to model quality
+# (docker/clone/preflight, or provider credit exhaustion). These runs never
+# exercised the model loop meaningfully, so they're excluded from the
+# per-pairing metrics — counting them would understate PR-land rate and
+# pollute turns/LoC. Infra reliability is a separate concern (the runs tab's
+# "failed infra" total).
+_INFRA_VERDICTS = frozenset({"FAILED_INFRA", "QUOTA_EXHAUSTED"})
 
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:
@@ -617,20 +658,26 @@ def _review_signals(run_dir: Path) -> dict[str, Any]:
 
 
 def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
-    """All grounded pipeline metrics for one run, or None if not aggregable.
+    """Grounded pipeline metrics for one run, or None if not aggregable.
 
-    Skips fake-mode fixtures and runs with no agent/sim label. Every field
-    is None when its source datum is absent, so the aggregator can report
-    honest per-metric coverage rather than implying full data.
+    Returns None only for fake-mode fixtures and runs with no agent/sim
+    label. For an infra failure it returns a MARKER dict (`infra=True` plus
+    just the pairing identity): the run is kept so the aggregator can count
+    how often a duo infra-failed, but its (meaningless, often empty)
+    metrics are skipped and excluded from the rates. For a real run every
+    metric field is None when its source datum is absent, so the aggregator
+    can report honest per-metric coverage.
     """
 
     stats = _read_json(run_dir / "stats.json", default=None)
     if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
         return None
-    agent = _short_model(stats.get("agent_model"))
-    sim = _short_model(stats.get("sim_model"))
+    agent, agent_rt = _canonical_model(stats.get("agent_model"))
+    sim, sim_rt = _canonical_model(stats.get("sim_model"))
     if not agent or not sim:
         return None
+    if stats.get("verdict") in _INFRA_VERDICTS:
+        return {"agent": agent, "agent_rt": agent_rt, "sim": sim, "sim_rt": sim_rt, "infra": True}
 
     # Phases computed LIVE via the fixed flow_use.compute_phases, not the
     # persisted eval/flow_use.json (stale for runs scored before the CLI
@@ -652,7 +699,10 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
 
     return {
         "agent": agent,
+        "agent_rt": agent_rt,
         "sim": sim,
+        "sim_rt": sim_rt,
+        "infra": False,
         "extra_configured": bool(stats.get("extra_reviewer_model")),
         "lands_pr": _verdict_tier(str(stats.get("verdict") or "")) == "tier-green",
         "turns": stats.get("turns"),
@@ -693,22 +743,32 @@ def _collect_pipeline_pairings(runs_root: Path) -> list[dict[str, Any]]:
 
     if not runs_root.is_dir():
         return []
-    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    # Key on (name, runtime) per role so an opencode model never collides
+    # with a same-named CLI one, and so the same model groups regardless of
+    # provider-prefix spelling.
+    buckets: dict[tuple[str, str | None, str, str | None], list[dict[str, Any]]] = {}
     for entry in sorted(runs_root.iterdir()):
         if not entry.is_dir() or entry.name.startswith("_"):
             continue
         metrics = _pipeline_run_metrics(entry)
         if metrics is None:
             continue
-        buckets.setdefault((metrics["agent"], metrics["sim"]), []).append(metrics)
+        key = (metrics["agent"], metrics["agent_rt"], metrics["sim"], metrics["sim_rt"])
+        buckets.setdefault(key, []).append(metrics)
 
     pairings: list[dict[str, Any]] = []
-    for (agent, sim), runs in buckets.items():
-        if len(runs) < _PAIRING_MIN_RUNS:
+    for (agent, agent_rt, sim, sim_rt), runs in buckets.items():
+        # Metrics are computed over the REAL runs only; infra failures are
+        # kept solely as a per-pairing count (the `infra` column). A pairing
+        # needs `_PAIRING_MIN_RUNS` real runs to characterize model behavior;
+        # all-infra pairings (0 real) surface via `_infra_only_pairings`.
+        real = [r for r in runs if not r.get("infra")]
+        infra_n = len(runs) - len(real)
+        if len(real) < _PAIRING_MIN_RUNS:
             continue
-        ins = _avg(runs, "ins")
-        dele = _avg(runs, "dele")
-        out_tokens = _avg(runs, "out_tokens")
+        ins = _avg(real, "ins")
+        dele = _avg(real, "dele")
+        out_tokens = _avg(real, "out_tokens")
         tok_per_loc = None
         net_loc = (ins[0] or 0) + (dele[0] or 0)
         if out_tokens[0] is not None and net_loc > 0:
@@ -716,25 +776,39 @@ def _collect_pipeline_pairings(runs_root: Path) -> list[dict[str, Any]]:
         pairings.append(
             {
                 "agent": agent,
+                "agent_rt": agent_rt,
                 "sim": sim,
-                "n": len(runs),
-                "pr_land": sum(1 for r in runs if r["lands_pr"]) / len(runs),
-                "design": _avg(runs, "design_rounds"),
-                "impl": _avg(runs, "impl_turns"),
-                "turns": _avg(runs, "turns"),
-                "duration": _avg(runs, "duration"),
-                "sim_rounds": _avg(runs, "sim_rounds"),
-                "sim_changes": _rate(runs, "sim_changes"),
-                "extra_changes": _rate(runs, "extra_changes"),
-                "extra_any": any(r["extra_configured"] for r in runs),
-                "pr_fail": _rate(runs, "pr_review_fail"),
+                "sim_rt": sim_rt,
+                "n": len(real),
+                "infra_n": infra_n,
+                "pr_land": sum(1 for r in real if r["lands_pr"]) / len(real),
+                "design": _avg(real, "design_rounds"),
+                "impl": _avg(real, "impl_turns"),
+                "turns": _avg(real, "turns"),
+                "duration": _avg(real, "duration"),
+                "sim_rounds": _avg(real, "sim_rounds"),
+                "sim_changes": _rate(real, "sim_changes"),
+                "extra_changes": _rate(real, "extra_changes"),
+                "extra_any": any(r["extra_configured"] for r in real),
+                "pr_fail": _rate(real, "pr_review_fail"),
                 "ins": ins,
                 "dele": dele,
                 "out_tokens": out_tokens,
                 "tok_per_loc": tok_per_loc,
             }
         )
-    pairings.sort(key=lambda p: p["n"], reverse=True)
+    # Sort by model identity so the same agent groups together and the
+    # table reads in a stable, scannable order (runtime, then name, per
+    # role); run-count breaks ties.
+    pairings.sort(
+        key=lambda p: (
+            p["agent_rt"] or "",
+            p["agent"],
+            p["sim_rt"] or "",
+            p["sim"],
+            -p["n"],
+        )
+    )
     return pairings
 
 
@@ -743,6 +817,13 @@ def _collect_pipeline_pairings(runs_root: Path) -> list[dict[str, Any]]:
 
 def _rate_tier(rate: float) -> str:
     return "tier-green" if rate >= 0.6 else "tier-yellow" if rate >= 0.35 else "tier-red"
+
+
+def _model_html(name: str, runtime: str | None) -> str:
+    """Canonical model name + a uniform dim runtime tag (opencode/codex/claude)."""
+
+    tag = f'<span class="rt-tag">{_escape(runtime)}</span>' if runtime else ""
+    return f"{_escape(name)}{tag}"
 
 
 def _sev_class(metric: tuple[float | None, int], amber: float, red: float) -> str:
@@ -804,7 +885,66 @@ def _fmt_minutes(metric: tuple[float | None, int]) -> str:
     return "—" if value is None else f"{value / 60:.0f}m"
 
 
-def _render_pipeline_table(pairings: list[dict[str, Any]]) -> str:
+def _count_infra_runs(runs_root: Path) -> int:
+    """Real (non-fake) runs the dashboard drops as infra failures."""
+
+    if not runs_root.is_dir():
+        return 0
+    count = 0
+    for entry in sorted(runs_root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("_"):
+            continue
+        stats = _read_json(entry / "stats.json", default=None)
+        if (
+            isinstance(stats, dict)
+            and stats.get("actor_mode") != "fake"
+            and stats.get("verdict") in _INFRA_VERDICTS
+        ):
+            count += 1
+    return count
+
+
+def _infra_only_pairings(runs_root: Path) -> list[dict[str, Any]]:
+    """Pairings that ONLY ever infra-failed (no real run), busiest-fail first.
+
+    These have no row in the main table (no model data to compare), so the
+    footnote names them — otherwise a duo that always dies in infra would
+    silently disappear. Cheap: reads stats.json verdict only, no metric
+    extraction. Singleton (one-off) infra pairings are omitted as noise;
+    we list duos that failed ≥2 times.
+    """
+
+    if not runs_root.is_dir():
+        return []
+    counts: dict[tuple[str, str | None, str, str | None], list[int]] = {}
+    for entry in sorted(runs_root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("_"):
+            continue
+        stats = _read_json(entry / "stats.json", default=None)
+        if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
+            continue
+        agent, agent_rt = _canonical_model(stats.get("agent_model"))
+        sim, sim_rt = _canonical_model(stats.get("sim_model"))
+        if not agent or not sim:
+            continue
+        real_infra = counts.setdefault((agent, agent_rt, sim, sim_rt), [0, 0])
+        real_infra[1 if stats.get("verdict") in _INFRA_VERDICTS else 0] += 1
+
+    out = [
+        {"agent": a, "agent_rt": a_rt, "sim": s, "sim_rt": s_rt, "infra_n": infra}
+        for (a, a_rt, s, s_rt), (real, infra) in counts.items()
+        if real == 0 and infra >= _PAIRING_MIN_RUNS
+    ]
+    out.sort(key=lambda d: -d["infra_n"])
+    return out
+
+
+def _render_pipeline_table(
+    pairings: list[dict[str, Any]],
+    *,
+    excluded_infra: int = 0,
+    infra_only: list[dict[str, Any]] | None = None,
+) -> str:
     """The pipeline tab: a grouped comparison table, one row per duo.
 
     Returns an empty-state note when no pairing reached `_PAIRING_MIN_RUNS`.
@@ -819,7 +959,11 @@ def _render_pipeline_table(pairings: list[dict[str, Any]]) -> str:
     body_rows: list[str] = []
     for p in pairings:
         n = p["n"]
-        pair_label = f'{_escape(p["agent"])}<span class="sep">×</span>{_escape(p["sim"])}'
+        pair_label = (
+            f"{_model_html(p['agent'], p['agent_rt'])}"
+            f'<span class="sep">×</span>'
+            f"{_model_html(p['sim'], p['sim_rt'])}"
+        )
         land_tier = _rate_tier(p["pr_land"])
         extra_cell = (
             _cell(
@@ -835,6 +979,20 @@ def _render_pipeline_table(pairings: list[dict[str, Any]]) -> str:
         if (p["pr_fail"][0] or 0) >= 0.5:
             pr_fail_text += " ⚠"
         tok_per_loc = "—" if p["tok_per_loc"] is None else f"{p['tok_per_loc']:.0f}"
+        infra_n = p["infra_n"]
+        attempts = n + infra_n
+        if infra_n == 0:
+            infra_cell = '<td class="num cell"><span class="muted">0</span></td>'
+        else:
+            infra_rate = infra_n / attempts
+            infra_sev = (
+                " sev-red" if infra_rate >= 0.5 else " sev-amber" if infra_rate >= 0.3 else ""
+            )
+            infra_cell = (
+                f'<td class="num cell{infra_sev}" '
+                f'title="{infra_n} of {attempts} attempts infra-failed (excluded from metrics)">'
+                f"{infra_n}</td>"
+            )
 
         body_rows.append(
             "<tr>"
@@ -843,6 +1001,7 @@ def _render_pipeline_table(pairings: list[dict[str, Any]]) -> str:
             # outcome
             f'<td class="num cell grp-start"><span class="sim-dot {land_tier}"></span>'
             f"{p['pr_land'] * 100:.0f}%</td>"
+            + infra_cell
             # exchange
             + _cell(p["design"], _fmt_num(p["design"]), n, group=True)
             + _cell(p["impl"], _fmt_num(p["impl"]), n)
@@ -872,15 +1031,29 @@ def _render_pipeline_table(pairings: list[dict[str, Any]]) -> str:
         covered = sum(p[key][1] for p in pairings)
         return f"{covered / total_n * 100:.0f}%" if total_n else "—"
 
+    excluded = "fake-mode fixtures"
+    if excluded_infra:
+        excluded += f" + {excluded_infra} infra-failed runs"
     cov_note = (
         f'<p class="cov-note">{total_n} real runs · {len(pairings)} pairings '
-        "(fake-mode fixtures excluded). "
+        f"({excluded} excluded). "
         f"coverage — exchange phases {_cov_pct('design')} · "
         f"sim review {_cov_pct('sim_changes')} · "
         f"PR review {_cov_pct('pr_fail')} · tokens {_cov_pct('out_tokens')}. "
         "Dimmed cells = partial coverage (hover for k/n). "
         "Δ = changes-requested rate; PR fail = post-publish CLI review MUST_FIX rate.</p>"
     )
+    if infra_only:
+        items = ", ".join(
+            f"{_model_html(d['agent'], d['agent_rt'])}"
+            f'<span class="sep">×</span>{_model_html(d["sim"], d["sim_rt"])} '
+            f'<span class="muted">({d["infra_n"]})</span>'
+            for d in infra_only
+        )
+        cov_note += (
+            '<p class="cov-note">Only ever infra-failed, no model data '
+            f"(see the runs tab): {items}.</p>"
+        )
 
     return f"""
 <div class="pipeline-title">pipeline observability · grounded per-pairing metrics</div>
@@ -889,15 +1062,16 @@ def _render_pipeline_table(pairings: list[dict[str, Any]]) -> str:
     <thead>
       <tr class="grp-row">
         <th colspan="2"></th>
-        <th class="grp-head grp-start">outcome</th>
+        <th class="grp-head grp-start" colspan="2">outcome</th>
         <th class="grp-head grp-start" colspan="4">exchange</th>
         <th class="grp-head grp-start" colspan="4">review gates</th>
         <th class="grp-head grp-start" colspan="4">code output</th>
       </tr>
       <tr>
         <th>pairing (agent × sim)</th>
-        <th class="num">runs</th>
-        <th class="num grp-start" title="% of runs that reached a draft PR">PR%</th>
+        <th class="num" title="real runs the metrics are computed over (infra failures excluded)">runs</th>
+        <th class="num grp-start" title="% of real runs that reached a draft PR">PR%</th>
+        <th class="num" title="runs that died in infra (docker/clone/preflight/quota) — counted here, excluded from every other column">infra</th>
         <th class="num grp-start" title="design/grilling exchanges before code (flow_use)">design</th>
         <th class="num" title="agent turns implementing after SETTLED_DESIGN">impl</th>
         <th class="num" title="total turns (stats.json)">turns</th>
@@ -973,7 +1147,11 @@ def _render_body(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
     # by-pairing pipeline-observability dashboard. Both draw on the same
     # runs root; the runtime toggle is a few lines of vanilla JS in
     # `_render_html` so the file stays self-contained.
-    pipeline_html = _render_pipeline_table(_collect_pipeline_pairings(runs_root))
+    pipeline_html = _render_pipeline_table(
+        _collect_pipeline_pairings(runs_root),
+        excluded_infra=_count_infra_runs(runs_root),
+        infra_only=_infra_only_pairings(runs_root),
+    )
     tabbar = (
         '<div class="tabbar">'
         f'<button class="tab active" data-pane="pane-runs">runs · {total}</button>'
