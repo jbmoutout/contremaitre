@@ -117,26 +117,29 @@ def _short_model(model: str) -> str:
 
 
 def _model_effort_display(label: str | None) -> str:
-    """One display shape for an agent/SIM model label: `<short-model> <effort>`.
+    """One display shape for an agent/SIM model label: `<runtime>/<short-model> <effort>`.
 
-    Collapses the verbose labels `role_model_label` builds
-    (`"gpt-5.5 (codex, effort=high)"`, `"opus (claude, effort=max)"`) and bare
-    opencode slugs (`"openrouter/x/y"`) to a single form — short model name
-    plus the effort word, or just the short model when there is no effort
-    (opencode roles). Drops the `codex`/`claude` tool word and the `effort=`
-    prefix: `gpt-5.5 high`, `claude-opus-4-8 max`, `deepseek-v4-flash`.
+    The runtime/provider prefix is always shown:
+    - CLI roles: the tool word from `role_model_label`'s annotation becomes the
+      prefix, plus the effort — `codex/gpt-5.5 high`, `claude/claude-opus-4-8 max`.
+    - opencode roles: the slug already carries its provider, kept as
+      `<provider>/<short-model>` (any middle org segment dropped) —
+      `opencode/deepseek-v4-flash-free`, `openrouter/deepseek-v4-flash`.
     Empty/unknown → `"?"`.
     """
 
     if not label or label == "?":
         return "?"
     name, _, annot = label.partition(" (")
-    effort = ""
     if annot:
+        # CLI role: `<name> (codex, effort=high)` → `codex/<name> high`.
+        tool = annot.split(",", 1)[0].strip()
         m = re.search(r"effort=(\w+)", annot)
-        if m:
-            effort = m.group(1)
-    return f"{_short_model(name)} {effort}".strip()
+        effort = m.group(1) if m else ""
+        return f"{tool}/{_short_model(name)} {effort}".strip()
+    # opencode/openrouter slug: keep the provider prefix + short model.
+    parts = name.split("/")
+    return f"{parts[0]}/{parts[-1]}" if len(parts) >= 2 else name
 
 
 def _short_repo(url_or_path: str | None) -> str:

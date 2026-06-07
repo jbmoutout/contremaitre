@@ -1789,17 +1789,24 @@ def test_relabel_with_real_model_keeps_effort_suffix():
     assert _relabel_with_real_model("opus", "claude-opus-4-8") == "claude-opus-4-8"
 
 
-def test_model_effort_display_is_model_then_effort():
+def test_model_effort_display_shows_runtime_prefix():
     from contremaitre.tui import _model_effort_display
 
-    # CLI roles: `<short-model> <effort>` — no tool word, no `effort=`, no nesting.
-    assert _model_effort_display("gpt-5.5 (codex, effort=high)") == "gpt-5.5 high"
+    # CLI roles: `<tool>/<short-model> <effort>` — no `effort=`, no nesting.
+    assert _model_effort_display("gpt-5.5 (codex, effort=high)") == "codex/gpt-5.5 high"
     assert (
-        _model_effort_display("claude-opus-4-8 (claude, effort=max)") == "claude-opus-4-8 max"
+        _model_effort_display("claude-opus-4-8 (claude, effort=max)")
+        == "claude/claude-opus-4-8 max"
     )
-    # opencode role: short model only (no effort concept).
+    # opencode role: keep `<provider>/<short-model>`, no effort.
     assert (
-        _model_effort_display("openrouter/deepseek/deepseek-v4-flash") == "deepseek-v4-flash"
+        _model_effort_display("opencode/deepseek-v4-flash-free")
+        == "opencode/deepseek-v4-flash-free"
+    )
+    # openrouter slug drops the middle org segment: `<provider>/<short-model>`.
+    assert (
+        _model_effort_display("openrouter/deepseek/deepseek-v4-flash")
+        == "openrouter/deepseek-v4-flash"
     )
     # Unknown/empty → null sentinel.
     assert _model_effort_display("?") == "?"
