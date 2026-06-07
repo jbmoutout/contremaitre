@@ -37,10 +37,10 @@ from .costs import estimate_recorded_cost_usd, sum_token_usage
 from .diffscan import DiffScanResult, scan_diff
 from .evaluator import (
     combined_review_summary,
-    hard_gate_payload,
     sim_review_summary,
     write_eval_reports,
 )
+from .publication import GateInputs, decide_publication, gates_not_evaluated
 from .extract import extract_run_artifacts
 from .viewer import build_viewer
 from .git_utils import GitRepo
@@ -728,32 +728,33 @@ class Orchestrator:
         if self.config.simulate_drift_after_approval:
             self._commit_drift(worktree_git)
 
+        # Compute the post-approval facts here (all git I/O stays in the
+        # orchestrator); the publication Module decides over them.
         recomputed_hash = diff_hash(worktree_git, self._diff_base)
-        diff_hash_matched = recomputed_hash == approved_hash
         diff_scan = scan_diff(worktree_git, self._diff_base)
         # `.contremaitre/*` is excluded from staging by design and stays
         # untracked in the worktree for the SIM to read across rounds —
         # don't count it against clean-worktree.
         clean = _only_contremaitre_changes(worktree_git.status_porcelain())
-        hard_gates = hard_gate_payload(
-            diff_scan=diff_scan,
-            clean_worktree=clean,
-            diff_hash_matched=diff_hash_matched,
+        decision = decide_publication(
+            GateInputs(
+                diff_scan=diff_scan,
+                clean_worktree=clean,
+                diff_hash_matched=recomputed_hash == approved_hash,
+                checks=checks,
+            )
         )
+        hard_gates = decision.hard_gates
         self._emit(
             events.HARD_GATES_CHECKED,
             passed=bool(hard_gates["passed"]),
-            diff_hash_matched=diff_hash_matched,
+            diff_hash_matched=bool(hard_gates["checks"]["diff_hash_matched"]),
             diff_scan_passed=diff_scan.passed if diff_scan else False,
             clean_worktree=clean,
             changed_files=len(diff_scan.changed_files) if diff_scan else 0,
         )
-        # L1 executable-check gate: blocks only on a configured-and-failing
-        # check. No --check-cmd → empty results → no-op (operator opted out;
-        # SIM approval + L0 hard gates still apply).
-        checks_failed = any(not check.passed for check in checks)
 
-        if not hard_gates["passed"]:
+        if not decision.publish:
             return self._blocked_by_gates(
                 branch=branch,
                 approved_hash=approved_hash,
@@ -761,18 +762,7 @@ class Orchestrator:
                 checks=checks,
                 diff_scan=diff_scan,
                 hard_gates=hard_gates,
-                reason="hard gate failed",
-                sim_verdict=parsed,
-            )
-        if checks_failed:
-            return self._blocked_by_gates(
-                branch=branch,
-                approved_hash=approved_hash,
-                current_hash=recomputed_hash,
-                checks=checks,
-                diff_scan=diff_scan,
-                hard_gates=hard_gates,
-                reason="executable checks failed",
+                reason=decision.block_reason or "publication blocked",
                 sim_verdict=parsed,
             )
 
@@ -906,17 +896,7 @@ class Orchestrator:
         self._write_eval(
             verdict=verdict,
             checks=checks or [],
-            hard_gates={
-                "passed": False,
-                "checks": {
-                    "diff_scan": False,
-                    "clean_worktree": False,
-                    "diff_hash_matched": False,
-                    "draft_only": True,
-                },
-                "forbidden_files": [],
-                "changed_files": [],
-            },
+            hard_gates=gates_not_evaluated(),
             needs_human=[reason] if verdict != TerminalVerdict.NO_PR_CHANGES_REQUESTED else [],
             sim_verdict=sim_verdict,
             reason=reason,
