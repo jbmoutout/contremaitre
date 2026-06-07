@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from contremaitre.flow_use import compute_flow_use
+from contremaitre.flow_use import compute_flow_use, compute_phases
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -13,6 +13,140 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _phase_paths(tmp_path: Path):
+    return SimpleNamespace(
+        raw_export=tmp_path / "raw_export.jsonl",
+        review_cycles=tmp_path / "review_cycles.jsonl",
+        guardrail_events=tmp_path / "guardrail_events.jsonl",
+    )
+
+
+# Two agent turn boundaries (ts 1000, 3000), one sim (2000) — a SETTLED
+# write at ts 3500 lands in the 2nd agent turn, so 1 agent + 1 sim turn
+# precede it: grilling = min(1, 1) = 1, impl = 1.
+def _phase_guardrails() -> list[dict]:
+    return [
+        {"event": "opencode_actor_start", "role": "agent", "ts": 1000},
+        {"event": "opencode_actor_start", "role": "sim", "ts": 2000},
+        {"event": "opencode_actor_start", "role": "agent", "ts": 3000},
+        {"event": "opencode_actor_start", "role": "review", "ts": 4000},
+    ]
+
+
+def test_compute_phases_opencode_splits_on_settled_write(tmp_path):
+    paths = _phase_paths(tmp_path)
+    _write_jsonl(
+        paths.raw_export,
+        [
+            {
+                "type": "tool_use",
+                "timestamp": 3500,
+                "part": {
+                    "tool": "write",
+                    "state": {
+                        "status": "completed",
+                        "input": {
+                            "filePath": "/app/.contremaitre/SETTLED_DESIGN.md",
+                            "content": "x",
+                        },
+                    },
+                },
+            }
+        ],
+    )
+    _write_jsonl(paths.guardrail_events, _phase_guardrails())
+    _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 1, "verdict": "APPROVED"}])
+    phases = compute_phases(paths)
+    assert phases["grilling_exchanges"] == 1
+    assert phases["impl_turns"] == 1
+    assert phases["pre_settled_agent_turns"] == 1
+    assert phases["review_rounds"] == 1
+
+
+def test_compute_phases_detects_claude_assistant_write(tmp_path):
+    # The regression target: claude `assistant` tool_use blocks (epoch-ms
+    # int `ts`) were invisible to the opencode-only parser, so CLI runs
+    # silently fell back to min-of-total-turns. They must now split.
+    paths = _phase_paths(tmp_path)
+    _write_jsonl(
+        paths.raw_export,
+        [
+            {
+                "type": "assistant",
+                "ts": 3500,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": "/app/.contremaitre/SETTLED_DESIGN.md",
+                                "content": "y",
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+    _write_jsonl(paths.guardrail_events, _phase_guardrails())
+    _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 1, "verdict": "APPROVED"}])
+    phases = compute_phases(paths)
+    assert phases["grilling_exchanges"] == 1
+    assert phases["impl_turns"] == 1
+
+
+def test_compute_phases_codex_without_timestamp_is_none_not_garbage(tmp_path):
+    # codex `item.completed` events carry no timestamp and write via opaque
+    # bash, so no SETTLED anchor is recoverable → honest None, never the
+    # old min-of-total-turns number. review_rounds still resolves.
+    paths = _phase_paths(tmp_path)
+    _write_jsonl(
+        paths.raw_export,
+        [
+            {"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}},
+            {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 2}},
+        ],
+    )
+    _write_jsonl(paths.guardrail_events, _phase_guardrails())
+    _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 2, "verdict": "APPROVED"}])
+    phases = compute_phases(paths)
+    assert phases["grilling_exchanges"] is None
+    assert phases["impl_turns"] is None
+    assert phases["pre_settled_agent_turns"] is None
+    assert phases["review_rounds"] == 2  # always recoverable
+
+
+def test_compute_phases_none_when_no_agent_turn_logged(tmp_path):
+    # Pre-`actor-start` CLI runs logged sim turns but no agent ones — the
+    # split can't be anchored even with a SETTLED write → None.
+    paths = _phase_paths(tmp_path)
+    _write_jsonl(
+        paths.raw_export,
+        [
+            {
+                "type": "tool_use",
+                "timestamp": 3500,
+                "part": {
+                    "tool": "write",
+                    "state": {
+                        "status": "completed",
+                        "input": {"filePath": "/app/.contremaitre/SETTLED_DESIGN.md"},
+                    },
+                },
+            }
+        ],
+    )
+    _write_jsonl(
+        paths.guardrail_events,
+        [{"event": "opencode_actor_start", "role": "sim", "ts": 2000}],
+    )
+    _write_jsonl(paths.review_cycles, [])
+    phases = compute_phases(paths)
+    assert phases["grilling_exchanges"] is None
+    assert phases["review_rounds"] == 0
 
 
 def _paths(tmp_path: Path):

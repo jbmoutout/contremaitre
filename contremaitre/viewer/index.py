@@ -9,11 +9,15 @@ viewer. Reuses `_styles.css` so the index inherits the viewer's look.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..costs import sum_token_usage
+from ..flow_use import compute_phases
+from ..paths import build_run_paths
 from . import VIEWER_FILENAME
 
 _HERE = Path(__file__).resolve().parent
@@ -448,14 +452,472 @@ def _render_html(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
   background: rgba(255, 184, 48, 0.08);
 }}
 .totals .item .sim-dot {{ vertical-align: 1px; }}
+/* tab bar: runs | pipeline */
+.tabbar {{ display: flex; gap: 2px; margin: 18px 0 22px; border-bottom: 1px solid var(--surface-2); }}
+.tab {{ background: none; border: none; color: var(--text-muted); font-family: inherit; font-size: 13px; padding: 8px 18px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; letter-spacing: 0.02em; }}
+.tab:hover {{ color: var(--text-bright); }}
+.tab.active {{ color: var(--text-bright); border-bottom-color: var(--accent); }}
+.tabpane {{ display: none; }}
+.tabpane.active {{ display: block; }}
+/* pipeline observability table */
+.pipeline-title {{ font-size: 13px; color: var(--text-bright); margin-bottom: 14px; letter-spacing: 0.02em; }}
+.pipeline-scroll {{ overflow-x: auto; }}
+.pipeline-table {{ border-collapse: collapse; font-size: 12px; white-space: nowrap; }}
+.pipeline-table th {{ text-align: left; color: var(--text-muted); font-weight: 500; padding: 3px 12px 3px 0; }}
+.pipeline-table th.num {{ text-align: right; padding-right: 16px; }}
+.pipeline-table thead tr:last-child th {{ padding-bottom: 9px; border-bottom: 1px solid var(--surface-2); }}
+.pipeline-table .grp-head {{ color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; padding-bottom: 1px; }}
+.pipeline-table td {{ padding: 7px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); color: var(--text-dim); }}
+.pipeline-table td.num {{ text-align: right; padding-right: 16px; font-variant-numeric: tabular-nums; }}
+.pipeline-table .pair-cell {{ color: var(--text-bright); padding-left: 0; padding-right: 20px; }}
+.pipeline-table .pair-cell .sep {{ color: var(--text-muted); margin: 0 8px; }}
+.pipeline-table .grp-start {{ border-left: 1px solid var(--surface-2); padding-left: 16px; }}
+.pipeline-table .cell.partial {{ color: var(--text-muted); opacity: 0.7; }}
+.pipeline-table .cell.sev-amber {{ color: var(--warning); }}
+.pipeline-table .cell.sev-red {{ color: #F87171; }}
+.pipeline-table .muted {{ color: var(--text-muted); }}
+.pipeline-table tbody tr:hover td {{ background: rgba(255, 255, 255, 0.02); }}
+.cov-note {{ margin-top: 16px; font-size: 11px; color: var(--text-muted); line-height: 1.7; max-width: 900px; }}
 </style>
 </head>
 <body>
 <div class="page page-wide">
 {body}
 </div>
+<script>
+document.querySelectorAll('.tab').forEach(function (tab) {{
+  tab.addEventListener('click', function () {{
+    document.querySelectorAll('.tab').forEach(function (t) {{ t.classList.remove('active'); }});
+    document.querySelectorAll('.tabpane').forEach(function (p) {{ p.classList.remove('active'); }});
+    tab.classList.add('active');
+    var pane = document.getElementById(tab.dataset.pane);
+    if (pane) {{ pane.classList.add('active'); }}
+  }});
+}});
+</script>
 </body>
 </html>
+"""
+
+
+# ----- pipeline observability (the "pipeline" tab) -----
+#
+# A by-pairing aggregate of the run pipeline, grouped into four concerns —
+# OUTCOME (does the duo land a PR), EXCHANGE (how long the design/impl
+# turns run), REVIEW (sim/extra change-requested rate + post-publish CLI
+# review failures), and CODE (LoC + output tokens produced). Every number
+# comes from a structured field, never regex'd from log prose, and each
+# derived metric carries an honest coverage count (k of n runs had the
+# datum): flow_use phases go null for CLI-agent runs, review_cycles only
+# exist once a run reaches review, and a CLI PR-review only runs when a PR
+# is published. Fake-mode fixtures are excluded — this tab is about the
+# real model+prompt path. The join key is the stats.json display label
+# (the same short form the runs tab shows), so the two tabs reconcile.
+
+_PAIRING_MIN_RUNS = 2
+_INSERTIONS_RE = re.compile(r"(\d+)\s+insertions?\(\+\)")
+_DELETIONS_RE = re.compile(r"(\d+)\s+deletions?\(-\)")
+
+
+def _jsonl(path: Path) -> list[dict[str, Any]]:
+    """Parse a .jsonl file to a list of dict rows; [] if missing/unreadable."""
+
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
+def _diffstat_loc(run_dir: Path) -> tuple[int, int] | None:
+    """(insertions, deletions) from the last diff_stat snapshot, or None.
+
+    `worktree_state.jsonl` records a `git diff --stat base...HEAD` text per
+    snapshot; the final row carrying a diffstat summary holds the run's net
+    diff. No structured integer field exists — we pull the counts out of
+    the "N insertions(+), M deletions(-)" summary line (either side may be
+    absent for an all-add or all-delete diff).
+    """
+
+    result: tuple[int, int] | None = None
+    for row in _jsonl(run_dir / "worktree_state.jsonl"):
+        diff_stat = row.get("diff_stat") or ""
+        ins_m = _INSERTIONS_RE.search(diff_stat)
+        del_m = _DELETIONS_RE.search(diff_stat)
+        if ins_m or del_m:
+            result = (
+                int(ins_m.group(1)) if ins_m else 0,
+                int(del_m.group(1)) if del_m else 0,
+            )
+    return result
+
+
+def _pr_review_verdict(run_dir: Path) -> str | None:
+    """Worst post-publish CLI-review verdict, or None if no review ran.
+
+    Read from the structured `cli_review_completed` guardrail event rather
+    than scraping `<tool>_review.md`. With `--cli-reviewer both` there are
+    two events; we keep the worst (MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD)
+    so the failure column reflects the strictest reviewer.
+    """
+
+    order = {"LOOKS_GOOD": 1, "NEEDS_ATTENTION": 2, "MUST_FIX": 3}
+    worst: str | None = None
+    for event in _jsonl(run_dir / "guardrail_events.jsonl"):
+        if event.get("event") != "cli_review_completed":
+            continue
+        verdict = event.get("verdict")
+        if verdict in order and (worst is None or order[verdict] > order[worst]):
+            worst = verdict
+    return worst
+
+
+def _review_signals(run_dir: Path) -> dict[str, Any]:
+    """SIM/extra review signals from `review_cycles.jsonl` for one run.
+
+    `sim_rounds` is the highest round the primary reviewer reached;
+    `sim_changes` / `extra_changes` record whether that reviewer ever
+    bounced the diff (returned a non-APPROVED verdict). Each is None when
+    the reviewer produced no verdict row — the run never reached review, or
+    no extra reviewer was configured — so coverage stays honest.
+    """
+
+    sim_verdicts: list[str] = []
+    extra_verdicts: list[str] = []
+    sim_rounds = 0
+    for row in _jsonl(run_dir / "review_cycles.jsonl"):
+        if row.get("unavailable"):
+            continue
+        verdict = row.get("verdict")
+        if not verdict:
+            continue
+        if row.get("reviewer") == "sim":
+            sim_verdicts.append(verdict)
+            sim_rounds = max(sim_rounds, int(row.get("round") or 0))
+        elif row.get("reviewer") == "extra":
+            extra_verdicts.append(verdict)
+    return {
+        "sim_rounds": sim_rounds or None,
+        "sim_changes": (any(v != "APPROVED" for v in sim_verdicts) if sim_verdicts else None),
+        "extra_changes": (any(v != "APPROVED" for v in extra_verdicts) if extra_verdicts else None),
+    }
+
+
+def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
+    """All grounded pipeline metrics for one run, or None if not aggregable.
+
+    Skips fake-mode fixtures and runs with no agent/sim label. Every field
+    is None when its source datum is absent, so the aggregator can report
+    honest per-metric coverage rather than implying full data.
+    """
+
+    stats = _read_json(run_dir / "stats.json", default=None)
+    if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
+        return None
+    agent = _short_model(stats.get("agent_model"))
+    sim = _short_model(stats.get("sim_model"))
+    if not agent or not sim:
+        return None
+
+    # Phases computed LIVE via the fixed flow_use.compute_phases, not the
+    # persisted eval/flow_use.json (stale for runs scored before the CLI
+    # fix). grilling/impl come back None when unrecoverable — codex streams
+    # carry no timestamps, and pre-actor-start CLI runs logged no agent
+    # turns — so the dashboard shows "—" rather than wrong numbers.
+    phases = compute_phases(build_run_paths(run_dir.parent, run_dir.name))
+    loc = _diffstat_loc(run_dir)
+    review = _review_signals(run_dir)
+    pr_verdict = _pr_review_verdict(run_dir)
+
+    # Agent output tokens — the code-production signal (cost is $0 for
+    # subscription runs, so tokens are the real spend). Recomputed from the
+    # raw stream via the canonical summer, which handles all three runtime
+    # event shapes; eval/cost_report.json is too sparse to rely on.
+    out_tokens: int | None = None
+    if (run_dir / "raw_export.jsonl").is_file():
+        out_tokens = sum_token_usage(run_dir / "raw_export.jsonl").get("output") or None
+
+    return {
+        "agent": agent,
+        "sim": sim,
+        "extra_configured": bool(stats.get("extra_reviewer_model")),
+        "lands_pr": _verdict_tier(str(stats.get("verdict") or "")) == "tier-green",
+        "turns": stats.get("turns"),
+        "duration": stats.get("duration_seconds"),
+        "design_rounds": phases.get("grilling_exchanges"),
+        "impl_turns": phases.get("impl_turns"),
+        "sim_rounds": review["sim_rounds"],
+        "sim_changes": review["sim_changes"],
+        "extra_changes": review["extra_changes"],
+        "pr_review_fail": (pr_verdict == "MUST_FIX") if pr_verdict else None,
+        "ins": loc[0] if loc else None,
+        "dele": loc[1] if loc else None,
+        "out_tokens": out_tokens,
+    }
+
+
+def _avg(runs: list[dict[str, Any]], key: str) -> tuple[float | None, int]:
+    """(mean of present values, count present). (None, 0) when all absent."""
+
+    vals = [r[key] for r in runs if r.get(key) is not None]
+    return (sum(vals) / len(vals) if vals else None, len(vals))
+
+
+def _rate(runs: list[dict[str, Any]], key: str) -> tuple[float | None, int]:
+    """(fraction of present bool values that are truthy, count present)."""
+
+    vals = [r[key] for r in runs if r.get(key) is not None]
+    return (sum(1 for v in vals if v) / len(vals) if vals else None, len(vals))
+
+
+def _collect_pipeline_pairings(runs_root: Path) -> list[dict[str, Any]]:
+    """Aggregate grounded pipeline metrics by agent×sim pairing, busiest first.
+
+    Pairings under `_PAIRING_MIN_RUNS` real runs are dropped. Each averaged
+    or rated metric is a `(value, coverage)` tuple so the table can show
+    how many of the pairing's runs actually carried the datum.
+    """
+
+    if not runs_root.is_dir():
+        return []
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for entry in sorted(runs_root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("_"):
+            continue
+        metrics = _pipeline_run_metrics(entry)
+        if metrics is None:
+            continue
+        buckets.setdefault((metrics["agent"], metrics["sim"]), []).append(metrics)
+
+    pairings: list[dict[str, Any]] = []
+    for (agent, sim), runs in buckets.items():
+        if len(runs) < _PAIRING_MIN_RUNS:
+            continue
+        ins = _avg(runs, "ins")
+        dele = _avg(runs, "dele")
+        out_tokens = _avg(runs, "out_tokens")
+        tok_per_loc = None
+        net_loc = (ins[0] or 0) + (dele[0] or 0)
+        if out_tokens[0] is not None and net_loc > 0:
+            tok_per_loc = out_tokens[0] / net_loc
+        pairings.append(
+            {
+                "agent": agent,
+                "sim": sim,
+                "n": len(runs),
+                "pr_land": sum(1 for r in runs if r["lands_pr"]) / len(runs),
+                "design": _avg(runs, "design_rounds"),
+                "impl": _avg(runs, "impl_turns"),
+                "turns": _avg(runs, "turns"),
+                "duration": _avg(runs, "duration"),
+                "sim_rounds": _avg(runs, "sim_rounds"),
+                "sim_changes": _rate(runs, "sim_changes"),
+                "extra_changes": _rate(runs, "extra_changes"),
+                "extra_any": any(r["extra_configured"] for r in runs),
+                "pr_fail": _rate(runs, "pr_review_fail"),
+                "ins": ins,
+                "dele": dele,
+                "out_tokens": out_tokens,
+                "tok_per_loc": tok_per_loc,
+            }
+        )
+    pairings.sort(key=lambda p: p["n"], reverse=True)
+    return pairings
+
+
+# ----- pipeline table rendering -----
+
+
+def _rate_tier(rate: float) -> str:
+    return "tier-green" if rate >= 0.6 else "tier-yellow" if rate >= 0.35 else "tier-red"
+
+
+def _sev_class(metric: tuple[float | None, int], amber: float, red: float) -> str:
+    """Severity class for a 'higher is worse' rate (sim-changes, PR-fail)."""
+
+    value = metric[0]
+    if value is None:
+        return ""
+    if value >= red:
+        return " sev-red"
+    if value >= amber:
+        return " sev-amber"
+    return ""
+
+
+def _cov_attr(metric: tuple[float | None, int], n: int) -> tuple[str, str]:
+    """(extra-class, title-attr) marking a cell whose datum covers < n runs."""
+
+    _, cov = metric
+    if 0 < cov < n:
+        return " partial", f' title="{cov}/{n} runs"'
+    return "", ""
+
+
+def _cell(
+    metric: tuple[float | None, int],
+    text: str,
+    n: int,
+    *,
+    group: bool = False,
+    sev: str = "",
+) -> str:
+    """One right-aligned numeric cell, dimmed + titled when coverage < n."""
+
+    extra, title = _cov_attr(metric, n)
+    classes = "num cell" + extra + sev + (" grp-start" if group else "")
+    return f'<td class="{classes}"{title}>{text}</td>'
+
+
+def _fmt_num(metric: tuple[float | None, int], decimals: int = 1) -> str:
+    value = metric[0]
+    return "—" if value is None else f"{value:.{decimals}f}"
+
+
+def _fmt_pct(metric: tuple[float | None, int]) -> str:
+    value = metric[0]
+    return "—" if value is None else f"{value * 100:.0f}%"
+
+
+def _fmt_ktok(metric: tuple[float | None, int]) -> str:
+    value = metric[0]
+    if value is None:
+        return "—"
+    return f"{value / 1000:.1f}k" if value >= 1000 else f"{value:.0f}"
+
+
+def _fmt_minutes(metric: tuple[float | None, int]) -> str:
+    value = metric[0]
+    return "—" if value is None else f"{value / 60:.0f}m"
+
+
+def _render_pipeline_table(pairings: list[dict[str, Any]]) -> str:
+    """The pipeline tab: a grouped comparison table, one row per duo.
+
+    Returns an empty-state note when no pairing reached `_PAIRING_MIN_RUNS`.
+    """
+
+    if not pairings:
+        return (
+            f'<p class="tagline">no pairing has ≥{_PAIRING_MIN_RUNS} real runs yet '
+            "— nothing to compare.</p>"
+        )
+
+    body_rows: list[str] = []
+    for p in pairings:
+        n = p["n"]
+        pair_label = f'{_escape(p["agent"])}<span class="sep">×</span>{_escape(p["sim"])}'
+        land_tier = _rate_tier(p["pr_land"])
+        extra_cell = (
+            _cell(
+                p["extra_changes"],
+                _fmt_pct(p["extra_changes"]),
+                n,
+                sev=_sev_class(p["extra_changes"], 0.3, 0.6),
+            )
+            if p["extra_any"]
+            else '<td class="num cell"><span class="muted">n/a</span></td>'
+        )
+        pr_fail_text = _fmt_pct(p["pr_fail"])
+        if (p["pr_fail"][0] or 0) >= 0.5:
+            pr_fail_text += " ⚠"
+        tok_per_loc = "—" if p["tok_per_loc"] is None else f"{p['tok_per_loc']:.0f}"
+
+        body_rows.append(
+            "<tr>"
+            f'<td class="pair-cell">{pair_label}</td>'
+            f'<td class="num cell">{n}</td>'
+            # outcome
+            f'<td class="num cell grp-start"><span class="sim-dot {land_tier}"></span>'
+            f"{p['pr_land'] * 100:.0f}%</td>"
+            # exchange
+            + _cell(p["design"], _fmt_num(p["design"]), n, group=True)
+            + _cell(p["impl"], _fmt_num(p["impl"]), n)
+            + _cell(p["turns"], _fmt_num(p["turns"], 0), n)
+            + _cell(p["duration"], _fmt_minutes(p["duration"]), n)
+            # review gates
+            + _cell(p["sim_rounds"], _fmt_num(p["sim_rounds"]), n, group=True)
+            + _cell(
+                p["sim_changes"],
+                _fmt_pct(p["sim_changes"]),
+                n,
+                sev=_sev_class(p["sim_changes"], 0.3, 0.6),
+            )
+            + extra_cell
+            + _cell(p["pr_fail"], pr_fail_text, n, sev=_sev_class(p["pr_fail"], 0.25, 0.5))
+            # code output
+            + _cell(p["ins"], "+" + _fmt_num(p["ins"], 0), n, group=True)
+            + _cell(p["dele"], "−" + _fmt_num(p["dele"], 0), n)
+            + _cell(p["out_tokens"], _fmt_ktok(p["out_tokens"]), n)
+            + f'<td class="num cell">{tok_per_loc}</td>'
+            + "</tr>"
+        )
+
+    total_n = sum(p["n"] for p in pairings)
+
+    def _cov_pct(key: str) -> str:
+        covered = sum(p[key][1] for p in pairings)
+        return f"{covered / total_n * 100:.0f}%" if total_n else "—"
+
+    cov_note = (
+        f'<p class="cov-note">{total_n} real runs · {len(pairings)} pairings '
+        "(fake-mode fixtures excluded). "
+        f"coverage — exchange phases {_cov_pct('design')} · "
+        f"sim review {_cov_pct('sim_changes')} · "
+        f"PR review {_cov_pct('pr_fail')} · tokens {_cov_pct('out_tokens')}. "
+        "Dimmed cells = partial coverage (hover for k/n). "
+        "Δ = changes-requested rate; PR fail = post-publish CLI review MUST_FIX rate.</p>"
+    )
+
+    return f"""
+<div class="pipeline-title">pipeline observability · grounded per-pairing metrics</div>
+<div class="pipeline-scroll">
+  <table class="pipeline-table">
+    <thead>
+      <tr class="grp-row">
+        <th colspan="2"></th>
+        <th class="grp-head grp-start">outcome</th>
+        <th class="grp-head grp-start" colspan="4">exchange</th>
+        <th class="grp-head grp-start" colspan="4">review gates</th>
+        <th class="grp-head grp-start" colspan="4">code output</th>
+      </tr>
+      <tr>
+        <th>pairing (agent × sim)</th>
+        <th class="num">runs</th>
+        <th class="num grp-start" title="% of runs that reached a draft PR">PR%</th>
+        <th class="num grp-start" title="design/grilling exchanges before code (flow_use)">design</th>
+        <th class="num" title="agent turns implementing after SETTLED_DESIGN">impl</th>
+        <th class="num" title="total turns (stats.json)">turns</th>
+        <th class="num" title="wall-clock duration">dur</th>
+        <th class="num grp-start" title="highest SIM review round reached">sim r</th>
+        <th class="num" title="% of reviewed runs SIM requested changes at least once">sim Δ</th>
+        <th class="num" title="% of runs the extra reviewer requested changes">extra Δ</th>
+        <th class="num" title="% of reviewed runs the post-publish CLI review said MUST_FIX">PR fail</th>
+        <th class="num grp-start" title="avg lines inserted (net diff)">+LoC</th>
+        <th class="num" title="avg lines deleted (net diff)">−LoC</th>
+        <th class="num" title="avg agent output tokens">out-tok</th>
+        <th class="num" title="output tokens per line of net diff">tok/L</th>
+      </tr>
+    </thead>
+    <tbody>
+{"".join(body_rows)}
+    </tbody>
+  </table>
+</div>
+{cov_note}
 """
 
 
@@ -507,7 +969,20 @@ def _render_body(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
 
     footer = "<footer>generated by <code>contremaitre index</code></footer>"
 
-    return header + body_rows + legend + footer
+    # Two tabs over the shared header: the per-run roster (default) and the
+    # by-pairing pipeline-observability dashboard. Both draw on the same
+    # runs root; the runtime toggle is a few lines of vanilla JS in
+    # `_render_html` so the file stays self-contained.
+    pipeline_html = _render_pipeline_table(_collect_pipeline_pairings(runs_root))
+    tabbar = (
+        '<div class="tabbar">'
+        f'<button class="tab active" data-pane="pane-runs">runs · {total}</button>'
+        '<button class="tab" data-pane="pane-pipeline">pipeline</button>'
+        "</div>"
+    )
+    runs_pane = f'<div id="pane-runs" class="tabpane active">{body_rows}{legend}</div>'
+    pipeline_pane = f'<div id="pane-pipeline" class="tabpane">{pipeline_html}</div>'
+    return header + tabbar + runs_pane + pipeline_pane + footer
 
 
 def _render_row(r: dict[str, Any]) -> str:
