@@ -430,7 +430,83 @@ class CliReviewRevisionGateTest(unittest.TestCase):
             review_dir=review_dir,
         )
 
-    def _prepared_orchestrator(self, *, check_cmds: tuple[str, ...] = ()):
+    def test_max_rounds_exhaustion_returns_pr_needs_human(self):
+        orch, worktree_git, branch = self._prepared_orchestrator(max_cli_review_rounds=1)
+        outcome = self._published_outcome(orch, branch)
+
+        with (
+            mock.patch.object(orch, "_run_one_cli_reviewer", return_value=self.MUST_FIX_REVIEW),
+            mock.patch.object(orch, "_agent_turn") as agent_turn,
+            mock.patch.object(orch, "_post_cli_review_status"),
+            mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
+        ):
+            verdict = orch._run_cli_review_loop(
+                worktree_git=worktree_git,
+                branch=branch,
+                outcome=outcome,
+                actor=object(),
+            )
+
+        self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        agent_turn.assert_not_called()
+        self.assertEqual(worktree_git.pushes, [])
+        guardrails = self._read_jsonl(orch.paths.guardrail_events)
+        self.assertTrue(
+            any(row.get("event") == events.CLI_REVIEW_LOOP_EXHAUSTED for row in guardrails)
+        )
+
+    def test_multi_tool_round_both_must_fix_then_looks_good_pushes(self):
+        orch, worktree_git, branch = self._prepared_orchestrator(max_cli_review_rounds=2)
+        outcome = self._published_outcome(orch, branch)
+
+        must_fix_claude = (
+            "MUST_FIX - second tool also objects\n\n"
+            "## Required changes\n\n"
+            "1. src/foo.py:1 - add missing docstring\n"
+        )
+        reviews = iter(
+            [
+                self.MUST_FIX_REVIEW,  # round 1, codex
+                must_fix_claude,  # round 1, claude
+                self.LOOKS_GOOD_REVIEW,  # round 2, codex
+                self.LOOKS_GOOD_REVIEW,  # round 2, claude
+            ]
+        )
+
+        def agent_revision(_actor, _message):
+            (orch.paths.worktree / "README.md").write_text(
+                "# Contremaitre fixture\n\nCLI multi-tool revision.\n",
+                encoding="utf-8",
+            )
+            self._write_marker(orch)
+            return "revision complete"
+
+        with (
+            mock.patch("contremaitre.cli_reviewer.expand_choice", return_value=("codex", "claude")),
+            mock.patch.object(
+                orch, "_run_one_cli_reviewer", side_effect=lambda **_kw: next(reviews)
+            ),
+            mock.patch.object(orch, "_agent_turn", side_effect=agent_revision),
+            mock.patch.object(orch, "_post_cli_review_status"),
+            mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
+        ):
+            verdict = orch._run_cli_review_loop(
+                worktree_git=worktree_git,
+                branch=branch,
+                outcome=outcome,
+                actor=object(),
+            )
+
+        self.assertEqual(verdict, TerminalVerdict.READY_FOR_DRAFT_PR)
+        self.assertEqual(worktree_git.pushes, [["push", "origin", f"HEAD:{branch}"]])
+
+    def _prepared_orchestrator(
+        self,
+        *,
+        check_cmds: tuple[str, ...] = (),
+        max_cli_review_rounds: int = 2,
+        cli_reviewer: str = "codex",
+    ):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -442,8 +518,8 @@ class CliReviewRevisionGateTest(unittest.TestCase):
             run_slug="cli-revision",
             check_cmds=check_cmds,
             publish_mode=PublishMode.GH,
-            cli_reviewer="codex",
-            max_cli_review_rounds=2,
+            cli_reviewer=cli_reviewer,
+            max_cli_review_rounds=max_cli_review_rounds,
         )
         orch = Orchestrator(config)
         orch._prepare_run_dir()
