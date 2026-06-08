@@ -18,7 +18,7 @@ Audience: humans modifying the orchestrator, and LLMs that need to reason about 
 │        ├── verdicts.py ──── fence-tolerant strict-JSON parser, diff hash       │
 │        ├── checks.py ────── --check-cmd runner (sidecar container)             │
 │        ├── publisher.py ─── StubPublisher / GhPublisher (`gh pr create`)       │
-│        ├── cli_reviewer.py  post-publish `claude -p` / `codex exec`            │
+│        ├── cli_reviewer.py  post-publish Docker CLI review loop helpers         │
 │        ├── runtime_image.py lockhash-keyed deps volumes                        │
 │        └── manifest.py ─── provenance: model IDs, image digest, prompt hashes  │
 │                                                                                │
@@ -375,7 +375,6 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`cli.py`](../contremaitre/cli.py) — argparse, subcommand dispatch, auto-derived clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/`, launch-screen banners + per-role runtime picker + codex token/egress status, codex egress auto-provision (`_maybe_provision_cli_egress`), image staleness rebuild (compares `contremaitre.dockerfile-sha256` label).
 - [`cli_actor.py`](../contremaitre/cli_actor.py) — `CliActorRunner` + the `CliDriver` abstraction (`CodexDriver` / `ClaudeDriver`): drives `codex` or `claude` headless in the per-run container as agent / SIM / reviewer. The runner owns shared orchestration (egress lock, per-run home, detached run + stdout→raw_export, timestamp back-fill, session-attr, transcript, docker wrapper); each driver owns its auth (codex: neutered refresh token, per-turn re-seed, host-side expiry refresh / claude: env OAuth token forwarded by name, empty home), in-container argv, and event parsing. See [CLI actor (codex / claude)](#cli-actor-codex--claude-auth--egress-lock).
 - [`cli_egress.py`](../contremaitre/cli_egress.py) (+ [`cli_egress_squid.conf`](../contremaitre/cli_egress_squid.conf)) — turnkey two-layer egress lock for codex: an `--internal` docker network + an allowlist squid proxy (`ensure_egress_proxy`). Idempotent + shared across runs; recreates the proxy on squid-conf hash drift (`contremaitre.squid-sha256` label).
-- [`cli_review_extra.py`](../contremaitre/cli_review_extra.py) — utility for re-judging a finished run with a different CLI reviewer.
 - [`cli_reviewer.py`](../contremaitre/cli_reviewer.py) — post-publish CLI review loop helpers: prompt assembly (`build_prompt` with round context), verdict parsing (`parse_verdict`, `extract_required_changes`), model extraction, H3 metadata header (`format_header`), `gh pr comment` posting, worst-of-N verdict → `gh api` commit-status projection (context `contremaitre/cli-review`). The reviewer itself runs via `CliActorRunner.cli_reviewer_turn()` in Docker; this module owns only the stateless helpers + host-side `gh` calls.
 - [`costs.py`](../contremaitre/costs.py) — recorded-cost extraction from JSONL streams; provider-side limits remain the real guardrail.
 - [`defaults.py`](../contremaitre/defaults.py) — operator picker prefills from `.contremaitre/defaults.toml` (cwd-local) or XDG fallback. Keys: `actor` / `sim_actor` (with `codex`/`claude` → `cli` aliases that also derive `cli_tool`), `codex_model`, `codex_effort`, `claude_model`, `claude_effort`, `agent_model`, `sim_model`, `cli_reviewer`. Hand-edited TOML; missing / malformed / unknown-enum values degrade to empty (never raise).
@@ -596,7 +595,7 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--branch-prefix STR` | `refactor` | Prefix for generated branch names. |
 | `--agent-model SLUG` | `openrouter/deepseek/deepseek-v4-flash` | OpenRouter / OpenCode model slug for the agent (ignored in `--actor fake`; a codex agent ignores namespaced slugs and uses `--codex-model`). |
 | `--sim-model SLUG` | `openrouter/deepseek/deepseek-v4-flash` | Model for the SIM. Independent default; pickable separately from `--agent-model`. |
-| `--cli-reviewer auto\|codex\|claude\|both\|none` | `auto` | Post-publish CLI review loop tool. `auto` detects + prompts on TTY; `both` runs claude then codex each round; `none` skips. |
+| `--cli-reviewer auto\|codex\|claude\|none` | `auto` | Post-publish CLI review loop tool. `auto` detects + prompts on TTY; `none` skips. |
 | `--max-cli-review-rounds INT` | `3` | Max post-publish review + revision rounds before `PR_NEEDS_HUMAN`. |
 | `--actor fake\|opencode\|cli` | `fake` | Per-run **agent** runtime: `fake` (smoke), `opencode` (live model), `cli` (codex on your subscription). |
 | `--sim-actor fake\|opencode\|cli` | (same as `--actor`) | Override the **SIM** runtime, enabling a mixed run (e.g. codex agent + opencode SIM, or the reverse). |

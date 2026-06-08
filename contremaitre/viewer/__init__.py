@@ -221,15 +221,12 @@ def _assemble_cli_review(
 
 
 def _assemble_cli_review_extras(paths: RunPaths) -> list[dict[str, Any]]:
-    """Collect every `cli_review_extra` rerun under `<run_dir>/extras/`.
+    """Collect CLI review round artifacts from `<run_dir>/extras/cli_review_NNN/`.
 
-    Supports two provenance shapes:
-      - `cli_review_extra`: `summary.json` + `review.md`
-      - orchestrator loop rounds: `<tool>_review.md` + `<tool>_raw_export.jsonl`
-
-    Returns one dict per artifact in index order. Shape mirrors
-    `_assemble_cli_review` plus a `source` label so the renderer can
-    distinguish it from the latest root-level reviewer copy.
+    Each orchestrator loop round writes `<tool>_review.md` +
+    `<tool>_raw_export.jsonl` under its own numbered sub-dir. Returns one
+    dict per artifact in index order. Shape mirrors `_assemble_cli_review`
+    plus a `source` label so the renderer can distinguish rounds.
     """
 
     extras_root = paths.run_dir / "extras"

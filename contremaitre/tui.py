@@ -599,8 +599,8 @@ def _review_status_tail(
     """The `Review ✓ ✓  CODEX Review ⏵` footer tail.
 
     `cli_review_states` (a list of `(tool, status, verdict)`) is the
-    multi-tool path — used by `cli_reviewer="both"` to render two
-    glyphs in execution order.
+    multi-tool path — renders one glyph per active tool in execution
+    order.
     """
 
     tail = Text()
@@ -2112,13 +2112,12 @@ _CLI_REVIEW_VERDICT_RANK = {
 
 
 def _aggregate_cli_review_verdict(verdicts: list[str | None]) -> str | None:
-    """Worst-case verdict across a multi-tool cli_review.
+    """Worst-case verdict across a cli_review round.
 
     MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD. Drives the aggregate
-    footer glyph in `cli_reviewer="both"` runs — if either reviewer
-    says MUST_FIX the operator should see `✗`, not the rosier of the
-    two. Returns None when no verdict is in scope (every tool either
-    not done or didn't surface a key).
+    footer glyph — if any reviewer says MUST_FIX the operator should
+    see `✗`, not the rosier result. Returns None when no verdict is in
+    scope (tool not done or didn't surface a key).
     """
 
     best_rank = 0
@@ -2190,11 +2189,9 @@ def _derive_cli_review_states(
 def _cli_review_tool_header(tool: str) -> Text:
     """Inline `── {tool} review ──` divider for the cli-review pane.
 
-    Written once at the moment the tool's first stdout chunk lands, so
-    `cli_reviewer="both"` produces two visible boundaries in time order
-    (claude first, then codex). Single-tool runs only see their own
-    divider — harmless visual context, and it keeps the renderer
-    uniform across the single- and multi-tool paths.
+    Written once at the moment the tool's first stdout chunk lands.
+    Single-tool runs only see their own divider — harmless visual
+    context, and it keeps the renderer uniform.
     """
 
     label = f"── {tool} review "
@@ -2385,12 +2382,10 @@ if _TEXTUAL_AVAILABLE:
             self.run_dir = run_dir
             self.agent_model = agent_model
             self.sim_model = sim_model
-            # `"codex"`, `"claude"`, `"both"`, or `"none"`. When set
+            # `"codex"`, `"claude"`, `"auto"`, or `"none"`. When set
             # (other than `"none"`), the post-publish cli-review row
             # mounts and shows the subscription-bound CLI reviewer's
-            # stream(s). `"both"` interleaves claude then codex into a
-            # single pane with `── claude review ──` / `── codex review ──`
-            # dividers in time order.
+            # stream with `── <tool> review ──` dividers in time order.
             self.cli_reviewer = cli_reviewer
             self.docker_image = docker_image
             self.target_url = target_url
@@ -2444,9 +2439,8 @@ if _TEXTUAL_AVAILABLE:
             # is cached so the chrome border-title can flip to e.g.
             # "CODEX REVIEW" the moment the first chunk lands.
             #
-            # `cli_reviewer="both"` runs claude THEN codex sequentially;
-            # the pane shows both streams in time order, each preceded by
-            # a `── claude review ──` / `── codex review ──` divider
+            # Each tool's stream is preceded by a
+            # `── claude review ──` / `── codex review ──` divider
             # written once at first event arrival. Per-tool cursors keep
             # the divider's idempotence: each event renders exactly once
             # even though the file is re-read on every tick.
@@ -2560,7 +2554,7 @@ if _TEXTUAL_AVAILABLE:
             self._update_turn_separators()
             self._update_agent_log()
             self._update_sim_log()
-            if self.cli_reviewer in ("codex", "claude", "both"):
+            if self.cli_reviewer in ("codex", "claude", "auto"):
                 self._update_cli_review_log()
             self._update_activity_log()
             self._update_chrome()
@@ -2614,11 +2608,10 @@ if _TEXTUAL_AVAILABLE:
             reveal now coincides with the visible `cli_review_started`
             line in the activity log directly below.
 
-            For `cli_reviewer="both"`, claude and codex run sequentially
-            (claude first); each tool's stream is preceded by a
+            Each tool's stream is preceded by a
             `── claude review ──` / `── codex review ──` divider written
-            once at first event arrival. Single-tool configurations only
-            see their own divider.
+            once at first event arrival. Single-tool runs only see their
+            own divider.
             """
 
             # Unhide as soon as the orchestrator says the CLI reviewer has
@@ -2631,8 +2624,7 @@ if _TEXTUAL_AVAILABLE:
 
             widget = self.query_one("#cli-review-log", RichLog)
             at_bottom = self._at_bottom(widget)
-            # Claude first, codex second — matches `expand_choice("both")`
-            # in cli_reviewer.py, so the dividers land in execution order.
+            # claude first, codex second — dividers land in execution order.
             for tool in ("claude", "codex"):
                 events = _read_jsonl(self.paths[f"{tool}_review_raw_export"])
                 if not events:
@@ -2766,10 +2758,10 @@ if _TEXTUAL_AVAILABLE:
             # machine (later). Single source of truth per tick.
             #
             # Per-tool states (`[(tool, status, verdict)]`) drive the
-            # multi-tool path: for `cli_reviewer="both"` the phase
-            # machine and footer treat the cli_review step as one
-            # logical phase but render each tool's verdict glyph
-            # separately. `cli_review_completed` is the aggregate flag —
+            # multi-tool path: the phase machine and footer treat the
+            # cli_review step as one logical phase but render each
+            # tool's verdict glyph separately. `cli_review_completed`
+            # is the aggregate flag —
             # only true once every expected tool has settled — so the
             # phase doesn't transition to "done" while the second
             # reviewer is still streaming.
@@ -2921,40 +2913,22 @@ if _TEXTUAL_AVAILABLE:
 
             # ----- CLI review column (only when configured) -----
             # `cli_reviewer` is the operator's choice from launch screen
-            # ("codex" / "claude" / "both"); `_cli_review_tool` is what
+            # ("codex" / "claude" / "auto"); `_cli_review_tool` is what
             # the JSONL actually shows once chunks land — used as the
-            # title-flip hint in single-tool mode. For `both`, the title
-            # reads `CLAUDE+CODEX PR REVIEW` regardless of which sink is
-            # currently streaming, so the operator sees the multi-tool
-            # context at all times.
-            if self.cli_reviewer in ("codex", "claude", "both"):
+            # title-flip hint once the active tool is known.
+            if self.cli_reviewer in ("codex", "claude", "auto"):
                 cli_events = _read_jsonl(self.paths["claude_review_raw_export"]) + _read_jsonl(
                     self.paths["codex_review_raw_export"]
                 )
-                if self.cli_reviewer == "both":
-                    tool_label = "CLAUDE+CODEX"
-                else:
-                    tool_label = (self._cli_review_tool or self.cli_reviewer).upper()
+                tool_label = (self._cli_review_tool or self.cli_reviewer).upper()
                 # Pane state mirrors the file-age semantics used elsewhere:
                 # `active` while a chunk arrived in the last 2s, otherwise
-                # `idle`. No container backs this — the CLI runs on the host.
-                # For `both`, the freshest of the two sinks drives the state.
-                if self.cli_reviewer == "both":
-                    ages = [
-                        a
-                        for a in (
-                            _file_age(self.paths["claude_review_raw_export"]),
-                            _file_age(self.paths["codex_review_raw_export"]),
-                        )
-                        if a is not None
-                    ]
-                    cli_file_age = min(ages) if ages else None
-                else:
-                    cli_file_age = (
-                        _file_age(self.paths["claude_review_raw_export"])
-                        if self._cli_review_tool == "claude"
-                        else _file_age(self.paths["codex_review_raw_export"])
-                    )
+                # `idle`. No container backs this — the CLI runs in Docker.
+                cli_file_age = (
+                    _file_age(self.paths["claude_review_raw_export"])
+                    if self._cli_review_tool == "claude"
+                    else _file_age(self.paths["codex_review_raw_export"])
+                )
                 cli_state = _activity_state(
                     container_present=False,
                     file_age=cli_file_age,
@@ -3094,7 +3068,7 @@ if _TEXTUAL_AVAILABLE:
             # for back-compat; `cli_review_states` is the multi-tool
             # source of truth fed to the footer renderer directly.
             cli_review_status: str | None = None
-            if self.cli_reviewer in ("codex", "claude", "both"):
+            if self.cli_reviewer in ("codex", "claude", "auto"):
                 if cli_review_failed:
                     cli_review_status = "failed"
                 elif cli_review_completed:

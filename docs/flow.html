@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Contremaitre — Orchestration Flow</title>
+  <style>
+    :root {
+      --bg:        #0b1120;
+      --surface:   #111827;
+      --surface2:  #1a2436;
+      --border:    #263348;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --agent:     #3b82f6;
+      --agent-bg:  rgba(59,130,246,.09);
+      --sim:       #8b5cf6;
+      --sim-bg:    rgba(139,92,246,.09);
+      --host:      #f59e0b;
+      --host-bg:   rgba(245,158,11,.09);
+      --pub:       #10b981;
+      --pub-bg:    rgba(16,185,129,.09);
+      --cli:       #f97316;
+      --cli-bg:    rgba(249,115,22,.09);
+      --ok:        #22c55e;
+      --ok-bg:     rgba(34,197,94,.09);
+      --warn:      #eab308;
+      --warn-bg:   rgba(234,179,8,.09);
+      --danger:    #ef4444;
+      --danger-bg: rgba(239,68,68,.09);
+      --arrow:     #334155;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 36px 40px 60px;
+      min-width: 900px;
+    }
+
+    /* ─── header ─── */
+    .hdr { margin-bottom: 36px; }
+    .hdr h1 {
+      font-size: 20px; font-weight: 700; letter-spacing: -.3px;
+      color: var(--text); margin-bottom: 6px;
+    }
+    .hdr p { color: var(--muted); font-size: 12px; }
+
+    /* ─── top-level grid: pipeline left, loop-detail right ─── */
+    .grid {
+      display: grid;
+      grid-template-columns: 296px 1fr;
+      gap: 28px;
+      align-items: start;
+    }
+
+    /* ─── column headers ─── */
+    .col-header {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .1em; color: var(--muted);
+      margin-bottom: 14px; padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ─── phase box ─── */
+    .phase {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 11px 14px;
+      background: var(--surface);
+      position: relative;
+    }
+    .phase-tag {
+      display: inline-block;
+      font-size: 9px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .1em; margin-bottom: 3px;
+      padding: 1px 5px; border-radius: 3px;
+    }
+    .phase-title { font-size: 13px; font-weight: 600; color: var(--text); }
+    .phase-body  { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.55; }
+    .phase-body code {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 10px; color: var(--text); background: var(--surface2);
+      border-radius: 3px; padding: 0 3px;
+    }
+
+    /* colour variants */
+    .p-agent  { border-color: var(--agent);  background: var(--agent-bg); }
+    .p-agent  .phase-tag { color: var(--agent);  background: rgba(59,130,246,.15); }
+    .p-sim    { border-color: var(--sim);    background: var(--sim-bg); }
+    .p-sim    .phase-tag { color: var(--sim);    background: rgba(139,92,246,.15); }
+    .p-host   { border-color: var(--host);   background: var(--host-bg); }
+    .p-host   .phase-tag { color: var(--host);   background: rgba(245,158,11,.15); }
+    .p-pub    { border-color: var(--pub);    background: var(--pub-bg); }
+    .p-pub    .phase-tag { color: var(--pub);    background: rgba(16,185,129,.15); }
+    .p-cli    { border-color: var(--cli);    background: var(--cli-bg); }
+    .p-cli    .phase-tag { color: var(--cli);    background: rgba(249,115,22,.15); }
+
+    /* ─── connector (arrow) ─── */
+    .conn {
+      display: flex; flex-direction: column; align-items: center;
+      height: 20px; gap: 0;
+    }
+    .conn-line  { width: 1px; flex: 1; background: var(--arrow); }
+    .conn-head  {
+      width: 0; height: 0;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-top: 5px solid var(--arrow);
+    }
+
+    /* ─── decision box ─── */
+    .decision {
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      background: var(--surface2);
+    }
+    .decision-q { font-size: 11px; font-weight: 600; color: var(--text); margin-bottom: 5px; }
+    .branch { display: flex; flex-direction: column; gap: 3px; }
+    .branch-item {
+      font-size: 11px; color: var(--muted);
+      display: flex; gap: 6px; align-items: baseline;
+    }
+    .branch-item .lbl {
+      font-weight: 700; font-size: 10px; min-width: 90px;
+      white-space: nowrap;
+    }
+    .lbl-ok     { color: var(--ok); }
+    .lbl-warn   { color: var(--warn); }
+    .lbl-danger { color: var(--danger); }
+    .lbl-loop   { color: var(--sim); }
+    .lbl-cli    { color: var(--cli); }
+
+    /* ─── work-session bracket ─── */
+    .bracket {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 12px 12px;
+      background: var(--surface2);
+      position: relative;
+    }
+    .bracket-label {
+      position: absolute; top: -10px; left: 14px;
+      background: var(--surface2);
+      padding: 0 6px;
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .09em; color: var(--muted);
+    }
+
+    /* ─── right column: detail sections ─── */
+    .detail-section { margin-bottom: 22px; }
+    .detail-section:last-child { margin-bottom: 0; }
+    .detail-title {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .09em; color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    /* loop detail box */
+    .loop-box {
+      border: 1px solid var(--cli);
+      border-radius: 10px;
+      padding: 16px;
+      background: rgba(249,115,22,.05);
+    }
+    .loop-step {
+      display: flex; gap: 10px; align-items: flex-start;
+      margin-bottom: 10px;
+    }
+    .loop-step:last-child { margin-bottom: 0; }
+    .step-num {
+      min-width: 20px; height: 20px;
+      border-radius: 50%;
+      background: var(--cli); color: #fff;
+      font-size: 10px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; margin-top: 1px;
+    }
+    .step-body { flex: 1; }
+    .step-title { font-weight: 600; font-size: 12px; color: var(--text); margin-bottom: 2px; }
+    .step-desc  { font-size: 11px; color: var(--muted); line-height: 1.5; }
+    .step-desc code {
+      font-family: 'SFMono-Regular', Consolas, monospace; font-size: 10px;
+      color: var(--text); background: var(--surface2); border-radius: 3px; padding: 0 3px;
+    }
+
+    .loop-divider {
+      border: none; border-top: 1px solid var(--border);
+      margin: 10px 0;
+    }
+
+    .pill {
+      display: inline-block; border-radius: 4px; padding: 1px 6px;
+      font-size: 10px; font-weight: 700; white-space: nowrap;
+    }
+    .pill-ok     { background: var(--ok-bg);     color: var(--ok); }
+    .pill-warn   { background: var(--warn-bg);   color: var(--warn); }
+    .pill-danger { background: var(--danger-bg); color: var(--danger); }
+    .pill-cli    { background: var(--cli-bg);    color: var(--cli); }
+    .pill-host   { background: var(--host-bg);   color: var(--host); }
+    .pill-agent  { background: var(--agent-bg);  color: var(--agent); }
+
+    /* ─── boundary badge ─── */
+    .boundary {
+      display: inline-flex; align-items: center; gap: 5px;
+      border: 1px dashed; border-radius: 5px;
+      padding: 2px 7px; font-size: 10px; font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .boundary-host   { border-color: var(--host);  color: var(--host); }
+    .boundary-docker { border-color: var(--agent); color: var(--agent); }
+    .boundary-doc    { font-size: 11px; color: var(--muted); line-height: 1.5; margin-bottom: 10px; }
+
+    /* ─── verdicts table ─── */
+    .verdicts { margin-top: 32px; }
+    .verdicts-title {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .1em; color: var(--muted);
+      margin-bottom: 12px; padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .verdict-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .verdict-card {
+      border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px;
+    }
+    .verdict-name {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 11px; font-weight: 700; margin-bottom: 4px;
+    }
+    .verdict-desc { font-size: 11px; color: var(--muted); line-height: 1.4; }
+    .vc-green  { border-color: var(--ok);     background: var(--ok-bg);     }
+    .vc-green  .verdict-name { color: var(--ok); }
+    .vc-amber  { border-color: var(--warn);   background: var(--warn-bg);   }
+    .vc-amber  .verdict-name { color: var(--warn); }
+    .vc-red    { border-color: var(--danger); background: var(--danger-bg); }
+    .vc-red    .verdict-name { color: var(--danger); }
+
+    /* ─── legend ─── */
+    .legend {
+      margin-top: 28px; padding-top: 20px;
+      border-top: 1px solid var(--border);
+      display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+    .legend-dot  { width: 10px; height: 10px; border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+<div class="hdr">
+  <h1>Contremaitre — Orchestration Flow</h1>
+  <p>End-to-end from skill invocation to draft PR · branch <code style="font-family:monospace;font-size:11px;color:#94a3b8">feat/cli-review-loop</code></p>
+</div>
+
+<div class="grid">
+
+  <!-- ════════════════════════════════ LEFT: main pipeline ════════════════════════════════ -->
+  <div>
+    <div class="col-header">Main Pipeline</div>
+
+    <!-- INIT -->
+    <div class="phase p-host">
+      <div class="phase-tag">host</div>
+      <div class="phase-title">Launch &amp; Preflight</div>
+      <div class="phase-body">Clone target repo · create git worktree · validate Docker image, auth tokens, egress policy, OpenRouter key bounds</div>
+    </div>
+
+    <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+    <!-- WORK SESSION bracket -->
+    <div class="bracket">
+      <span class="bracket-label">Work session · up to 3 review rounds</span>
+
+      <!-- EXPLORE -->
+      <div class="phase p-agent">
+        <div class="phase-tag">agent · Docker</div>
+        <div class="phase-title">Explore</div>
+        <div class="phase-body">Reads codebase, writes <code>architecture-review.html</code> (candidate cards). SIM selects which to deepen.</div>
+      </div>
+
+      <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+      <!-- GRILL -->
+      <div class="phase p-sim">
+        <div class="phase-tag">agent ↔ SIM · Docker</div>
+        <div class="phase-title">Grill</div>
+        <div class="phase-body">N turns of agent ↔ SIM debate. SIM cites constraints (<code>read/glob/grep</code> only); agent defends or revises.</div>
+      </div>
+
+      <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+      <!-- SETTLE -->
+      <div class="phase p-agent">
+        <div class="phase-tag">agent · Docker</div>
+        <div class="phase-title">Settle</div>
+        <div class="phase-body">Agent writes <code>.contremaitre/SETTLED_DESIGN.md</code> — the agreed design handoff that REVIEW reads.</div>
+      </div>
+
+      <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+      <!-- IMPLEMENT -->
+      <div class="phase p-agent">
+        <div class="phase-tag">agent · Docker</div>
+        <div class="phase-title">Implement</div>
+        <div class="phase-body">Agent edits files. SIM drift-watches each diff against SETTLED. Agent writes <code>IMPLEMENTATION_COMPLETE</code> to end work.</div>
+      </div>
+
+      <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+      <!-- SIM REVIEW -->
+      <div class="phase p-sim">
+        <div class="phase-tag">reviewer · Docker :ro</div>
+        <div class="phase-title">SIM Review</div>
+        <div class="phase-body">Fresh container reads diff + SETTLED. Emits strict-JSON verdict.</div>
+      </div>
+
+      <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+      <!-- decision -->
+      <div class="decision">
+        <div class="decision-q">SIM verdict?</div>
+        <div class="branch">
+          <div class="branch-item">
+            <span class="lbl lbl-ok">APPROVED</span>
+            <span>→ hard gates ↓</span>
+          </div>
+          <div class="branch-item">
+            <span class="lbl lbl-loop">CHANGES&nbsp;REQUESTED</span>
+            <span>→ loop back to Implement (rounds &lt; 3)</span>
+          </div>
+          <div class="branch-item">
+            <span class="lbl lbl-danger">CHANGES (max rounds)</span>
+            <span>→ <span class="pill pill-danger">NO_PR_CHANGES_REQUESTED</span></span>
+          </div>
+          <div class="branch-item">
+            <span class="lbl lbl-danger">NEEDS_HUMAN</span>
+            <span>→ <span class="pill pill-danger">NO_PR_NEEDS_HUMAN</span></span>
+          </div>
+        </div>
+      </div>
+    </div><!-- /bracket -->
+
+    <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+    <!-- HARD GATES -->
+    <div class="phase p-host">
+      <div class="phase-tag">host · gates</div>
+      <div class="phase-title">Hard Gates</div>
+      <div class="phase-body">
+        Diff scan (no leaked secrets) · diff hash stability · clean worktree · <code>--check-cmd</code><br>
+        <span style="color:var(--danger);font-size:10px;margin-top:3px;display:block">Fail → run terminates, no PR</span>
+      </div>
+    </div>
+
+    <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+    <!-- PUBLISH -->
+    <div class="phase p-pub">
+      <div class="phase-tag">host · publish</div>
+      <div class="phase-title">Publish PR</div>
+      <div class="phase-body"><code>git push origin HEAD:&lt;branch&gt;</code> · <code>gh pr create --draft</code> · commit-status projection via <code>gh api</code></div>
+    </div>
+
+    <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+    <!-- CLI REVIEW LOOP (summary) -->
+    <div class="phase p-cli">
+      <div class="phase-tag">host + Docker · post-publish</div>
+      <div class="phase-title">CLI Review Loop</div>
+      <div class="phase-body">
+        Up to <code>--max-cli-review-rounds</code> (default 3) rounds of Docker-based reviewer + agent revision.<br>
+        <span style="color:var(--cli);font-size:10px;margin-top:3px;display:block">Detail on the right →</span>
+      </div>
+    </div>
+
+    <div class="conn"><div class="conn-line"></div><div class="conn-head"></div></div>
+
+    <!-- terminal decision -->
+    <div class="decision">
+      <div class="decision-q">Loop outcome?</div>
+      <div class="branch">
+        <div class="branch-item">
+          <span class="lbl lbl-ok">All LOOKS_GOOD</span>
+          <span>→ <span class="pill pill-ok">READY_FOR_DRAFT_PR</span></span>
+        </div>
+        <div class="branch-item">
+          <span class="lbl lbl-warn">Max rounds / blocked</span>
+          <span>→ <span class="pill pill-warn">PR_NEEDS_HUMAN</span></span>
+        </div>
+        <div class="branch-item">
+          <span class="lbl lbl-cli">cli_reviewer = none</span>
+          <span>→ <span class="pill pill-ok">READY_FOR_DRAFT_PR</span></span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /left column -->
+
+  <!-- ════════════════════════════════ RIGHT: CLI review loop detail ════════════════════════════════ -->
+  <div>
+    <div class="col-header">CLI Review Loop — Detail</div>
+
+    <!-- SECURITY BOUNDARY NOTE -->
+    <div class="detail-section">
+      <div class="detail-title">Security Boundaries</div>
+      <div style="margin-bottom:8px">
+        <span class="boundary boundary-host">⬡ HOST-OWNED</span>
+        <div class="boundary-doc">Git credentials · <code style="font-size:10px;color:#94a3b8">GITHUB_TOKEN</code> · <code style="font-size:10px;color:#94a3b8">GH_TOKEN</code> · <code style="font-size:10px;color:#94a3b8">gh pr create</code> · <code style="font-size:10px;color:#94a3b8">gh pr comment</code> · push · commit-status projection. Never forwarded into any container.</div>
+      </div>
+      <div>
+        <span class="boundary boundary-docker">⬡ DOCKER (locked egress)</span>
+        <div class="boundary-doc">Agent · SIM · CLI reviewer run inside per-role containers behind an allowlist proxy (OpenAI / Anthropic / OpenRouter / OpenCode Zen endpoints only). <code style="font-size:10px;color:#94a3b8">ANTHROPIC_API_KEY</code> / <code style="font-size:10px;color:#94a3b8">OPENAI_API_KEY</code> scrubbed. Reviewer additionally stripped of any GitHub token.</div>
+      </div>
+    </div>
+
+    <!-- LOOP DETAIL -->
+    <div class="detail-section">
+      <div class="detail-title">Per-Round Flow</div>
+
+      <div class="loop-box">
+
+        <div style="margin-bottom:12px;font-size:11px;color:var(--muted)">
+          Repeats for <code style="font-size:10px;color:var(--text)">round = 1 .. max_cli_review_rounds</code>.
+          Exits early on first <span class="pill pill-ok">LOOKS_GOOD</span>.
+        </div>
+
+        <!-- Step 1: write bundle -->
+        <div class="loop-step">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <div class="step-title"><span class="pill pill-host">HOST</span> Write <code>/review</code> bundle</div>
+            <div class="step-desc">
+              Host writes <code>extras/cli_review_NNN/input/</code> containing:<br>
+              <code>diff.patch</code> · <code>changed_files.txt</code> · <code>SETTLED_DESIGN.md</code> ·
+              <code>pr_body.md</code> · <code>pr.json</code> · <code>PR.md</code> ·
+              <code>head_sha.txt</code> · <code>previous_cli_reviews.md</code>
+            </div>
+          </div>
+        </div>
+
+        <hr class="loop-divider">
+
+        <!-- Step 2: reviewer -->
+        <div class="loop-step">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <div class="step-title"><span class="pill pill-cli">DOCKER</span> CLI Reviewer (codex / claude)</div>
+            <div class="step-desc">
+              Locked egress · <code>/review:ro</code> · <code>/app:ro</code><br>
+              Reads the bundle. No <code>gh</code> calls. No GitHub fetch.<br>
+              Returns markdown with verdict on line 1: <span class="pill pill-ok">LOOKS_GOOD</span> <span class="pill pill-warn">NEEDS_ATTENTION</span> <span class="pill pill-danger">MUST_FIX</span>
+            </div>
+          </div>
+        </div>
+
+        <hr class="loop-divider">
+
+        <!-- Step 3: post comment -->
+        <div class="loop-step">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <div class="step-title"><span class="pill pill-host">HOST</span> Post PR comment + commit status</div>
+            <div class="step-desc">
+              <code>gh pr comment &lt;url&gt; --body-file review.md</code><br>
+              <code>gh api .../statuses/{sha}</code> — <code>MUST_FIX</code> → <code>failure</code>, else <code>success</code>
+            </div>
+          </div>
+        </div>
+
+        <hr class="loop-divider">
+
+        <!-- Step 4: verdict branch -->
+        <div class="loop-step">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <div class="step-title">Verdict decision</div>
+            <div class="step-desc" style="margin-top:4px">
+              <div class="branch">
+                <div class="branch-item">
+                  <span class="lbl lbl-ok">LOOKS_GOOD</span>
+                  <span>→ exit loop → <span class="pill pill-ok">READY_FOR_DRAFT_PR</span></span>
+                </div>
+                <div class="branch-item" style="margin-top:4px">
+                  <span class="lbl lbl-warn">NEEDS_ATTENTION</span>
+                  <span>→ trigger revision ↓</span>
+                </div>
+                <div class="branch-item">
+                  <span class="lbl lbl-danger">MUST_FIX</span>
+                  <span>→ trigger revision ↓</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <hr class="loop-divider">
+
+        <!-- Step 5: CLI revision -->
+        <div class="loop-step">
+          <div class="step-num">5</div>
+          <div class="step-body">
+            <div class="step-title"><span class="pill pill-agent">DOCKER</span> CLI Revision (agent, fresh session)</div>
+            <div class="step-desc">
+              Guard: <code>IMPLEMENTATION_COMPLETE</code> must exist.<br>
+              Prompt prefixed <code>[CLI]</code> with <code>## Required changes</code> items extracted from review.<br>
+              Agent addresses changes in the worktree.
+            </div>
+          </div>
+        </div>
+
+        <hr class="loop-divider">
+
+        <!-- Step 6: revision gates -->
+        <div class="loop-step">
+          <div class="step-num">6</div>
+          <div class="step-body">
+            <div class="step-title"><span class="pill pill-host">HOST</span> Revision Gates</div>
+            <div class="step-desc">
+              Commit · diff scan · diff hash stability · clean worktree · re-run <code>--check-cmd</code><br>
+              <span class="lbl lbl-ok" style="font-size:10px;">PASS</span> → <code>git push origin HEAD:&lt;branch&gt;</code> → next round<br>
+              <span class="lbl lbl-danger" style="font-size:10px;">FAIL</span> → <span class="pill pill-warn">PR_NEEDS_HUMAN</span> (PR stays, push skipped)
+            </div>
+          </div>
+        </div>
+
+        <hr class="loop-divider">
+
+        <!-- max rounds -->
+        <div class="loop-step">
+          <div class="step-num" style="background:var(--warn)">!</div>
+          <div class="step-body">
+            <div class="step-title">Max rounds exhausted</div>
+            <div class="step-desc">
+              After <code>max_cli_review_rounds</code> without <span class="pill pill-ok">LOOKS_GOOD</span> → <span class="pill pill-warn">PR_NEEDS_HUMAN</span><br>
+              PR is already published. Human reviews before merging.
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /loop-box -->
+    </div><!-- /detail-section -->
+
+    <!-- ACTOR RUNTIMES -->
+    <div class="detail-section">
+      <div class="detail-title">Actor Runtimes</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+
+        <div class="phase p-agent" style="padding:10px 12px;">
+          <div class="phase-tag">agent / SIM</div>
+          <div class="phase-title" style="font-size:12px;">opencode <em>or</em> CLI</div>
+          <div class="phase-body">opencode: free Zen model or OpenRouter slug<br>CLI: codex (ChatGPT Plus) or claude (Claude Pro/Max), headless in Docker, locked egress by default</div>
+        </div>
+
+        <div class="phase p-cli" style="padding:10px 12px;">
+          <div class="phase-tag">cli reviewer</div>
+          <div class="phase-title" style="font-size:12px;">codex <em>or</em> claude</div>
+          <div class="phase-body">Always Docker · always locked egress · <code>/review:ro</code> + <code>/app:ro</code> · no GitHub credentials · subscription usage (not API billing)</div>
+        </div>
+
+      </div>
+    </div>
+
+  </div><!-- /right column -->
+</div><!-- /grid -->
+
+<!-- ════════════════════ TERMINAL VERDICTS ════════════════════ -->
+<div class="verdicts">
+  <div class="verdicts-title">Terminal Verdicts</div>
+  <div class="verdict-grid">
+
+    <div class="verdict-card vc-green">
+      <div class="verdict-name">READY_FOR_DRAFT_PR</div>
+      <div class="verdict-desc">PR published. CLI reviewer reached LOOKS_GOOD (or was skipped). Safe to review and merge.</div>
+    </div>
+
+    <div class="verdict-card vc-amber">
+      <div class="verdict-name">PR_NEEDS_HUMAN</div>
+      <div class="verdict-desc">PR published but CLI review loop exhausted max rounds without LOOKS_GOOD, or a post-publish revision couldn't safely push. Human must review before merging.</div>
+    </div>
+
+    <div class="verdict-card vc-red">
+      <div class="verdict-name">NO_PR_CHANGES_REQUESTED</div>
+      <div class="verdict-desc">SIM reviewer requested changes across all review rounds. No PR created.</div>
+    </div>
+
+    <div class="verdict-card vc-red">
+      <div class="verdict-name">NO_PR_NEEDS_HUMAN</div>
+      <div class="verdict-desc">SIM flagged NEEDS_HUMAN (agent violated a design constraint, or hard gate failed). No PR created.</div>
+    </div>
+
+    <div class="verdict-card vc-red">
+      <div class="verdict-name">QUOTA_EXHAUSTED</div>
+      <div class="verdict-desc">Provider free-tier quota hit (e.g. opencode-zen daily limit). No PR. Eval canary aborts the full n=3 batch.</div>
+    </div>
+
+    <div class="verdict-card vc-red">
+      <div class="verdict-name">FAILED_INFRA</div>
+      <div class="verdict-desc">Docker daemon error, SIGTERM, unexpected exception. Infrastructure-level failure unrelated to code quality.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════ LEGEND ════════════════════ -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:var(--agent)"></div>Agent (Docker)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--sim)"></div>SIM / Reviewer (Docker :ro)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--host)"></div>Host-owned operation</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--pub)"></div>Publish (host + GitHub)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--cli)"></div>CLI Review Loop</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--ok)"></div>LOOKS_GOOD / success</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--warn)"></div>PR_NEEDS_HUMAN / warning</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--danger)"></div>Terminal failure / no PR</div>
+  <div class="legend-item" style="margin-left:auto;color:var(--muted);font-style:italic;font-size:11px">
+    Egress: containers reach only provider endpoints (OpenAI · Anthropic · OpenRouter · OpenCode Zen)
+  </div>
+</div>
+
+</body>
+</html>

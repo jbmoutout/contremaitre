@@ -36,7 +36,7 @@ def test_load_reads_all_fields(tmp_path: Path):
             [
                 'agent_model = "opencode/big-pickle"',
                 'sim_model = "openrouter/qwen/qwen3-max"',
-                'cli_reviewer = "both"',
+                'cli_reviewer = "claude"',
             ]
         )
         + "\n"
@@ -45,7 +45,7 @@ def test_load_reads_all_fields(tmp_path: Path):
     assert out == defaults.Defaults(
         agent_model="opencode/big-pickle",
         sim_model="openrouter/qwen/qwen3-max",
-        cli_reviewer="both",
+        cli_reviewer="claude",
     )
 
 

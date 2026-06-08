@@ -519,8 +519,6 @@ class Orchestrator:
         if not tools or not outcome.url:
             return TerminalVerdict.READY_FOR_DRAFT_PR
 
-        _cli_reviewer.hide_orchestrator_scaffolds(self.paths.worktree)
-
         last_round_verdicts: list[tuple[str, str | None]] = []
 
         for cli_round in range(1, max_rounds + 1):

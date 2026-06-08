@@ -71,9 +71,7 @@ def _active_cli_tools(config: RunConfig) -> set[str]:
         tools.add(config.cli_tool)
     if (config.sim_actor_mode or config.actor_mode) == ActorMode.CLI:
         tools.add(config.sim_cli_tool or config.cli_tool)
-    if config.cli_reviewer == "both":
-        tools.update({"claude", "codex"})
-    elif config.cli_reviewer in {"claude", "codex"}:
+    if config.cli_reviewer in {"claude", "codex"}:
         tools.add(config.cli_reviewer)
     return tools
 

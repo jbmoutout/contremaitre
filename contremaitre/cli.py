@@ -158,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--cli-reviewer",
-        choices=["auto", "codex", "claude", "both", "none"],
+        choices=["auto", "codex", "claude", "none"],
         default="auto",
         help=(
             "Post-PR revision loop driver. After the draft PR is published, the "
@@ -892,7 +892,7 @@ def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
 
     modes = {getattr(args, "actor", None), getattr(args, "sim_actor", None)}
     reviewer = getattr(args, "cli_reviewer", "none")
-    reviewer_cli_active = reviewer in {"codex", "claude", "both"}
+    reviewer_cli_active = reviewer in {"codex", "claude", "auto"}
     if ActorMode.CLI.value not in modes and not reviewer_cli_active:
         return False
     if getattr(args, "allow_open_egress", False):
@@ -1187,7 +1187,7 @@ def _launch_screen(
             print()
             # When the value came from defaults.toml (not an explicit CLI
             # flag), force the picker to run with the saved value as the
-            # Enter prefill. Otherwise `flag_value="both"` would
+            # Enter prefill. Otherwise an explicit flag value would
             # short-circuit and the operator would never see the prompt.
             prefill = getattr(args, "_defaults_cli_reviewer_prefill", None)
             picker_flag_value = "auto" if prefill else getattr(args, "cli_reviewer", "auto")
@@ -1303,8 +1303,6 @@ def _launch_screen(
     )
     if cli_reviewer_choice in ("codex", "claude"):
         print(f"  code-review     {_b(cli_reviewer_choice)}  {_d('(post-publish, subscription)')}")
-    elif cli_reviewer_choice == "both":
-        print(f"  code-review     {_b('codex + claude')}  {_d('(post-publish, two PR comments)')}")
     elif cli_reviewer_choice == "none":
         print(f"  code-review     {_d('skipped')}")
     caps_parts: list[str] = []
@@ -1892,7 +1890,7 @@ def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
         # `_defaults_cli_reviewer_prefill` tells the interactive picker
         # to still PROMPT but make Enter accept the saved value
         # instead of skipping. Without the prefill, the interactive
-        # branch would short-circuit on "both" / "codex" / "claude"
+        # branch would short-circuit on "codex" / "claude"
         # (treated as explicit) and never ask the operator.
         args.cli_reviewer = saved.cli_reviewer
         args._defaults_cli_reviewer_prefill = saved.cli_reviewer
@@ -2130,7 +2128,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     )
     # Same story for cli_reviewer: a saved value should prefill the
     # picker (Enter accepts it), not short-circuit it. Without this the
-    # TUI path would silently apply `cli_reviewer = "both"` from the
+    # TUI path would silently apply a saved `cli_reviewer` from the
     # file without ever asking.
     if _saved.cli_reviewer and not _has_flag_in(forwarded, "--cli-reviewer"):
         confirm_args._defaults_cli_reviewer_prefill = _saved.cli_reviewer

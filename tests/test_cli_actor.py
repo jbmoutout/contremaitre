@@ -1261,15 +1261,15 @@ class ActiveCliToolsTest(unittest.TestCase):
             )
             self.assertEqual(_active_cli_tools(cfg), {"codex"})
 
-    def test_both_cli_reviewers_report_both_tools(self):
+    def test_opencode_agent_with_claude_reviewer_reports_claude_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _cli_config(
                 Path(tmp),
                 actor_mode=ActorMode.OPENCODE,
                 sim_actor_mode=ActorMode.OPENCODE,
-                cli_reviewer="both",
+                cli_reviewer="claude",
             )
-            self.assertEqual(_active_cli_tools(cfg), {"claude", "codex"})
+            self.assertEqual(_active_cli_tools(cfg), {"claude"})
 
 
 # ===== F3: CLI turns emit the actor-start guardrail (telemetry parity) =====

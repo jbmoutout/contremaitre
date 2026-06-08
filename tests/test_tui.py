@@ -1183,7 +1183,7 @@ def test_short_repo_empty_returns_placeholder():
     assert _short_repo("") == "?"
 
 
-# ===== cli_reviewer="both" multi-tool helpers =====
+# ===== cli_reviewer multi-tool helpers =====
 
 
 def test_aggregate_verdict_picks_worst():
@@ -1206,51 +1206,39 @@ def test_aggregate_verdict_ignores_unknown_keys():
     assert _aggregate_cli_review_verdict(["BIZARRE", "MUST_FIX"]) == "MUST_FIX"
 
 
-def test_derive_cli_review_states_both_streaming():
-    # Both started, neither completed → both surfaces as streaming.
-    guardrails = [
-        _g(events.CLI_REVIEW_STARTED, tool="claude"),
-        _g(events.CLI_REVIEW_STARTED, tool="codex"),
-    ]
-    states = _derive_cli_review_states(guardrails, "both")
-    assert states == [("claude", "streaming", None), ("codex", "streaming", None)]
+def test_derive_cli_review_states_streaming():
+    # Tool started, not yet completed → surfaces as streaming.
+    guardrails = [_g(events.CLI_REVIEW_STARTED, tool="claude")]
+    states = _derive_cli_review_states(guardrails, "claude")
+    assert states == [("claude", "streaming", None)]
 
 
-def test_derive_cli_review_states_one_completed_one_streaming():
-    # Claude finished with a verdict; codex is still in flight. Order
-    # matches expand_choice — claude first, codex second.
+def test_derive_cli_review_states_completed():
+    # Tool finished with a verdict — state is "completed" with verdict attached.
     guardrails = [
         _g(events.CLI_REVIEW_STARTED, tool="claude"),
         _g(events.CLI_REVIEW_COMPLETED, tool="claude", verdict="LOOKS_GOOD"),
-        _g(events.CLI_REVIEW_STARTED, tool="codex"),
     ]
-    states = _derive_cli_review_states(guardrails, "both")
-    assert states == [
-        ("claude", "completed", "LOOKS_GOOD"),
-        ("codex", "streaming", None),
-    ]
+    states = _derive_cli_review_states(guardrails, "claude")
+    assert states == [("claude", "completed", "LOOKS_GOOD")]
 
 
 def test_derive_cli_review_states_failed_tool_surfaces_status():
+    # Tool that failed surfaces as "failed", verdict is None.
     guardrails = [
-        _g(events.CLI_REVIEW_STARTED, tool="claude"),
-        _g(events.CLI_REVIEW_FAILED, tool="claude"),
         _g(events.CLI_REVIEW_STARTED, tool="codex"),
-        _g(events.CLI_REVIEW_COMPLETED, tool="codex", verdict="MUST_FIX"),
+        _g(events.CLI_REVIEW_FAILED, tool="codex"),
     ]
-    states = _derive_cli_review_states(guardrails, "both")
-    assert states == [
-        ("claude", "failed", None),
-        ("codex", "completed", "MUST_FIX"),
-    ]
+    states = _derive_cli_review_states(guardrails, "codex")
+    assert states == [("codex", "failed", None)]
 
 
 def test_derive_cli_review_states_filters_unstarted_tools():
-    # `both` was requested but only claude has actually started yet —
-    # codex shouldn't pre-render as a dim placeholder.
-    guardrails = [_g(events.CLI_REVIEW_STARTED, tool="claude")]
-    states = _derive_cli_review_states(guardrails, "both")
-    assert states == [("claude", "streaming", None)]
+    # Tool not yet started is not pre-rendered as a dim placeholder —
+    # only tools that have emitted cli_review_started are included.
+    guardrails = []  # nothing started yet
+    states = _derive_cli_review_states(guardrails, "claude")
+    assert states == []
 
 
 def test_derive_cli_review_states_none_choice_returns_empty():

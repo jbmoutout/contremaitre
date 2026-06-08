@@ -7,9 +7,6 @@ the API quota the SIM consumes.
 
 Boundaries:
   - Detection is `shutil.which("claude" | "codex")`; nothing else.
-  - The subprocess env clears `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` so the
-    CLI cannot silently fall through to paid API usage if the operator has
-    those vars set in their shell.
   - Output streams line-by-line into a per-tool `<tool>_review_raw_export.jsonl`
     sink matching the existing `*_raw_export.jsonl` pattern (agent, sim).
     One sink per run.
@@ -33,35 +30,13 @@ import json
 import os
 import shutil
 import subprocess
-import sys
-from dataclasses import dataclass
 from pathlib import Path
 
-from .jsonlog import append_jsonl, append_text_event
+from .jsonlog import append_jsonl
 
 
 VALID_TOOLS = ("codex", "claude")
-# `both` runs codex AND claude back-to-back on the same PR and posts two
-# separate comments (one per tool). Only offered as a picker option when
-# both binaries are installed; honored by `RunConfig.cli_reviewer="both"`
-# in the orchestrator.
-VALID_CHOICES = VALID_TOOLS + ("both", "none")
-SUBPROCESS_TIMEOUT_S = 600
-
-# Path the orchestrator stashes its per-run scaffolds under (SETTLED_DESIGN.md,
-# IMPLEMENTATION_COMPLETE, architecture-review.html, etc.). The committed
-# diff excludes them via a `:(exclude).contremaitre` pathspec; we additionally
-# hide them from `git status` for the cli_review subprocess so codex/claude
-# don't see phantom "untracked" files that aren't part of the PR.
-_SCAFFOLD_EXCLUDE_PATTERN = ".contremaitre/"
-
-
-@dataclass(frozen=True)
-class ReviewResult:
-    tool: str
-    markdown: str
-    exit_code: int
-    error: str | None = None
+VALID_CHOICES = VALID_TOOLS + ("none",)
 
 
 # ---------- detection + resolution (CLI launch-screen helpers) ----------
@@ -92,17 +67,13 @@ def resolve_choice(
 ) -> str:
     """Decide which tool the orchestrator should run.
 
-    Honors an explicit `--cli-reviewer codex|claude|both|none`. When
+    Honors an explicit `--cli-reviewer codex|claude|none`. When
     `auto` (the default), falls back to:
       - neither installed → "none" (silent)
       - one installed + TTY → confirm prompt
-      - both installed + TTY → numbered picker incl. a `both` option
+      - both installed + TTY → numbered picker
       - no TTY → "none" (we can't ask)
-    Returns one of `"codex"`, `"claude"`, `"both"`, `"none"`.
-
-    `both` requires BOTH binaries on PATH; an explicit `--cli-reviewer both`
-    against a partial install degrades to whichever tool is available
-    (and warns), matching the explicit-single-tool fallback behavior.
+    Returns one of `"codex"`, `"claude"`, `"none"`.
 
     `saved_default` is the operator's saved preference from
     defaults.toml (not a CLI flag). When set, the interactive picker's
@@ -110,6 +81,8 @@ def resolve_choice(
     operator can still override numerically. Ignored when `flag_value`
     is anything but `"auto"` (explicit always wins).
     """
+
+    import sys
 
     if flag_value in VALID_TOOLS:
         if flag_value not in available:
@@ -119,17 +92,6 @@ def resolve_choice(
             )
             return "none"
         return flag_value
-    if flag_value == "both":
-        if len(available) == 2:
-            return "both"
-        if len(available) == 1:
-            tool = next(iter(available))
-            print_fn(
-                f"  cli-reviewer: 'both' requested but only '{tool}' on PATH — using it alone",
-                file=sys.stderr,
-            )
-            return tool
-        return "none"
     if flag_value == "none":
         return "none"
     # flag_value == "auto" (or any unrecognised value treated as auto)
@@ -140,7 +102,7 @@ def resolve_choice(
     if len(available) == 1:
         tool = next(iter(available))
         # `saved_default == "none"` flips Enter from Y to N. Any other
-        # saved value (the tool itself, "both", or unset) keeps the
+        # saved value (the tool itself, or unset) keeps the
         # historical Y default — the saved-value semantics is "we WANT
         # cli-review," and Enter accepting that is the right behavior.
         if saved_default == "none":
@@ -154,21 +116,17 @@ def resolve_choice(
         except EOFError:
             return "none"
         return tool if reply in ("", "y", "yes") else "none"
-    # Both installed — numbered picker incl. a `both` option that runs
-    # the two reviewers sequentially and posts two PR comments.
-    # `saved_default` (when one of codex/claude/both) becomes the Enter
+    # Both installed — numbered picker.
+    # `saved_default` (when one of codex/claude) becomes the Enter
     # default; otherwise Enter still skips.
     enter_default: str | None = None
-    if saved_default in VALID_TOOLS or saved_default == "both":
+    if saved_default in VALID_TOOLS:
         enter_default = saved_default
     print_fn("  cli-review:")
     for i, tool in enumerate(VALID_TOOLS, start=1):
         if tool in available:
             marker = "  ← saved" if tool == enter_default else ""
             print_fn(f"    [{i}] {tool}{marker}")
-    both_index = len(VALID_TOOLS) + 1
-    both_marker = "  ← saved" if enter_default == "both" else ""
-    print_fn(f"    [{both_index}] both  (run codex and claude, post 2 PR comments){both_marker}")
     print_fn("    [s] skip")
     enter_label = enter_default if enter_default else "skip"
     while True:
@@ -184,9 +142,7 @@ def resolve_choice(
             idx = int(reply) - 1
             if 0 <= idx < len(VALID_TOOLS) and VALID_TOOLS[idx] in available:
                 return VALID_TOOLS[idx]
-            if int(reply) == both_index:
-                return "both"
-        print_fn(f"  enter 1, 2, {both_index}, s, or Enter")
+        print_fn(f"  enter 1, 2, s, or Enter")
 
 
 # ---------- prompt assembly ----------
@@ -212,242 +168,9 @@ def build_prompt(
     from .prompts import CLI_REVIEWER_PROMPT
 
     return CLI_REVIEWER_PROMPT.format(
-        pr_url=pr_url,
         round_n=round_n,
         round_of=round_of,
         review_path=review_path,
-    )
-
-
-# ---------- worktree prep ----------
-
-
-def hide_orchestrator_scaffolds(worktree: Path) -> None:
-    """Suppress `.contremaitre/*` from `git status` in the cli_review cwd.
-
-    The orchestrator's host commit excludes `.contremaitre/` via a
-    `:(exclude).contremaitre` pathspec, so the scaffolds (SETTLED_DESIGN.md,
-    IMPLEMENTATION_COMPLETE, …) sit in the worktree as uncommitted files.
-    The cli_review subprocess runs with `cwd=worktree`, so without this
-    hide step `git status` shows phantom "untracked" entries the agent
-    might mistake for drift from the PR.
-
-    Writes the pattern to `$GIT_DIR/info/exclude`. Resolves `$GIT_DIR`
-    through the `.git` gitlink file when `worktree` was created by
-    `git worktree add` (per-worktree exclude, doesn't pollute the shared
-    main repo). Best-effort: failures are swallowed since this is purely
-    cosmetic and the rest of cli_review still works without it.
-    """
-
-    try:
-        git_dir = _resolve_git_dir(worktree)
-        if git_dir is None:
-            return
-        exclude_path = git_dir / "info" / "exclude"
-        exclude_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
-        # Line-by-line check, not substring, so a comment containing the
-        # pattern doesn't make this falsely think it's already present.
-        for line in existing.splitlines():
-            if line.strip() == _SCAFFOLD_EXCLUDE_PATTERN:
-                return
-        with exclude_path.open("a", encoding="utf-8") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write(f"{_SCAFFOLD_EXCLUDE_PATTERN}\n")
-    except OSError:
-        return
-
-
-def _resolve_git_dir(worktree: Path) -> Path | None:
-    """Return the worktree's `$GIT_DIR`, honoring the gitlink file shape.
-
-    For repos created via `git worktree add`, `worktree/.git` is a text
-    file like `gitdir: /path/to/main/.git/worktrees/<name>` rather than a
-    directory. We follow the pointer so we write to the PER-WORKTREE
-    exclude, not the shared main one.
-    """
-
-    gitlink = worktree / ".git"
-    if gitlink.is_file():
-        try:
-            content = gitlink.read_text(encoding="utf-8").strip()
-        except OSError:
-            return None
-        if not content.startswith("gitdir:"):
-            return None
-        target = content.split(":", 1)[1].strip()
-        return Path(target)
-    if gitlink.is_dir():
-        return gitlink
-    return None
-
-
-# ---------- subprocess invocation ----------
-
-
-def _scrubbed_env() -> dict[str, str]:
-    """Copy of os.environ with API-key vars cleared.
-
-    Keeps the CLI on its OAuth subscription. Setting to `""` rather than
-    deleting is intentional — both CLIs treat empty as unset, and a few
-    shell wrappers re-export keys on subprocess spawn unless the empty
-    value is present to override.
-    """
-
-    env = dict(os.environ)
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
-        if key in env:
-            env[key] = ""
-    return env
-
-
-def _command_for(
-    tool: str,
-    prompt: str,
-    *,
-    final_message_path: Path | None = None,
-) -> list[str]:
-    """Headless invocation for each supported CLI.
-
-    Both tools default to interactive-trust sandboxes that block the
-    review work we actually want done (running tests, exploring the
-    worktree). The flags below relax that to what's needed for a code
-    review on the operator's own machine:
-
-    - **codex**: `--sandbox workspace-write` lets commands write to the
-      worktree; `--add-dir ~/.cache` covers ecosystem caches (`uv`, `pip`,
-      `npm`, …) so `uv run pytest` works. Anything outside `~/.cache` and
-      the worktree stays read-only — matches the "verify the diff, don't
-      reach into the rest of $HOME" intent. `-o <final_message_path>`
-      writes only the agent's final message to disk; stdout still gets the
-      full session transcript (useful for the TUI live view), but the
-      posted PR comment reads from this file instead, sparing the human
-      ~100 KB of tool-call dumps.
-    - **claude**: `--permission-mode bypassPermissions` — required for
-      headless `-p` mode, otherwise the Bash tool prompts for approval on
-      stdin and the subprocess hangs invisibly. The risk profile mirrors
-      the user's own interactive `claude` session. `-p` already writes
-      ONLY the final response to stdout, so no extra final-message flag
-      is needed.
-    """
-
-    if tool == "claude":
-        return [
-            "claude",
-            "-p",
-            "--permission-mode",
-            "bypassPermissions",
-            prompt,
-        ]
-    if tool == "codex":
-        cache_dir = str(Path.home() / ".cache")
-        cmd = [
-            "codex",
-            "exec",
-            "--skip-git-repo-check",
-            "--sandbox",
-            "workspace-write",
-            "--add-dir",
-            cache_dir,
-        ]
-        if final_message_path is not None:
-            cmd.extend(["-o", str(final_message_path)])
-        cmd.append(prompt)
-        return cmd
-    raise ValueError(f"unknown cli tool: {tool}")
-
-
-def run_review(
-    *,
-    tool: str,
-    prompt: str,
-    jsonl_path: Path,
-    cwd: Path | None = None,
-    timeout_s: int = SUBPROCESS_TIMEOUT_S,
-) -> ReviewResult:
-    """Spawn the CLI tool headlessly and stream stdout into `jsonl_path`.
-
-    Each output line is appended as a text event so the TUI can render
-    them progressively (same shape as `raw_export.jsonl`). Returns the
-    collected markdown + exit code; the orchestrator decides whether to
-    post it as a comment.
-
-    `cwd` should be the freshly-published branch's worktree — both
-    `claude -p` and `codex exec` then resolve their tools (Bash, file
-    reads, `gh`) against the right checkout.
-    """
-
-    if tool not in VALID_TOOLS:
-        return ReviewResult(tool=tool, markdown="", exit_code=-1, error=f"unknown tool: {tool}")
-
-    # Codex's stdout is the full session transcript (every tool call, every
-    # sed/cat/gh output). The actual review is the final agent message;
-    # `-o <path>` writes only that to disk. We still stream stdout to the
-    # JSONL so the TUI sees live progress, but the posted PR comment reads
-    # from this file. Lives next to the JSONL for easy inspection.
-    final_message_path: Path | None = None
-    if tool == "codex":
-        final_message_path = jsonl_path.parent / "codex_final_message.md"
-
-    cmd = _command_for(tool, prompt, final_message_path=final_message_path)
-    env = _scrubbed_env()
-    collected: list[str] = []
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            cwd=str(cwd) if cwd else None,
-            text=True,
-            bufsize=1,
-        )
-    except (OSError, FileNotFoundError) as exc:
-        return ReviewResult(tool=tool, markdown="", exit_code=-1, error=str(exc))
-
-    assert proc.stdout is not None
-    timed_out = False
-    try:
-        with proc.stdout as stream:
-            for line in stream:
-                collected.append(line)
-                append_text_event(
-                    jsonl_path,
-                    role=f"{tool}_review",
-                    phase="post_publish",
-                    text=line.rstrip("\n"),
-                )
-        proc.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        timed_out = True
-
-    # Codex: prefer the `-o` file (clean final message) over the streamed
-    # stdout (full transcript). Falls back to stdout if the file is missing,
-    # which happens when codex crashes before writing it (auth error, etc.).
-    if final_message_path is not None and final_message_path.exists():
-        try:
-            markdown = final_message_path.read_text(encoding="utf-8")
-        except OSError:
-            markdown = "".join(collected)
-    else:
-        markdown = "".join(collected)
-
-    if timed_out:
-        return ReviewResult(
-            tool=tool,
-            markdown=markdown,
-            exit_code=-1,
-            error=f"timeout after {timeout_s}s",
-        )
-
-    return ReviewResult(
-        tool=tool,
-        markdown=markdown,
-        exit_code=proc.returncode,
-        error=None if proc.returncode == 0 else f"exit code {proc.returncode}",
     )
 
 
@@ -565,7 +288,7 @@ def parse_verdict(markdown: str) -> str | None:
 CLI_REVIEW_STATUS_CONTEXT = "contremaitre/cli-review"
 
 # Severity order: a higher rank is a worse verdict. Used for worst-of-N across
-# multiple reviewers (`cli_reviewer="both"`) — any MUST_FIX wins.
+# multiple review rounds — any MUST_FIX wins.
 _VERDICT_RANK = {"LOOKS_GOOD": 0, "NEEDS_ATTENTION": 1, "MUST_FIX": 2}
 
 
@@ -743,15 +466,10 @@ def _fmt_duration_short(seconds: float) -> str:
 def expand_choice(choice: str) -> tuple[str, ...]:
     """Resolve a `cli_reviewer` config value to the list of tools to run.
 
-    `"both"` expands to `("claude", "codex")` (claude first so its
-    comment lands above codex's in the PR conversation — purely cosmetic
-    ordering). Single-tool choices return a 1-tuple; `"none"` / unknown
-    return `()`. Used by the orchestrator to iterate over the right set
-    of subprocess invocations.
+    Single-tool choices return a 1-tuple; `"none"` / unknown return `()`.
+    Used by the orchestrator to iterate over the right set of tools.
     """
 
-    if choice == "both":
-        return ("claude", "codex")
     if choice in VALID_TOOLS:
         return (choice,)
     return ()

@@ -83,9 +83,9 @@
     `;
   }
   const cliChip = cli ? cliReviewChip(cli, null) : "";
-  // Each cli_review_extra rerun (claude or codex) gets its own chip next
-  // to the original, so the side-by-side verdict comparison is visible
-  // without leaving the header.
+  // Each CLI review round (per-tool) gets its own chip next to the
+  // original so the side-by-side verdict comparison is visible without
+  // leaving the header.
   const cliExtras = DATA.cli_review_extras || [];
   const cliExtraChips = cliExtras.map(c => cliReviewChip(c, c.source)).join("");
 

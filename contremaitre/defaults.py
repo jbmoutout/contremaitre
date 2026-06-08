@@ -31,7 +31,7 @@ Schema (all keys optional):
     claude_effort = "high"  # low | medium | high | max
     agent_model = "opencode/big-pickle"   # used when a role is opencode
     sim_model = "opencode/big-pickle"
-    cli_reviewer = "claude" # auto | codex | claude | both | none
+    cli_reviewer = "claude" # auto | codex | claude | none
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from pathlib import Path
 
 
 _FILENAME = "defaults.toml"
-_VALID_CLI_REVIEWER = ("auto", "codex", "claude", "both", "none")
+_VALID_CLI_REVIEWER = ("auto", "codex", "claude", "none")
 # Friendly actor aliases → the runtime value the CLI/`ActorMode` understands.
 # "codex"/"claude" are the operator-facing names for the `cli` runtime (the CLI
 # tool is carried separately as `cli_tool`), so the file can read `actor = "claude"`.

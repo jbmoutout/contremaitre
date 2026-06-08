@@ -49,7 +49,7 @@ def test_saved_defaults_fill_in_when_no_explicit_flags(monkeypatch, tmp_path: Pa
             [
                 'agent_model = "opencode/big-pickle"',
                 'sim_model = "opencode/big-pickle"',
-                'cli_reviewer = "both"',
+                'cli_reviewer = "claude"',
             ]
         )
         + "\n",
@@ -58,7 +58,7 @@ def test_saved_defaults_fill_in_when_no_explicit_flags(monkeypatch, tmp_path: Pa
     _apply_saved_defaults(args, argv=["contremaitre", "run", "--base", "main"])
     assert args.agent_model == "opencode/big-pickle"
     assert args.sim_model == "opencode/big-pickle"
-    assert args.cli_reviewer == "both"
+    assert args.cli_reviewer == "claude"
 
 
 def test_explicit_flag_beats_saved_default(monkeypatch, tmp_path: Path):
@@ -66,7 +66,7 @@ def test_explicit_flag_beats_saved_default(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     _write_defaults(
         tmp_path,
-        'agent_model = "opencode/big-pickle"\ncli_reviewer = "both"\n',
+        'agent_model = "opencode/big-pickle"\ncli_reviewer = "claude"\n',
     )
     args = _make_args(agent_model="openrouter/qwen/qwen3-max")
     _apply_saved_defaults(
@@ -84,7 +84,7 @@ def test_explicit_flag_beats_saved_default(monkeypatch, tmp_path: Path):
     assert args.agent_model == "openrouter/qwen/qwen3-max"
     # … but saved cli_reviewer still applies because the operator didn't
     # pass --cli-reviewer.
-    assert args.cli_reviewer == "both"
+    assert args.cli_reviewer == "claude"
 
 
 def test_apply_is_a_no_op_when_defaults_file_missing(monkeypatch, tmp_path: Path):
@@ -165,7 +165,7 @@ def test_documented_schema_example_loads_cleanly(monkeypatch, tmp_path: Path):
             [
                 'agent_model = "opencode/big-pickle"',
                 'sim_model = "opencode/big-pickle"',
-                'cli_reviewer = "both"',
+                'cli_reviewer = "auto"',
             ]
         )
         + "\n",
@@ -174,5 +174,5 @@ def test_documented_schema_example_loads_cleanly(monkeypatch, tmp_path: Path):
     assert out == defaults.Defaults(
         agent_model="opencode/big-pickle",
         sim_model="opencode/big-pickle",
-        cli_reviewer="both",
+        cli_reviewer="auto",
     )

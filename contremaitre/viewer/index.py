@@ -151,9 +151,9 @@ def _read_cli_reviews(run_dir: Path) -> list[dict[str, Any]]:
       - orchestrator-published: `<tool>_review.md` next to the run's other
         artifacts (the cli_reviewer post-publish step).
       - orchestrator loop rounds: `extras/cli_review_<NNN>/<tool>_review.md`.
-      - extras from `cli_review_extra`: `extras/cli_review_<NNN>/review.md`
-        with sibling `summary.json` carrying the tool name. Source labelled
-        `extra-NNN` so the user can tell N reruns apart in the badge.
+      - legacy format: `extras/cli_review_<NNN>/review.md` with sibling
+        `summary.json` carrying the tool name. Present in older runs;
+        source labelled `extra-NNN` for backward compatibility.
 
     Each entry: `{"tool", "verdict", "blocker", "source"}`. Verdict / blocker
     come from `_classify_review_md`. The list is ordered original-first then
@@ -189,10 +189,9 @@ def _read_cli_reviews(run_dir: Path) -> list[dict[str, Any]]:
                 if isinstance(summary, dict):
                     tool = summary.get("tool")
             if not tool:
-                # Fall back to filename guess so a hand-curated extra still
-                # renders. `<tool>_*` is the cli_review_extra naming, but
-                # the review.md itself doesn't carry the tool, so we sniff
-                # the sibling raw export filename.
+                # Fall back to filename guess for legacy extras where the
+                # review.md doesn't carry the tool name — sniff the sibling
+                # raw export filename.
                 for candidate in ("codex", "claude"):
                     if (extra_dir / f"{candidate}_review_raw_export.jsonl").exists():
                         tool = candidate
@@ -1189,8 +1188,8 @@ def _render_row(r: dict[str, Any]) -> str:
         models_bits.append(
             f'<span style="color:var(--sim)">sim</span> <code>{_escape(r["sim_model"])}</code>'
         )
-    # One badge per cli_review on disk (orchestrator + any cli_review_extra
-    # passes). Side-by-side display lets A1's cross-reviewer comparison read
+    # One badge per cli_review on disk (orchestrator rounds).
+    # Side-by-side display lets a cross-reviewer comparison read
     # off the index — codex MUST_FIX next to claude NEEDS_ATTENTION etc.
     for cr in r["cli_reviews"]:
         cli_tier = _cli_review_tier(cr["verdict"])
