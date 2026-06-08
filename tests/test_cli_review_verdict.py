@@ -33,12 +33,6 @@ def test_quality_score_monotonic_with_severity():
     assert scores == sorted(scores, reverse=True)
 
 
-def test_blocks_merge_only_must_fix():
-    assert CliReviewVerdict.MUST_FIX.blocks_merge
-    assert not CliReviewVerdict.NEEDS_ATTENTION.blocks_merge
-    assert not CliReviewVerdict.LOOKS_GOOD.blocks_merge
-
-
 def test_coerce_accepts_str_enum_and_rejects_garbage():
     assert CliReviewVerdict.coerce("MUST_FIX") is CliReviewVerdict.MUST_FIX
     assert CliReviewVerdict.coerce(CliReviewVerdict.LOOKS_GOOD) is CliReviewVerdict.LOOKS_GOOD

@@ -58,12 +58,6 @@ class CliReviewVerdict(str, Enum):
 
         return 1.0 - self.rank / (len(_CLI_VERDICT_SEVERITY) - 1)
 
-    @property
-    def blocks_merge(self) -> bool:
-        """Whether this verdict should fail the cli-review commit status."""
-
-        return self is CliReviewVerdict.MUST_FIX
-
     @classmethod
     def coerce(cls, value: object) -> CliReviewVerdict | None:
         """Best-effort ``str | enum | None`` → member. Never raises.
