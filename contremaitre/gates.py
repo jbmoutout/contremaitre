@@ -55,12 +55,15 @@ INTERNAL_PATHS: tuple[str, ...] = (
 def is_internal_path(path: str) -> bool:
     """True iff `path` is an orchestration-internal / tolerated build-output path.
 
-    `path == n or path.startswith(n + "/")` matches a file named exactly `n`
-    (e.g. `opencode.json`) or anything under a directory `n` (e.g. `dist/foo`),
-    without the `"dist"`-matches-`"distribution/x"` trap a bare `startswith` carries.
+    Exact matches are limited to true orchestration-internal paths
+    (`.contremaitre`, `opencode.json`). Build-output names are tolerated only
+    as directories or directory contents (e.g. `dist/`, `dist/foo`), so a real
+    root file named `dist` does not silently pass the clean-worktree gate.
     """
 
-    return any(path == n or path.startswith(n + "/") for n in INTERNAL_PATHS)
+    if path in (".contremaitre", "opencode.json"):
+        return True
+    return any(path.startswith(n + "/") for n in INTERNAL_PATHS)
 
 
 def only_internal_changes(porcelain: str) -> bool:

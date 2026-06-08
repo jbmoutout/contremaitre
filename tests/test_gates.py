@@ -49,8 +49,16 @@ class InternalPathPolicyTest(unittest.TestCase):
         self.assertTrue(gates.is_internal_path("opencode.json"))
         self.assertTrue(gates.is_internal_path(".contremaitre"))
 
+    def test_build_output_names_are_directory_only(self):
+        self.assertFalse(gates.is_internal_path("dist"))
+        self.assertFalse(gates.is_internal_path("build"))
+        self.assertFalse(gates.is_internal_path("out"))
+        self.assertFalse(gates.is_internal_path(".next"))
+        self.assertFalse(gates.is_internal_path("__pycache__"))
+
     def test_under_directory_match(self):
         self.assertTrue(gates.is_internal_path(".contremaitre/runs/x/stats.json"))
+        self.assertTrue(gates.is_internal_path("dist/"))
         self.assertTrue(gates.is_internal_path("dist/bundle.js"))
         self.assertTrue(gates.is_internal_path("__pycache__/mod.cpython-311.pyc"))
 
@@ -73,6 +81,20 @@ class OnlyInternalChangesTest(unittest.TestCase):
     def test_only_internal_paths_is_clean(self):
         porcelain = "?? .contremaitre/runs/r1/stats.json\n M opencode.json\n?? dist/app.js\n"
         self.assertTrue(gates.only_internal_changes(porcelain))
+
+    def test_root_files_named_like_build_output_are_dirty(self):
+        self.assertFalse(gates.only_internal_changes("?? dist\n"))
+        self.assertFalse(gates.only_internal_changes("?? build\n"))
+        self.assertFalse(gates.only_internal_changes("?? out\n"))
+        self.assertFalse(gates.only_internal_changes("?? .next\n"))
+        self.assertFalse(gates.only_internal_changes("?? __pycache__\n"))
+
+    def test_build_output_directories_are_clean(self):
+        self.assertTrue(gates.only_internal_changes("?? dist/\n"))
+        self.assertTrue(gates.only_internal_changes("?? build/\n"))
+        self.assertTrue(gates.only_internal_changes("?? out/\n"))
+        self.assertTrue(gates.only_internal_changes("?? .next/\n"))
+        self.assertTrue(gates.only_internal_changes("?? __pycache__/\n"))
 
     def test_any_real_change_is_dirty(self):
         porcelain = "?? .contremaitre/runs/r1/x\n M contremaitre/gates.py\n"
