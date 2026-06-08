@@ -170,6 +170,47 @@ class ResolveChoiceTest(unittest.TestCase):
         )
         self.assertEqual(out, "none")
 
+    def test_two_installed_saved_auto_enter_picks_first_available(self):
+        # saved_default="auto" (defaults.toml value): Enter must select the
+        # first available tool, not silently skip. Without this fix the
+        # numbered picker returned "none" on Enter when no concrete tool was
+        # saved, making the CLI review loop unreachable for most operators.
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="auto",
+            input_fn=lambda _: "",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "codex")
+
+    def test_two_installed_saved_old_both_enter_picks_first_available(self):
+        # saved_default="both" is the legacy value from old defaults.toml
+        # files — must behave the same as "auto" (first available on Enter).
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="both",
+            input_fn=lambda _: "",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "codex")
+
+    def test_two_installed_no_saved_default_enter_still_skips(self):
+        # saved_default=None (never set): Enter should still skip — we
+        # only auto-select on explicit "auto"/"both", not on unset.
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default=None,
+            input_fn=lambda _: "",
+            print_fn=lambda *a, **k: None,
+        )
+        self.assertEqual(out, "none")
+
 
 class SavedDefaultTest(unittest.TestCase):
     """`saved_default` prefills the auto-picker without short-circuiting it."""

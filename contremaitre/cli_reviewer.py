@@ -118,10 +118,15 @@ def resolve_choice(
         return tool if reply in ("", "y", "yes") else "none"
     # Both installed — numbered picker.
     # `saved_default` (when one of codex/claude) becomes the Enter
-    # default; otherwise Enter still skips.
+    # default. "auto" or the old "both" mean "I want CLI review, pick
+    # whatever's available" — default to the first available tool so
+    # Enter doesn't silently skip. Only explicit "none" or unset (None)
+    # keeps the historical Enter=skip behaviour.
     enter_default: str | None = None
-    if saved_default in VALID_TOOLS:
+    if saved_default in VALID_TOOLS and saved_default in available:
         enter_default = saved_default
+    elif saved_default in ("auto", "both"):
+        enter_default = next((t for t in VALID_TOOLS if t in available), None)
     print_fn("  cli-review:")
     for i, tool in enumerate(VALID_TOOLS, start=1):
         if tool in available:
