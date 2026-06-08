@@ -2084,25 +2084,6 @@ def _render_event(event: dict[str, Any]):
     return t
 
 
-def _render_cli_review_event(event: dict[str, Any]):
-    """Compact 3-column layout for the post-publish cli_review pane.
-
-    Drops the per-event-type and per-tool columns the agent/sim panes use
-    — every cli_review chunk is `type=text` with no tool tag, so those
-    11+11 chars were always empty. Keeps marker + timestamp at their tight
-    natural widths and gives the rest of the row to the body, so a
-    review's longer lines (file:line citations, markdown sentences) don't
-    wrap as aggressively in the bottom row.
-    """
-
-    marker, ts, _typ, _tool, body = _build_event_row(event)
-    t = Table.grid(padding=(0, 1))
-    t.add_column(width=1, no_wrap=True)
-    t.add_column(width=8, no_wrap=True, style="dim")
-    t.add_column(overflow="fold")
-    t.add_row(marker, ts, body)
-    return t
-
 
 _CLI_REVIEW_VERDICT_RANK = {
     "MUST_FIX": 3,
@@ -2332,11 +2313,6 @@ if _TEXTUAL_AVAILABLE:
         #sim-column { width: 1fr; layout: vertical; }
         .sim-subpane { width: 1fr; height: 1fr; border: round white; }
         .sim-subpane.active { border: round yellow; }
-        #cli-review-pane {
-            width: 100%;
-            height: 8;
-            border: round white;
-        }
         #cli-review-pane.active { border: round yellow; }
         #cli-review-pane.hidden { display: none; }
         RichLog {
@@ -2500,20 +2476,20 @@ if _TEXTUAL_AVAILABLE:
                             highlight=False,
                         )
                         yield Static("", classes="pane-sub", id="sim-sub")
-            # Post-publish CLI reviewer (claude/codex) — full-width row that
-            # appears BELOW the main panes (not inside the Horizontal) the
-            # moment the first chunk arrives. WORK/REVIEW phases get the
-            # uncompressed 2-column layout above; this row only eats vertical
-            # space when it's actually streaming. Stays hidden until then.
-            with Vertical(id="cli-review-pane"):
-                yield _NoFocusRichLog(
-                    id="cli-review-log",
-                    auto_scroll=False,
-                    markup=False,
-                    wrap=True,
-                    highlight=False,
-                )
-                yield Static("", classes="pane-sub", id="cli-review-sub")
+                    # Post-publish CLI reviewer — splits the SIM column in
+                    # half vertically. Hidden until cli_review_started fires;
+                    # reveals in-place so the SIM pane shrinks to share
+                    # the column. Uses sim-subpane class for consistent
+                    # border/sizing with the SIM pane above.
+                    with Vertical(classes="sim-subpane", id="cli-review-pane"):
+                        yield _NoFocusRichLog(
+                            id="cli-review-log",
+                            auto_scroll=False,
+                            markup=False,
+                            wrap=True,
+                            highlight=False,
+                        )
+                        yield Static("", classes="pane-sub", id="cli-review-sub")
             with Vertical(id="activity-panel"):
                 yield _NoFocusRichLog(
                     id="activity-log",
@@ -2639,7 +2615,7 @@ if _TEXTUAL_AVAILABLE:
                 self._cli_review_tool = tool
                 cursor = self._cli_review_cursor.get(tool, 0)
                 for e in events[cursor:]:
-                    widget.write(_render_cli_review_event(e))
+                    widget.write(_render_event(e))
                 self._cli_review_cursor[tool] = len(events)
             if at_bottom:
                 widget.scroll_end(animate=False)
@@ -2855,12 +2831,15 @@ if _TEXTUAL_AVAILABLE:
             # pane has gone idle, so it feeds the tick too; otherwise its
             # loader would never animate during the only window it runs in.
             cli_review_file_age: float | None = None
-            if self.cli_reviewer in ("codex", "claude"):
+            if self.cli_reviewer in ("codex", "claude", "auto"):
                 cli_review_file_age = _file_age(
                     self.paths["claude_review_raw_export"]
                 ) or _file_age(self.paths["codex_review_raw_export"])
+            cli_review_phase_live = cli_review_started and not (
+                cli_review_completed or cli_review_failed
+            )
             cli_review_running_state = _activity_state(
-                container_present=False,
+                container_present=cli_review_phase_live,
                 file_age=cli_review_file_age,
             )
             if agent_state != "idle" or sim_state != "idle" or cli_review_running_state != "idle":
@@ -2931,14 +2910,9 @@ if _TEXTUAL_AVAILABLE:
                     else _file_age(self.paths["codex_review_raw_export"])
                 )
                 cli_state = _activity_state(
-                    container_present=False,
+                    container_present=cli_review_phase_live,
                     file_age=cli_file_age,
                 )
-                if cli_state != "idle":
-                    # Spinner already ticked above if agent/sim/extra were
-                    # active; tick again here too so the post-publish window
-                    # (when those three are idle) still animates.
-                    pass
                 self.query_one("#cli-review-sub", Static).update(
                     _render_pane_subheader(
                         state=cli_state,
@@ -2951,17 +2925,7 @@ if _TEXTUAL_AVAILABLE:
                 )
                 cli_pane = self.query_one("#cli-review-pane")
                 cli_pane.border_title = f"{tool_label} PR REVIEW (post-publish)"
-                # Keep the yellow active border on for the WHOLE cli_review
-                # phase, not just when a stdout chunk lands in the last 2s
-                # (file-age heuristic). Codex/claude spend long stretches
-                # thinking between stdout writes — the border kept flicking
-                # off and the operator couldn't tell at a glance which pane
-                # was the focus. Use the phase signals instead: on between
-                # cli_review_started and cli_review_completed/failed.
-                cli_phase_live = cli_review_started and not (
-                    cli_review_completed or cli_review_failed
-                )
-                cli_pane.set_class(cli_phase_live or active == "cli_review", "active")
+                cli_pane.set_class(cli_review_phase_live or active == "cli_review", "active")
 
             # ----- Activity panel title -----
             if terminal and self._frozen_gr_age is not None:
