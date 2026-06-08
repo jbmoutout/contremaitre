@@ -210,6 +210,44 @@ class ViewerTest(unittest.TestCase):
         self.assertEqual(data["cli_review"]["status"], "completed")
         self.assertEqual(data["cli_review"]["verdict"], "LOOKS_GOOD")
 
+    def test_root_cli_review_unparseable_verdict_shows_failed_status(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("cli-unparseable"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "PR_NEEDS_HUMAN"})
+        paths.guardrail_events.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {"event": events.CLI_REVIEW_STARTED, "tool": "codex", "round": 1},
+                    {
+                        "event": events.CLI_REVIEW_COMPLETED,
+                        "tool": "codex",
+                        "round": 1,
+                        "verdict": None,
+                    },
+                    {
+                        "event": events.CLI_REVIEW_FAILED,
+                        "tool": "codex",
+                        "round": 1,
+                        "reason": "unparseable_verdict",
+                    },
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (paths.run_dir / "codex_review.md").write_text(
+            "### reviewed by `codex`\n\nLooks fine to me\n",
+            encoding="utf-8",
+        )
+
+        data = _extract_data_payload(build_viewer(paths).read_text(encoding="utf-8"))
+
+        self.assertEqual(data["cli_review"]["status"], "failed")
+
 
 class CodexNormalizationTest(unittest.TestCase):
     """codex `exec --json` streams must surface in the chat like opencode's.

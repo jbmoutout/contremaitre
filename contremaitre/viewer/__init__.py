@@ -198,7 +198,7 @@ def _assemble_cli_review(
         None,
     )
 
-    if failed_evt is not None and completed_evt is None:
+    if failed_evt is not None and (completed_evt is None or completed_evt.get("verdict") is None):
         status = "failed"
     elif completed_evt is not None:
         status = "completed"
