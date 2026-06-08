@@ -142,7 +142,7 @@ def resolve_choice(
             idx = int(reply) - 1
             if 0 <= idx < len(VALID_TOOLS) and VALID_TOOLS[idx] in available:
                 return VALID_TOOLS[idx]
-        print_fn(f"  enter 1, 2, s, or Enter")
+        print_fn("  enter 1, 2, s, or Enter")
 
 
 # ---------- prompt assembly ----------

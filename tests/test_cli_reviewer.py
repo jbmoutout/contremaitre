@@ -518,7 +518,9 @@ class HeaderTest(unittest.TestCase):
         self.assertNotIn("``", header)
 
     def test_format_includes_round_context(self):
-        header = cli_reviewer.format_header(tool="codex", model=None, duration_s=5, round_n=2, round_of=3)
+        header = cli_reviewer.format_header(
+            tool="codex", model=None, duration_s=5, round_n=2, round_of=3
+        )
         self.assertIn("round 2/3", header)
 
     def test_format_defaults_to_round_1_of_1(self):
