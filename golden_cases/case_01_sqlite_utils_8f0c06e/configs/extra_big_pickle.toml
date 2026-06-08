@@ -2,9 +2,8 @@
 #
 # Same as `default` (deepseek agent, deepseek SIM, codex cli_reviewer)
 # but uses opencode/big-pickle as the primary SIM instead. Retained as
-# a named config for historical eval comparisons; the extra_reviewer
-# feature it previously tested has been replaced by the cli_reviewer
-# post-PR revision loop.
+# a named config for historical eval comparisons after the auxiliary
+# reviewer experiment was removed.
 
 publish_mode = "gh"
 

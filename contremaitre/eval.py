@@ -8,9 +8,8 @@ baseline.
 
 The scorecard has two layers:
 
-- **Headline** (7 panels, drives pass/fail): cli_review_score, terminal_score,
-  files_changed, loc_net_delta, review_rounds, cost_usd, wall_seconds,
-  cross_family_agreement.
+- **Headline** (drives pass/fail): cli_review_score, terminal_score,
+  files_changed, loc_net_delta, review_rounds, cost_usd, wall_seconds.
 - **Diagnostic** (per-tier rollups, informational): format compliance,
   discipline, review depth, cli_review finding breakdown, efficiency.
 
@@ -62,7 +61,6 @@ _DRIFT_ENVELOPES = {
     "loc_net_delta": 0.50,
     "cost_usd": 0.20,  # per roadmap §2
     "wall_seconds": 0.30,
-    "cross_family_agreement": 0.30,
     # agent_discipline_score: currently unused — gate is temporarily disabled
     # in _compare_to_baseline because the sim_useful_call_ratio input was
     # zero-pinned by a stale matcher and pre-fix baselines are not comparable.
@@ -121,7 +119,6 @@ class ConfigDef:
     agent_model: str
     sim_model: str
     cli_reviewer: str  # "codex" | "claude" | "none"
-    extra_reviewer_model: str | None = None
     publish_mode: str = "gh"  # "gh" required for cli_reviewer to fire
 
 
@@ -146,12 +143,16 @@ def load_config(case_dir: Path, config_name: str) -> ConfigDef:
         )
     raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     models = raw.get("models", {})
+    if "extra_reviewer_model" in models:
+        raise ValueError(
+            "extra_reviewer_model was removed; add a sibling config with a different "
+            "sim_model instead"
+        )
     return ConfigDef(
         name=config_name,
         agent_model=models["agent_model"],
         sim_model=models["sim_model"],
         cli_reviewer=models.get("cli_reviewer", "codex"),
-        extra_reviewer_model=models.get("extra_reviewer_model"),
         publish_mode=raw.get("publish_mode", "gh"),
     )
 
@@ -239,9 +240,6 @@ def run_case(case: CaseDef, config: ConfigDef, *, runs_root: Path, rep_index: in
         "--yes",
         "--allow-open-egress",
     ]
-    if config.extra_reviewer_model:
-        cmd += ["--extra-reviewer-model", config.extra_reviewer_model]
-
     env = dict(os.environ)
     token = _gh_token()
     if token:
@@ -910,7 +908,6 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
         "review_rounds": depth["rounds"],
         "cost_usd": stats.get("recorded_cost_usd"),
         "wall_seconds": stats.get("duration_seconds"),
-        "cross_family_agreement": scorecard.get("cross_family_agreement"),
     }
 
     diagnostic = {
@@ -940,7 +937,6 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
             "total_checks_performed": depth["total_checks_performed"],
             "total_required_changes": depth["total_required_changes"],
             "sim_review_confidence": scorecard.get("sim_review_confidence"),
-            "extra_reviewer_confidence": scorecard.get("extra_reviewer_confidence"),
             "process_reliability": scorecard.get("process_reliability"),
         },
         "cli_review_breakdown": {
@@ -1101,7 +1097,6 @@ def aggregate_cell(reports: list[CanaryReport]) -> Cell:
         "review_rounds": _median_range(headline_panel("review_rounds")),
         "cost_usd": _median_range(headline_panel("cost_usd")),
         "wall_seconds": _median_range(headline_panel("wall_seconds")),
-        "cross_family_agreement_rate": _rate(headline_panel("cross_family_agreement")),
     }
 
     def diag_panel(group: str, field: str) -> list[Any]:
@@ -1151,9 +1146,6 @@ def aggregate_cell(reports: list[CanaryReport]) -> Cell:
             ),
             "sim_review_confidence": _median_range(
                 diag_panel("review_depth", "sim_review_confidence")
-            ),
-            "extra_reviewer_confidence": _median_range(
-                diag_panel("review_depth", "extra_reviewer_confidence")
             ),
             "process_reliability": _median_range(diag_panel("review_depth", "process_reliability")),
         },
@@ -1344,13 +1336,6 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
         regressions.append(f"terminal_score {base_t:.2f} → {cur_t:.2f}")
     elif cur_t is not None and base_t is not None and cur_t > base_t:
         improvements.append(f"terminal_score {base_t:.2f} → {cur_t:.2f}")
-
-    # cross_family_agreement_rate: drop = regression.
-    cur_cf = h_cur.get("cross_family_agreement_rate")
-    base_cf = h_base.get("cross_family_agreement_rate")
-    if isinstance(cur_cf, (int, float)) and isinstance(base_cf, (int, float)):
-        if cur_cf < base_cf - _DRIFT_ENVELOPES["cross_family_agreement"]:
-            regressions.append(f"cross_family_agreement_rate {base_cf:.2f} → {cur_cf:.2f}")
 
     # Scope + efficiency drift envelopes (informational unless they widen
     # beyond the rule).
@@ -1793,9 +1778,6 @@ def format_cell_report(
     lines.append(f"  review_rounds           {_fmt_range(h.get('review_rounds'))}")
     lines.append(f"  cost_usd                {_fmt_range(h.get('cost_usd'), prec=3)}")
     lines.append(f"  wall_seconds            {_fmt_range(h.get('wall_seconds'), prec=0)}")
-    lines.append(
-        f"  cross_family_agreement  rate={_fmt_rate(h.get('cross_family_agreement_rate'))}"
-    )
     lines.append("")
 
     fc = d.get("format_compliance", {})
@@ -1840,9 +1822,6 @@ def format_cell_report(
     lines.append(f"  total_required_changes      {_fmt_range(rev.get('total_required_changes'))}")
     lines.append(
         f"  sim_review_confidence       {_fmt_range(rev.get('sim_review_confidence'), prec=2)}"
-    )
-    lines.append(
-        f"  extra_reviewer_confidence   {_fmt_range(rev.get('extra_reviewer_confidence'), prec=2)}"
     )
     lines.append(
         f"  process_reliability         {_fmt_range(rev.get('process_reliability'), prec=2)}"

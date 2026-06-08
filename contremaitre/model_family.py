@@ -1,11 +1,10 @@
 """Coarse model-family classification.
 
-Used by the interactive picker (to suggest a cross-family default for the
-extra reviewer) and by the TUI subheader (to label which family each
-reviewer pane belongs to). Heuristic, not authoritative — model strings
-follow a `<provider>/<family>/<variant>` or `<provider>/<id>` convention
-and we extract the family from the middle component when possible, falling
-back to a prefix match on the bare id.
+Used by model-pair diagnostics to label and compare coarse agent/SIM model
+families. Heuristic, not authoritative — model strings follow a
+`<provider>/<family>/<variant>` or `<provider>/<id>` convention and we
+extract the family from the middle component when possible, falling back
+to a prefix match on the bare id.
 
 Returns lowercased family slugs (`deepseek`, `qwen`, `glm`, `kimi`, …) or
 `"unknown"` when the string doesn't match any known family. Callers should

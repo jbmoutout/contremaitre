@@ -118,9 +118,9 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
         starts.append((ts, role))
     starts.sort()
 
-    # max(round), not len(): with the extra reviewer enabled, review_cycles
-    # carries two entries per round plus optional `unavailable` entries; the
-    # round number is the canonical counter. Always recoverable.
+    # max(round), not len(): retry / unavailable rows can make
+    # review_cycles longer than the number of logical review rounds.
+    # The round number is the canonical counter. Always recoverable.
     cycles = read_jsonl(paths.review_cycles)
     review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
 
@@ -313,9 +313,8 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     # paraphrase output but mention the search terms they ran; matching
     # output verbatim floored the metric at 0 across every observed run.
     # Valid for SIM only (verdict prose is the deliverable, not for agents).
-    # Match against the SIM's own last verdict (not the extra reviewer's or
-    # an `unavailable` marker row) so the ratio reflects SIM tool-use → SIM
-    # verdict alignment.
+    # Match against the SIM's own last verdict (not an `unavailable` marker
+    # row) so the ratio reflects SIM tool-use → SIM verdict alignment.
     sim_useful_ratio: float | None = None
     review_cycles = read_jsonl(paths.review_cycles)
     sim_cycles = [

@@ -37,7 +37,6 @@ publish_mode = "gh"                                         # required for cli_r
 agent_model = "opencode/deepseek-v4-flash-free"
 sim_model = "opencode/deepseek-v4-flash-free"
 cli_reviewer = "codex"                                      # or "claude"
-extra_reviewer_model = "..."                                # optional cross-family second SIM
 ```
 
 Convention: config names use underscores (no dashes) so run slugs `<ts>-eval-<case_id>-<config>-<rep>` parse unambiguously.
@@ -93,7 +92,6 @@ contremaitre eval promote <case_id> --config qwen_sim
 - `agent_discipline_score` — continuous composite over exploration_convergence + sim_useful_call_ratio + self_verified
 - `terminal_score` — READY=1.0 / NO_PR_*=0.0 / FAILED_INFRA=-1.0
 - `files_changed`, `loc_net_delta`, `review_rounds`, `cost_usd`, `wall_seconds`
-- `cross_family_agreement_rate` (when extra_reviewer_model is configured)
 
 ### Diagnostic (informational)
 
@@ -119,7 +117,7 @@ Generalizable principles surfaced by running cells under this canary on real mod
 
 - **Correlated metrics are one signal, not three confirmations.** When three favorable panels move in the same direction, they often share one upstream cause (removing the formatter-MF class shifts `cli_review_score`, `cli_issue_count`, and hard-gates-pass-rate simultaneously). Gate regression-confirmation claims at the metric-family level, not the raw-metric level.
 
-- **Same-family agent ↔ SIM is the bias scenario.** Two same-tier same-harness judges share failure modes — given more structured context, the SIM becomes *less* critical of sibling-model output, not more. Cross-family in the agent ↔ SIM channel isn't a nice-to-have, it's the architectural target. Corollary: `cross_family_agreement = 1.0` measures consistency between similarly-bounded judges, not independent corroboration of correctness.
+- **Same-family agent ↔ SIM is the bias scenario.** Two same-tier same-harness judges share failure modes — given more structured context, the SIM becomes *less* critical of sibling-model output, not more. Cross-family in the agent ↔ SIM channel is the architectural target; don't add a secondary reviewer axis as a substitute for that primary pairing.
 
 - **Self-reported / heuristic metrics can be structurally zero-pinned.** A flow_use matcher requiring a verbatim ≥20-char grep-output line in the SIM verdict was 0.0 for every SIM ever, because SIMs are prompted to paraphrase. Audit any "low-variance, drop from the gate" recommendation against the *unfiltered* run set before committing it.
 

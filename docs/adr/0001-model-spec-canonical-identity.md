@@ -7,11 +7,11 @@ date: 2026-06-07
 
 ## Context
 
-A run's model identity — for the agent, the SIM, and the extra reviewer — has
-to survive four very different surfaces: the `default.toml`/`defaults.toml`
-operator config, the live TUI, the orchestrator's internal logic, and the
-post-hoc `viewer/`. Today identity is smuggled inside a **display string** and
-re-parsed downstream, which has produced five distinct, compounding defects.
+A run's model identity — for the agent and the SIM — has to survive four very
+different surfaces: the `default.toml`/`defaults.toml` operator config, the
+live TUI, the orchestrator's internal logic, and the post-hoc `viewer/`.
+Today identity is smuggled inside a **display string** and re-parsed
+downstream, which has produced five distinct, compounding defects.
 
 The string is built by `role_model_label()` in
 [models.py](../../contremaitre/models.py) (lines 70-95):
@@ -148,8 +148,7 @@ existing string/slug key exactly as it is today:
     "resolved": null,                              // codex stream is silent
     "provider": null
   },
-  "sim_model": "...", "sim_model_spec": { ... },
-  "extra_reviewer_model": "...", "extra_reviewer_model_spec": { ... }
+  "sim_model": "...", "sim_model_spec": { ... }
 }
 ```
 
