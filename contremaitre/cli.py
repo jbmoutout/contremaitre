@@ -2171,7 +2171,11 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     if resolved_sim_cli_tool:
         _set_flag_value(forwarded, "--sim-cli-tool", resolved_sim_cli_tool)
     else:
-        _remove_flag(forwarded, "--sim-cli-tool")
+        # Same tool as agent — pass it explicitly so _apply_saved_defaults in
+        # the non-TTY subprocess can't reload a stale sim_cli_tool from
+        # defaults.toml (e.g. saved "codex" blowing back in when user picked
+        # "claude" for both roles).
+        _set_flag_value(forwarded, "--sim-cli-tool", getattr(confirm_args, "cli_tool", "codex"))
     if "--yes" not in forwarded and "-y" not in forwarded:
         forwarded.append("--yes")
     if "--repo-cache" not in " ".join(forwarded):
