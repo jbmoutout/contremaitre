@@ -1,7 +1,7 @@
 """Hard gates (L0) — the deterministic, host-side publication floor.
 
-This Module gives the named **Hard gates (L0)** concept (see CONTEXT.md and
-docs/control-plane.md) a real home. It concentrates the L0 *computation* that the
+This Module gives the named **Hard gates (L0)** concept (see docs/control-plane.md)
+a real home. It concentrates the L0 *computation* that the
 orchestrator runs in two places — once before publishing a draft PR, once before
 pushing a post-publish revision — behind one small typed Interface.
 
