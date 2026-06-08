@@ -6,6 +6,7 @@ CLI, the orchestrator, and the actor adapters (fake and opencode).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -27,9 +28,103 @@ class ReviewVerdict(str, Enum):
 
 
 class CliReviewVerdict(str, Enum):
+    """The post-publish CLI reviewer's verdict, and the single home for its
+    severity ordering.
+
+    Every consumer (the commit-status projection, the TUI footer glyph, the
+    eval canary score, the viewer tier) routes through this enum rather than
+    re-tabling the order. Severity runs ``LOOKS_GOOD < NEEDS_ATTENTION <
+    MUST_FIX``; the eval **quality** score is the inverse axis, *derived* from
+    the rank so it can never drift from the severity order.
+    """
+
     MUST_FIX = "MUST_FIX"
     NEEDS_ATTENTION = "NEEDS_ATTENTION"
     LOOKS_GOOD = "LOOKS_GOOD"
+
+    @property
+    def rank(self) -> int:
+        """Severity rank, low → high. ``MUST_FIX`` is worst."""
+
+        return _CLI_VERDICT_SEVERITY.index(self)
+
+    @property
+    def quality_score(self) -> float:
+        """Quality score in ``[0, 1]``, high = good — the inverse of severity.
+
+        Derived, never tabled: ``LOOKS_GOOD`` → 1.0, ``NEEDS_ATTENTION`` → 0.5,
+        ``MUST_FIX`` → 0.0. Feeds the eval canary's ``cli_review_score``.
+        """
+
+        return 1.0 - self.rank / (len(_CLI_VERDICT_SEVERITY) - 1)
+
+    @property
+    def blocks_merge(self) -> bool:
+        """Whether this verdict should fail the cli-review commit status."""
+
+        return self is CliReviewVerdict.MUST_FIX
+
+    @classmethod
+    def coerce(cls, value: object) -> CliReviewVerdict | None:
+        """Best-effort ``str | enum | None`` → member. Never raises.
+
+        Returns ``None`` for anything that isn't one of the three keys, so
+        callers can fold unparseable / missing verdicts uniformly.
+        """
+
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)  # type: ignore[arg-type]
+        except ValueError:
+            return None
+
+    @classmethod
+    def worst_of(cls, verdicts: Iterable[object]) -> CliReviewVerdict | None:
+        """Highest-severity verdict among ``verdicts``.
+
+        Ignores unparseable / ``None`` entries (a reviewer that crashed or
+        drifted from the format). Returns ``None`` only when nothing parseable
+        is present. Used for worst-of-N across multiple reviewers
+        (``cli_reviewer="both"``) — any ``MUST_FIX`` wins.
+        """
+
+        members = [m for m in (cls.coerce(v) for v in verdicts) if m is not None]
+        if not members:
+            return None
+        return max(members, key=lambda m: m.rank)
+
+    @classmethod
+    def parse(cls, text: str | None) -> CliReviewVerdict | None:
+        """Extract the verdict key from the head of a CLI-review markdown.
+
+        The prompt pins ``<glyph> <KEY> — <justification>`` on line 1, but we
+        scan the first 10 lines defensively: the three keys are mutually
+        disjoint substrings, so a containment check is unambiguous even if the
+        agent prepends stray lines. (This 10-line window is wider than the old
+        ``cli_reviewer.parse_verdict`` 5-line scan — a deliberate, strictly-more-
+        lenient widening; lines 6–10 only ever matter for malformed output.)
+
+        Returns ``None`` for both *no text* and *text without a key* — callers
+        that need to tell those apart keep that branch at their own edge.
+        """
+
+        if not text:
+            return None
+        for line in text.lstrip().splitlines()[:10]:
+            for member in _CLI_VERDICT_SEVERITY:
+                if member.value in line:
+                    return member
+        return None
+
+
+# Severity order, low → high. The single source of truth that ``rank`` and
+# ``quality_score`` derive from.
+_CLI_VERDICT_SEVERITY: tuple[CliReviewVerdict, ...] = (
+    CliReviewVerdict.LOOKS_GOOD,
+    CliReviewVerdict.NEEDS_ATTENTION,
+    CliReviewVerdict.MUST_FIX,
+)
 
 
 class TerminalVerdict(str, Enum):

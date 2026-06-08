@@ -38,7 +38,7 @@ from typing import Any
 from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
-from .models import role_model_label
+from .models import CliReviewVerdict, role_model_label
 
 try:
     from rich.table import Table
@@ -2163,33 +2163,6 @@ def _render_cli_review_event(event: dict[str, Any]):
     return t
 
 
-_CLI_REVIEW_VERDICT_RANK = {
-    "MUST_FIX": 3,
-    "NEEDS_ATTENTION": 2,
-    "LOOKS_GOOD": 1,
-}
-
-
-def _aggregate_cli_review_verdict(verdicts: list[str | None]) -> str | None:
-    """Worst-case verdict across a multi-tool cli_review.
-
-    MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD. Drives the aggregate
-    footer glyph in `cli_reviewer="both"` runs — if either reviewer
-    says MUST_FIX the operator should see `✗`, not the rosier of the
-    two. Returns None when no verdict is in scope (every tool either
-    not done or didn't surface a key).
-    """
-
-    best_rank = 0
-    best_key: str | None = None
-    for v in verdicts:
-        rank = _CLI_REVIEW_VERDICT_RANK.get(v or "", 0)
-        if rank > best_rank:
-            best_rank = rank
-            best_key = v
-    return best_key
-
-
 def _derive_cli_review_states(
     guardrails: list[dict[str, Any]], choice: str
 ) -> list[tuple[str, str, str | None]]:
@@ -2919,8 +2892,8 @@ if _TEXTUAL_AVAILABLE:
             # footer glyph so `MUST_FIX` renders as `✗` instead of the
             # subprocess-exit-0 `✓`. Worst-case wins for `both`: if
             # either reviewer says MUST_FIX, the aggregate is MUST_FIX.
-            cli_review_verdict: str | None = _aggregate_cli_review_verdict(
-                [v for (_t, st, v) in cli_review_states if st == "completed"]
+            cli_review_verdict: str | None = CliReviewVerdict.worst_of(
+                v for (_t, st, v) in cli_review_states if st == "completed"
             )
 
             agent_turns = _text_event_count(agent_events)

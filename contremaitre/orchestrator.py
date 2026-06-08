@@ -48,6 +48,7 @@ from .jsonlog import append_jsonl, write_json
 from .manifest import build_manifest
 from .models import (
     ActorMode,
+    CliReviewVerdict,
     ParsedVerdict,
     ReviewVerdict,
     RunConfig,
@@ -652,7 +653,7 @@ class Orchestrator:
         # Surfaced as a payload field on the completion event so the TUI's
         # footer glyph reflects what the agent actually said, not just
         # whether the subprocess exited 0.
-        verdict = _cli_reviewer.parse_verdict(result.markdown)
+        verdict = CliReviewVerdict.parse(result.markdown)
         self._emit(
             events.CLI_REVIEW_COMPLETED,
             tool=tool,
@@ -682,7 +683,7 @@ class Orchestrator:
 
         from . import cli_reviewer as _cli_reviewer
 
-        worst = _cli_reviewer.worst_verdict([v for _, v in verdicts])
+        worst = CliReviewVerdict.worst_of(v for _, v in verdicts)
         if worst is None:
             # No reviewer produced a parseable verdict (all failed/drifted).
             # Skip rather than post a misleading success — branch protection

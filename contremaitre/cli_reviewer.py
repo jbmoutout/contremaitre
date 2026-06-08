@@ -493,27 +493,6 @@ def post_comment(
     return True, proc.stdout.strip()
 
 
-VERDICT_KEYS = ("MUST_FIX", "NEEDS_ATTENTION", "LOOKS_GOOD")
-
-
-def parse_verdict(markdown: str) -> str | None:
-    """Return the verdict key (MUST_FIX / NEEDS_ATTENTION / LOOKS_GOOD).
-
-    The prompt enforces `<glyph> <KEY> — <justification>` on line 1, so
-    the first non-blank line carries one of the three SCREAMING_SNAKE_CASE
-    keys. We scan a few extra lines defensively in case the agent prepends
-    stray whitespace — the verdict needs to be findable even if the agent
-    isn't 100% compliant with the format spec. The keys are mutually
-    disjoint substrings, so a containment check is unambiguous.
-    """
-
-    for line in markdown.lstrip().splitlines()[:5]:
-        for key in VERDICT_KEYS:
-            if key in line:
-                return key
-    return None
-
-
 # ---------- commit-status projection ----------
 #
 # The cli_review verdict is otherwise only visible as line 1 of a PR comment
@@ -528,24 +507,6 @@ def parse_verdict(markdown: str) -> str | None:
 
 # Stable context string so branch protection can require exactly this check.
 CLI_REVIEW_STATUS_CONTEXT = "contremaitre/cli-review"
-
-# Severity order: a higher rank is a worse verdict. Used for worst-of-N across
-# multiple reviewers (`cli_reviewer="both"`) — any MUST_FIX wins.
-_VERDICT_RANK = {"LOOKS_GOOD": 0, "NEEDS_ATTENTION": 1, "MUST_FIX": 2}
-
-
-def worst_verdict(verdicts: list[str | None]) -> str | None:
-    """Return the highest-severity verdict among `verdicts`.
-
-    Ignores `None` (a reviewer that failed or produced an unparseable
-    verdict). Returns `None` only when nothing parseable is present.
-    `MUST_FIX` > `NEEDS_ATTENTION` > `LOOKS_GOOD`.
-    """
-
-    ranked = [v for v in verdicts if v in _VERDICT_RANK]
-    if not ranked:
-        return None
-    return max(ranked, key=lambda v: _VERDICT_RANK[v])
 
 
 def verdict_commit_state(verdict: str | None) -> str:

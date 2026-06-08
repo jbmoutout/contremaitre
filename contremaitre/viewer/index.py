@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from ..costs import sum_token_usage
 from ..flow_use import compute_phases
+from ..models import CliReviewVerdict
 from ..paths import build_run_paths
 from . import VIEWER_FILENAME
 
@@ -206,14 +207,7 @@ def _classify_review_md(tool: str, path: Path, *, source: str) -> dict[str, Any]
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {"tool": tool, "verdict": None, "blocker": None, "source": source}
-    verdict: str | None = None
-    for line in text.splitlines()[:8]:
-        for key in ("MUST_FIX", "NEEDS_ATTENTION", "LOOKS_GOOD"):
-            if key in line:
-                verdict = key
-                break
-        if verdict:
-            break
+    verdict = CliReviewVerdict.parse(text)
     blocker = _classify_blocker(text) if verdict == "MUST_FIX" else None
     return {"tool": tool, "verdict": verdict, "blocker": blocker, "source": source}
 
@@ -615,15 +609,12 @@ def _pr_review_verdict(run_dir: Path) -> str | None:
     so the failure column reflects the strictest reviewer.
     """
 
-    order = {"LOOKS_GOOD": 1, "NEEDS_ATTENTION": 2, "MUST_FIX": 3}
-    worst: str | None = None
-    for event in _jsonl(run_dir / "guardrail_events.jsonl"):
-        if event.get("event") != "cli_review_completed":
-            continue
-        verdict = event.get("verdict")
-        if verdict in order and (worst is None or order[verdict] > order[worst]):
-            worst = verdict
-    return worst
+    verdicts = (
+        event.get("verdict")
+        for event in _jsonl(run_dir / "guardrail_events.jsonl")
+        if event.get("event") == "cli_review_completed"
+    )
+    return CliReviewVerdict.worst_of(verdicts)
 
 
 def _review_signals(run_dir: Path) -> dict[str, Any]:
