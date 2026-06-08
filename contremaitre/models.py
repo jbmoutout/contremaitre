@@ -217,9 +217,15 @@ class ModelSpec:
         other module ever has to know it existed."""
 
         if isinstance(obj, dict):
+            # Atomic record: read every stored field verbatim. `requested` is
+            # exactly what config asked, including "" for a claude account
+            # default — never coerce it (that would lose the canonical value and
+            # break the round-trip). An empty dict still falls back to "?" via
+            # the `or` (there is no persisted value to preserve).
+            requested = obj.get("requested")
             return cls(
                 runtime=obj.get("runtime") or "opencode",
-                requested=obj.get("requested") or "?",
+                requested=requested if isinstance(requested, str) else "?",
                 effort=obj.get("effort"),
                 resolved=obj.get("resolved"),
                 provider=obj.get("provider"),

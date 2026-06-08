@@ -158,6 +158,19 @@ def test_from_record_parses_legacy_slug():
     assert spec.canonical() == ("deepseek-v4-flash-free", "opencode")
 
 
+def test_from_record_preserves_empty_requested_verbatim():
+    # claude account-default persists requested="" — the dict reader must keep
+    # it verbatim, not coerce to "?", or the canonical value is lost and the
+    # round-trip breaks.
+    spec = ModelSpec(runtime="claude", requested="", effort="max")
+    back = ModelSpec.from_record(spec.to_dict())
+    assert back.requested == ""
+    assert back == spec
+    # Once resolved is stored, the round-trip still sharpens correctly.
+    sharp = spec.with_resolved("claude-sonnet-4-6")
+    assert ModelSpec.from_record(sharp.to_dict()) == sharp
+
+
 def test_from_record_handles_empty_and_none():
     for empty in (None, "", "?", {}):
         spec = ModelSpec.from_record(empty)
