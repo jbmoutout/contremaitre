@@ -3246,6 +3246,40 @@ def spawn_and_attach(
     return rc
 
 
+def _run_config_spec(d: dict[str, Any], role: str) -> ModelSpec:
+    """The role's `ModelSpec` from a `run_config.json` dict.
+
+    New runs persist the canonical dict under `agent_model`/`sim_model` → read
+    it straight back. Legacy run_configs stored the raw opencode slug there
+    (which a CLI role *ignores*) with runtime/tool/effort in sibling fields;
+    reconstruct from those structured fields via the `ModelSpec.build` factory
+    so a historical CLI run isn't mislabeled opencode. (This is not legacy
+    string-parsing — that lives solely in `from_record`; here we read atomic
+    config fields through the public factory.)
+    """
+
+    value = d.get(f"{role}_model")
+    if isinstance(value, dict):
+        return ModelSpec.from_record(value)
+    if d.get("actor_mode"):
+        if role == "agent":
+            mode = d.get("actor_mode")
+            tool = d.get("cli_tool", "codex")
+        else:
+            mode = d.get("sim_actor_mode") or d.get("actor_mode")
+            tool = d.get("sim_cli_tool") or d.get("cli_tool", "codex")
+        return ModelSpec.build(
+            mode=mode,
+            opencode_model=value or "?",
+            codex_model=d.get("codex_model", "gpt-5.5"),
+            codex_effort=d.get("codex_effort", "high"),
+            cli_tool=tool,
+            claude_model=d.get("claude_model", ""),
+            claude_effort=d.get("claude_effort", "high"),
+        )
+    return ModelSpec.from_record(value)
+
+
 def _read_run_models(
     run_dir: Path,
 ) -> tuple[ModelSpec, ModelSpec, str, str, str | None, str | None]:
@@ -3254,9 +3288,9 @@ def _read_run_models(
     Prefers `run_config.json` (written at orchestrator start — available
     immediately, even for attach against an in-flight run). Falls back to
     `stats.json` (terminal only) for older runs that pre-date the snapshot.
-    Model identity routes through `ModelSpec.from_record`, which absorbs both
-    the canonical dict and any legacy on-disk string — this reader never sees
-    the old shape.
+    Identity is reconstructed via `_run_config_spec` (new dict, legacy
+    structured fields) or `ModelSpec.from_record` (stats label/slug) — this
+    reader never parses a model string itself.
     """
 
     config = run_dir / "run_config.json"
@@ -3264,8 +3298,8 @@ def _read_run_models(
         try:
             d = json.loads(config.read_text(encoding="utf-8"))
             return (
-                ModelSpec.from_record(d.get("agent_model")),
-                ModelSpec.from_record(d.get("sim_model")),
+                _run_config_spec(d, "agent"),
+                _run_config_spec(d, "sim"),
                 d.get("cli_reviewer", "none"),
                 d.get("docker_image", "?"),
                 d.get("target_url"),

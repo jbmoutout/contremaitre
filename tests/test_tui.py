@@ -1750,6 +1750,62 @@ def test_read_run_models_tolerates_legacy_string_run_config(tmp_path):
     assert sim.canonical() == ("deepseek-v4-flash-free", "opencode")
 
 
+def test_read_run_models_reconstructs_legacy_cli_run_config(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    # Legacy run_config: agent_model/sim_model are the raw opencode slug a CLI
+    # role ignores, with runtime/tool/effort in sibling fields. Reconstruct via
+    # ModelSpec.build so the CLI roles aren't mislabeled opencode.
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": "opencode/deepseek-v4-flash-free",
+                "sim_model": "openrouter/qwen/qwen3-max",
+                "actor_mode": "cli",
+                "sim_actor_mode": "cli",
+                "cli_tool": "codex",
+                "sim_cli_tool": "claude",
+                "codex_model": "gpt-5.5",
+                "codex_effort": "high",
+                "claude_model": "opus",
+                "claude_effort": "max",
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, *_ = _read_run_models(tmp_path)
+    assert agent.canonical() == ("gpt-5.5", "codex")
+    assert agent.display() == "codex/gpt-5.5 high"
+    assert sim.canonical() == ("opus", "claude")
+    assert sim.display() == "claude/opus max"
+
+
+def test_read_run_models_legacy_opencode_run_config_stays_opencode(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    # A legacy opencode run_config reconstructs to the slug identity, not a
+    # spurious CLI label.
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": "openrouter/deepseek/deepseek-v4-flash",
+                "sim_model": "opencode/big-pickle",
+                "actor_mode": "opencode",
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, *_ = _read_run_models(tmp_path)
+    assert agent.canonical() == ("deepseek-v4-flash", "opencode")
+    assert sim.canonical() == ("big-pickle", "opencode")
+
+
 # ===== claude footer usage (statusLine rate-limit indicator) =====
 
 
