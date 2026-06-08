@@ -238,9 +238,12 @@ POST-PUBLISH CLI REVIEW LOOP  (only when --cli-reviewer != none)
         worst verdict projected as commit status → success
     - NEEDS_ATTENTION or MUST_FIX: extract `## Required changes` numbered list,
         send cli_revision_followup() (tagged [CLI]) to agent on same branch,
-        require a fresh IMPLEMENTATION_COMPLETE marker, commit, rerun L1 checks,
-        rerun deterministic L0 gates (diff scan, clean worktree, diff hash stable
-        across checks), push HEAD → branch only if all pass, then next round
+        require a fresh IMPLEMENTATION_COMPLETE marker, commit, rerun L1 checks
+        (every --check-cmd in the sidecar container), rerun L0 gates: diff_scan
+        (forbidden paths), diff_hash_matched (hash stable across checks),
+        clean_worktree (git status clean except .contremaitre/*), draft_only
+        (always passes post-publish); push HEAD → branch only if all pass,
+        then next round
     - revision gate or push failure after publication → PR_NEEDS_HUMAN;
         existing PR remains published for human follow-up
     - max_cli_review_rounds exhausted without all-LOOKS_GOOD → PR_NEEDS_HUMAN;
@@ -252,7 +255,9 @@ POST-PUBLISH CLI REVIEW LOOP  (only when --cli-reviewer != none)
         Checks API would need a GitHub App). Require the context in branch
         protection to gate merge on it.
 
-  Verdict format (line 1 of the review): KEY — one-sentence justification
+  Verdict format: prompt enforces `<glyph> KEY — one-sentence justification`
+    on line 1 of the markdown output. Parser scans the first 5 lines
+    defensively (containment check, in case the agent prepends stray text):
     LOOKS_GOOD       → loop done
     NEEDS_ATTENTION  → revision triggered
     MUST_FIX         → revision triggered
