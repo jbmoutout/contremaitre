@@ -40,13 +40,10 @@
 
   const cost = stats.cost_usd != null ? "$" + Number(stats.cost_usd).toFixed(4) : "—";
   const verdictTier = verdict === "READY_FOR_DRAFT_PR" ? "tier-green"
+                   : verdict === "PR_NEEDS_HUMAN"    ? "tier-yellow"
                    : verdict === "FAILED_INFRA"        ? "tier-red"
                    : verdict.startsWith("NO_PR")       ? "tier-yellow"
                                                        : "tier-unknown";
-
-  const extraModelChip = stats.extra_reviewer_model
-    ? `<span class="item">extra <b>${esc(stats.extra_reviewer_model.split("/").pop())}</b></span>`
-    : "";
 
   // Post-publish CLI review chip — only when the run actually ran one.
   // Tier matches the agent's verdict key (LOOKS_GOOD → green,
@@ -101,7 +98,6 @@
     <span class="item"><b>${fmt(stats.n_tool_uses)}</b> tool uses</span>
     <span class="item"><b>${fmt(stats.subagent_count)}</b> sub-agents</span>
     <span class="item"><b>${fmt(stats.files_written_count)}</b> files written</span>
-    ${extraModelChip}
     ${cliChip}
     ${cliExtraChips}
   `;

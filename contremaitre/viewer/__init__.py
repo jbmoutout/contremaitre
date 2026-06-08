@@ -77,10 +77,7 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     agent_summary = _summarize_events(agent_events)
     sim_summary = _summarize_events(sim_events)
 
-    timeline = (
-        _build_timeline(agent_events, "agent")
-        + _build_timeline(sim_events, "sim")
-    )
+    timeline = _build_timeline(agent_events, "agent") + _build_timeline(sim_events, "sim")
     timeline.sort(key=lambda e: e.get("timestamp") or 0)
 
     chat = _build_chat(agent_events, sim_events)
@@ -226,12 +223,13 @@ def _assemble_cli_review(
 def _assemble_cli_review_extras(paths: RunPaths) -> list[dict[str, Any]]:
     """Collect every `cli_review_extra` rerun under `<run_dir>/extras/`.
 
-    Each extra was produced by `contremaitre.cli_review_extra.run_extra` and
-    lives in `extras/cli_review_<NNN>/` next to a `summary.json` (parseable
-    metadata) and `review.md` (assembled body with the `### reviewed by …`
-    header). Returns one dict per extra in index order, shape mirrors
-    `_assemble_cli_review` plus a `source` label like `extra-001` so the
-    renderer can distinguish them from the orchestrator's original.
+    Supports two provenance shapes:
+      - `cli_review_extra`: `summary.json` + `review.md`
+      - orchestrator loop rounds: `<tool>_review.md` + `<tool>_raw_export.jsonl`
+
+    Returns one dict per artifact in index order. Shape mirrors
+    `_assemble_cli_review` plus a `source` label so the renderer can
+    distinguish it from the latest root-level reviewer copy.
     """
 
     extras_root = paths.run_dir / "extras"
@@ -241,6 +239,32 @@ def _assemble_cli_review_extras(paths: RunPaths) -> list[dict[str, Any]]:
     for extra_dir in sorted(extras_root.iterdir()):
         if not extra_dir.is_dir() or not extra_dir.name.startswith("cli_review_"):
             continue
+        round_label = extra_dir.name.replace("cli_review_", "round-")
+        for review_md_path in sorted(extra_dir.glob("*_review.md")):
+            tool = review_md_path.name.removesuffix("_review.md")
+            if tool not in ("codex", "claude"):
+                continue
+            try:
+                markdown = review_md_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                markdown = ""
+            from ..cli_reviewer import extract_model, parse_verdict
+
+            sink = extra_dir / f"{tool}_raw_export.jsonl"
+            out.append(
+                {
+                    "tool": tool,
+                    "source": f"{round_label}-{tool}",
+                    "status": "completed" if markdown else "failed",
+                    "verdict": parse_verdict(markdown) if markdown else None,
+                    "duration_s": None,
+                    "model": extract_model(tool, sink) if sink.is_file() else None,
+                    "url": None,
+                    "markdown": markdown,
+                    "fail_reason": None if markdown else "missing review body",
+                    "posted_to_pr": None,
+                }
+            )
         summary_path = extra_dir / "summary.json"
         review_md_path = extra_dir / "review.md"
         if not summary_path.is_file():

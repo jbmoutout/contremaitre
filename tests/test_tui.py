@@ -284,8 +284,8 @@ def test_derive_phase_done_ok_for_ready_for_draft_pr():
     assert color == "ok"
 
 
-def test_derive_phase_done_warn_for_no_pr_variants():
-    for verdict in ("NO_PR_CHANGES_REQUESTED", "NO_PR_NEEDS_HUMAN"):
+def test_derive_phase_done_warn_for_published_human_and_no_pr_variants():
+    for verdict in ("PR_NEEDS_HUMAN", "NO_PR_CHANGES_REQUESTED", "NO_PR_NEEDS_HUMAN"):
         phase, color = _derive_phase(
             terminal=True,
             terminal_verdict=verdict,
@@ -453,43 +453,28 @@ def test_reviewer_status_idle_when_no_start():
 
 def test_reviewer_status_streaming_when_started_no_verdict():
     guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=[], guardrails=guardrails)
-        == "streaming"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=[], guardrails=guardrails) == "streaming"
 
 
 def test_reviewer_status_approved():
     cycles = [{"round": 1, "verdict": "APPROVED", "reviewer": "sim"}]
     guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails)
-        == "approved"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails) == "approved"
 
 
 def test_reviewer_status_changes_req():
     cycles = [{"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"}]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[])
-        == "changes_req"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[]) == "changes_req"
 
 
 def test_reviewer_status_needs_human():
     cycles = [{"round": 1, "verdict": "NEEDS_HUMAN", "reviewer": "sim"}]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[])
-        == "needs_human"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[]) == "needs_human"
 
 
 def test_reviewer_status_unavailable():
     cycles = [{"round": 1, "reviewer": "sim", "unavailable": True}]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[])
-        == "unavailable"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[]) == "unavailable"
 
 
 def test_reviewer_status_per_round_independence():
@@ -502,15 +487,9 @@ def test_reviewer_status_per_round_independence():
         _g(events.OPENCODE_ACTOR_START, role="agent"),  # work loop
         _g(events.OPENCODE_ACTOR_START, role="review"),  # round 2 — streaming
     ]
-    assert (
-        _reviewer_status(round_n=2, review_cycles=cycles, guardrails=guardrails)
-        == "streaming"
-    )
+    assert _reviewer_status(round_n=2, review_cycles=cycles, guardrails=guardrails) == "streaming"
     # Round 1 verdict is still recoverable for prior-round inspection.
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails)
-        == "changes_req"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails) == "changes_req"
 
 
 # ===== _reviewer_glyph =====
@@ -672,6 +651,20 @@ def test_phase_label_done_pr_pushed_with_title_appended():
     assert "1234" not in text.plain  # number still belongs to verdict zone
 
 
+def test_phase_label_done_pr_needs_human_keeps_title_and_review_tail():
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="done",
+            terminal_verdict="PR_NEEDS_HUMAN",
+            pr_title="fix: harden cli review loop",
+            cli_review_states=[("codex", "completed", "MUST_FIX")],
+        )
+    )
+    assert "PR needs human" in text.plain
+    assert "fix: harden cli review loop" in text.plain
+    assert "CODEX Review" in text.plain
+
+
 def test_phase_label_done_truncates_long_pr_title():
     long_title = "refactor: extract authentication subsystem into its own bounded context with explicit boundaries"
     text = _current_phase_label(
@@ -778,6 +771,12 @@ def test_terminal_badge_pr_pushed_with_number():
 def test_terminal_badge_pr_pushed_no_number():
     text, _ = _terminal_badge("READY_FOR_DRAFT_PR", None)
     assert text == "PR PUSHED"
+
+
+def test_terminal_badge_pr_needs_human_with_number():
+    text, _ = _terminal_badge("PR_NEEDS_HUMAN", 1234)
+    assert "PR NEEDS HUMAN" in text
+    assert "1234" in text
 
 
 def test_terminal_badge_no_pr_changes_req():
@@ -1266,6 +1265,16 @@ def test_derive_cli_review_states_single_tool_returns_single_entry():
     assert _derive_cli_review_states(guardrails, "claude") == [
         ("claude", "completed", "NEEDS_ATTENTION")
     ]
+
+
+def test_derive_cli_review_states_latest_round_wins():
+    guardrails = [
+        _g(events.CLI_REVIEW_STARTED, tool="codex", round=1),
+        _g(events.CLI_REVIEW_COMPLETED, tool="codex", round=1, verdict="MUST_FIX"),
+        _g(events.CLI_REVIEW_STARTED, tool="codex", round=2),
+    ]
+
+    assert _derive_cli_review_states(guardrails, "codex") == [("codex", "streaming", None)]
 
 
 def test_review_status_tail_renders_two_tool_glyphs_for_both():

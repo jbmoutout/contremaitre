@@ -128,6 +128,47 @@ class ViewerTest(unittest.TestCase):
         # not corrupt the data the renderer reads.
         _extract_data_payload(html)
 
+    def test_surfaces_per_round_cli_review_artifacts(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("cli-round"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "PR_NEEDS_HUMAN"})
+        extras_dir = paths.run_dir / "extras" / "cli_review_001"
+        extras_dir.mkdir(parents=True)
+        (extras_dir / "codex_review.md").write_text(
+            "### reviewed by `codex`\n\n"
+            "MUST_FIX - blocking issue\n\n"
+            "**issue:** README.md:1 needs an update.\n",
+            encoding="utf-8",
+        )
+        (extras_dir / "codex_raw_export.jsonl").write_text(
+            '{"type":"text","part":{"text":"model: gpt-5.5"}}\n',
+            encoding="utf-8",
+        )
+
+        html = build_viewer(paths).read_text(encoding="utf-8")
+        data = _extract_data_payload(html)
+
+        self.assertIn(
+            {
+                "tool": "codex",
+                "source": "round-001-codex",
+                "status": "completed",
+                "verdict": "MUST_FIX",
+                "duration_s": None,
+                "model": "gpt-5.5",
+                "url": None,
+                "markdown": "### reviewed by `codex`\n\n"
+                "MUST_FIX - blocking issue\n\n"
+                "**issue:** README.md:1 needs an update.\n",
+                "fail_reason": None,
+                "posted_to_pr": None,
+            },
+            data["cli_review_extras"],
+        )
+
 
 class CodexNormalizationTest(unittest.TestCase):
     """codex `exec --json` streams must surface in the chat like opencode's.

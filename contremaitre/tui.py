@@ -387,7 +387,7 @@ def _derive_phase(
     colour and reflects how the run is doing at the current phase:
       - live  — running; current dot bold-bright white
       - ok    — terminal success (READY_FOR_DRAFT_PR); current dot green
-      - warn  — terminal NO_PR_*; current dot yellow
+      - warn  — terminal PR_NEEDS_HUMAN / NO_PR_*; current dot yellow
       - error — terminal FAILED_INFRA; current dot red, trail frozen at
                 the last active phase (not advanced to "done") so the
                 operator can see where the run died.
@@ -403,7 +403,11 @@ def _derive_phase(
             if cli_review_started and not cli_review_completed:
                 return ("done", "warn") if cli_review_failed else ("done", "ok")
             return ("done", "ok")
-        if terminal_verdict in ("NO_PR_CHANGES_REQUESTED", "NO_PR_NEEDS_HUMAN"):
+        if terminal_verdict in (
+            "PR_NEEDS_HUMAN",
+            "NO_PR_CHANGES_REQUESTED",
+            "NO_PR_NEEDS_HUMAN",
+        ):
             return ("done", "warn")
         # FAILED_INFRA (or unknown) — freeze trail at last active phase.
         if cli_review_started:
@@ -474,9 +478,7 @@ def _verdict_glyph(verdict: str | None) -> tuple[str, str]:
     return "·", _PAL_DIM
 
 
-def _round_verdict(
-    review_cycles: list[dict[str, Any]], round_n: int
-) -> str | None:
+def _round_verdict(review_cycles: list[dict[str, Any]], round_n: int) -> str | None:
     """SIM verdict for the given round, or None."""
 
     return next(
@@ -497,8 +499,7 @@ def _current_review_round(guardrails: list[dict[str, Any]]) -> int:
     return sum(
         1
         for g in guardrails
-        if g.get("event") == "opencode_actor_start"
-        and g.get("role") == "review"
+        if g.get("event") == "opencode_actor_start" and g.get("role") == "review"
     )
 
 
@@ -644,9 +645,9 @@ def _current_phase_label(
 ) -> Text:
     """Phase name + sub-info (right of the trail).
 
-    Terminal labels for non-success states (NO_PR_*, FAILED) explain
-    *why* the run ended so the operator doesn't have to also read the
-    verdict zone. For READY_FOR_DRAFT_PR the label is just `Done` —
+    Terminal labels for non-success states (PR_NEEDS_HUMAN, NO_PR_*,
+    FAILED) explain *why* the run ended so the operator doesn't have to
+    also read the verdict zone. For READY_FOR_DRAFT_PR the label is just `Done` —
     the verdict zone's bold `PR PUSHED #N` already carries that info,
     so duplicating it here would be noise.
     """
@@ -765,6 +766,21 @@ def _current_phase_label(
                 cli_review_states=cli_review_states,
             )
         )
+    elif terminal_verdict == "PR_NEEDS_HUMAN":
+        text.append("Done — PR needs human", style=f"bold {_PAL_WARN}")
+        trimmed = _truncate_pr_title(pr_title)
+        if trimmed:
+            text.append(" · ", style=_PAL_VDIM)
+            text.append(trimmed, style=_PAL_TEXT)
+        text.append(
+            _review_status_tail(
+                sim_review_statuses=sim_review_statuses or [],
+                cli_review_status=cli_review_status,
+                cli_review_tool=cli_review_tool,
+                cli_review_verdict=cli_review_verdict,
+                cli_review_states=cli_review_states,
+            )
+        )
     elif terminal_verdict == "NO_PR_CHANGES_REQUESTED":
         text.append("Reviewing — changes_req (exhausted)", style=f"bold {_PAL_WARN}")
     elif terminal_verdict == "NO_PR_NEEDS_HUMAN":
@@ -853,6 +869,9 @@ def _terminal_badge(
     if verdict == "READY_FOR_DRAFT_PR":
         label = f"PR PUSHED #{pr_number}" if pr_number is not None else "PR PUSHED"
         return label, f"bold {_PAL_SUCCESS}"
+    if verdict == "PR_NEEDS_HUMAN":
+        label = f"PR NEEDS HUMAN #{pr_number}" if pr_number is not None else "PR NEEDS HUMAN"
+        return label, f"bold {_PAL_WARN}"
     if verdict == "NO_PR_CHANGES_REQUESTED":
         return "NO_PR · changes_req", f"bold {_PAL_WARN}"
     if verdict == "NO_PR_NEEDS_HUMAN":
@@ -2130,21 +2149,32 @@ def _derive_cli_review_states(
         return []
     out: list[tuple[str, str, str | None]] = []
     for tool in tools:
-        started = any(
-            g.get("event") == "cli_review_started" and g.get("tool") == tool for g in guardrails
+        started_evt = next(
+            (
+                g
+                for g in reversed(guardrails)
+                if g.get("event") == "cli_review_started" and g.get("tool") == tool
+            ),
+            None,
         )
-        if not started:
+        if started_evt is None:
             continue
+        round_n = started_evt.get("round")
         completed_evt = next(
             (
                 g
-                for g in guardrails
-                if g.get("event") == "cli_review_completed" and g.get("tool") == tool
+                for g in reversed(guardrails)
+                if g.get("event") == "cli_review_completed"
+                and g.get("tool") == tool
+                and (round_n is None or g.get("round") == round_n)
             ),
             None,
         )
         failed = any(
-            g.get("event") == "cli_review_failed" and g.get("tool") == tool for g in guardrails
+            g.get("event") == "cli_review_failed"
+            and g.get("tool") == tool
+            and (round_n is None or g.get("round") == round_n)
+            for g in guardrails
         )
         if failed:
             status = "failed"
@@ -2454,7 +2484,12 @@ if _TEXTUAL_AVAILABLE:
             with Horizontal(id="panes"):
                 with Vertical(classes="pane", id="agent-pane"):
                     yield RichLog(
-                        id="agent-log", auto_scroll=False, markup=False, wrap=True, highlight=False, can_focus=False
+                        id="agent-log",
+                        auto_scroll=False,
+                        markup=False,
+                        wrap=True,
+                        highlight=False,
+                        can_focus=False,
                     )
                     yield Static("", classes="pane-sub", id="agent-sub")
                 with Vertical(id="sim-column"):
@@ -2485,7 +2520,12 @@ if _TEXTUAL_AVAILABLE:
                 yield Static("", classes="pane-sub", id="cli-review-sub")
             with Vertical(id="activity-panel"):
                 yield RichLog(
-                    id="activity-log", auto_scroll=False, markup=False, wrap=True, highlight=False, can_focus=False
+                    id="activity-log",
+                    auto_scroll=False,
+                    markup=False,
+                    wrap=True,
+                    highlight=False,
+                    can_focus=False,
                 )
             with Horizontal(id="footer-bar"):
                 yield Static("", id="footer-left")
@@ -2643,8 +2683,7 @@ if _TEXTUAL_AVAILABLE:
             sim_starts = [
                 e
                 for e in guardrails
-                if e.get("event") == "opencode_actor_start"
-                and e.get("role") in ("sim", "review")
+                if e.get("event") == "opencode_actor_start" and e.get("role") in ("sim", "review")
             ]
             agent_widget = self.query_one("#agent-log", RichLog)
             sim_widget = self.query_one("#sim-log", RichLog)
@@ -2819,12 +2858,9 @@ if _TEXTUAL_AVAILABLE:
             # Tick the spinner only while at least one pane is non-idle;
             # otherwise a finished run would keep visually animating
             # forever, which contradicts the elapsed-freeze policy below.
-            # The extra reviewer feeds the tick too so its pane animates
-            # while the SIM is idle (otherwise the thinking loader on the
-            # extra pane would freeze). Same for the post-publish CLI
-            # review pane — it activates after every other pane has gone
-            # idle, so without feeding the tick the loader would never
-            # animate during the only window it actually runs in.
+            # The post-publish CLI review pane activates after every other
+            # pane has gone idle, so it feeds the tick too; otherwise its
+            # loader would never animate during the only window it runs in.
             cli_review_file_age: float | None = None
             if self.cli_reviewer in ("codex", "claude"):
                 cli_review_file_age = _file_age(
@@ -2834,11 +2870,7 @@ if _TEXTUAL_AVAILABLE:
                 container_present=False,
                 file_age=cli_review_file_age,
             )
-            if (
-                agent_state != "idle"
-                or sim_state != "idle"
-                or cli_review_running_state != "idle"
-            ):
+            if agent_state != "idle" or sim_state != "idle" or cli_review_running_state != "idle":
                 self._spin_tick = (self._spin_tick + 1) % len(_SPINNER_FRAMES)
             spinner = _SPINNER_FRAMES[self._spin_tick]
 

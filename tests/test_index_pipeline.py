@@ -20,6 +20,7 @@ from contremaitre.viewer.index import (
     _pipeline_run_metrics,
     _pr_review_verdict,
     _review_signals,
+    _verdict_tier,
 )
 
 
@@ -265,6 +266,17 @@ def test_pipeline_run_metrics_marks_infra_failures(tmp_path):
         m = _pipeline_run_metrics(runs / rid)
         assert m["infra"] is True
         assert "turns" not in m  # metric extraction skipped
+
+
+def test_pr_needs_human_is_published_warning_for_index_metrics(tmp_path):
+    runs = tmp_path / "runs"
+    _make_run(runs, "20260101-000005-run", agent="prov/a", sim="prov/b", verdict="PR_NEEDS_HUMAN")
+
+    metrics = _pipeline_run_metrics(runs / "20260101-000005-run")
+
+    assert _verdict_tier("PR_NEEDS_HUMAN") == "tier-yellow"
+    assert metrics["infra"] is False
+    assert metrics["lands_pr"] is True
 
 
 def test_collect_pairings_excludes_infra_from_rates(tmp_path):

@@ -82,7 +82,6 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "when": _format_when(run_dir.name),
         "agent_model": _short_model(stats.get("agent_model")),
         "sim_model": _short_model(stats.get("sim_model")),
-        "extra_model": _short_model(stats.get("extra_reviewer_model")),
         "repo": repo,
         "base": base,
         "verdict": stats.get("verdict") or "?",
@@ -151,6 +150,7 @@ def _read_cli_reviews(run_dir: Path) -> list[dict[str, Any]]:
     Three provenance shapes are surfaced:
       - orchestrator-published: `<tool>_review.md` next to the run's other
         artifacts (the cli_reviewer post-publish step).
+      - orchestrator loop rounds: `extras/cli_review_<NNN>/<tool>_review.md`.
       - extras from `cli_review_extra`: `extras/cli_review_<NNN>/review.md`
         with sibling `summary.json` carrying the tool name. Source labelled
         `extra-NNN` so the user can tell N reruns apart in the badge.
@@ -172,6 +172,13 @@ def _read_cli_reviews(run_dir: Path) -> list[dict[str, Any]]:
         for extra_dir in sorted(extras_root.iterdir()):
             if not extra_dir.is_dir():
                 continue
+            round_label = extra_dir.name.replace("cli_review_", "round-")
+            for review_md in sorted(extra_dir.glob("*_review.md")):
+                tool = review_md.name.removesuffix("_review.md")
+                if tool in ("codex", "claude"):
+                    reviews.append(
+                        _classify_review_md(tool, review_md, source=f"{round_label}-{tool}")
+                    )
             review_md = extra_dir / "review.md"
             if not review_md.is_file():
                 continue
@@ -375,6 +382,7 @@ def _read_json(path: Path, *, default: Any) -> Any:
 
 _TIER_BY_VERDICT = {
     "READY_FOR_DRAFT_PR": "tier-green",
+    "PR_NEEDS_HUMAN": "tier-yellow",
     "FAILED_INFRA": "tier-red",
 }
 
@@ -627,17 +635,16 @@ def _pr_review_verdict(run_dir: Path) -> str | None:
 
 
 def _review_signals(run_dir: Path) -> dict[str, Any]:
-    """SIM/extra review signals from `review_cycles.jsonl` for one run.
+    """SIM review signals from `review_cycles.jsonl` for one run.
 
     `sim_rounds` is the highest round the primary reviewer reached;
-    `sim_changes` / `extra_changes` record whether that reviewer ever
-    bounced the diff (returned a non-APPROVED verdict). Each is None when
-    the reviewer produced no verdict row — the run never reached review, or
-    no extra reviewer was configured — so coverage stays honest.
+    `sim_changes` records whether the reviewer ever bounced the diff
+    (returned a non-APPROVED verdict). It is None when the reviewer produced
+    no verdict row, so coverage stays honest for runs that never reached
+    review.
     """
 
     sim_verdicts: list[str] = []
-    extra_verdicts: list[str] = []
     sim_rounds = 0
     for row in _jsonl(run_dir / "review_cycles.jsonl"):
         if row.get("unavailable"):
@@ -648,12 +655,9 @@ def _review_signals(run_dir: Path) -> dict[str, Any]:
         if row.get("reviewer") == "sim":
             sim_verdicts.append(verdict)
             sim_rounds = max(sim_rounds, int(row.get("round") or 0))
-        elif row.get("reviewer") == "extra":
-            extra_verdicts.append(verdict)
     return {
         "sim_rounds": sim_rounds or None,
         "sim_changes": (any(v != "APPROVED" for v in sim_verdicts) if sim_verdicts else None),
-        "extra_changes": (any(v != "APPROVED" for v in extra_verdicts) if extra_verdicts else None),
     }
 
 
@@ -703,15 +707,13 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
         "sim": sim,
         "sim_rt": sim_rt,
         "infra": False,
-        "extra_configured": bool(stats.get("extra_reviewer_model")),
-        "lands_pr": _verdict_tier(str(stats.get("verdict") or "")) == "tier-green",
+        "lands_pr": str(stats.get("verdict") or "") in {"READY_FOR_DRAFT_PR", "PR_NEEDS_HUMAN"},
         "turns": stats.get("turns"),
         "duration": stats.get("duration_seconds"),
         "design_rounds": phases.get("grilling_exchanges"),
         "impl_turns": phases.get("impl_turns"),
         "sim_rounds": review["sim_rounds"],
         "sim_changes": review["sim_changes"],
-        "extra_changes": review["extra_changes"],
         "pr_review_fail": (pr_verdict == "MUST_FIX") if pr_verdict else None,
         "ins": loc[0] if loc else None,
         "dele": loc[1] if loc else None,
@@ -788,8 +790,6 @@ def _collect_pipeline_pairings(runs_root: Path) -> list[dict[str, Any]]:
                 "duration": _avg(real, "duration"),
                 "sim_rounds": _avg(real, "sim_rounds"),
                 "sim_changes": _rate(real, "sim_changes"),
-                "extra_changes": _rate(real, "extra_changes"),
-                "extra_any": any(r["extra_configured"] for r in real),
                 "pr_fail": _rate(real, "pr_review_fail"),
                 "ins": ins,
                 "dele": dele,
@@ -965,16 +965,6 @@ def _render_pipeline_table(
             f"{_model_html(p['sim'], p['sim_rt'])}"
         )
         land_tier = _rate_tier(p["pr_land"])
-        extra_cell = (
-            _cell(
-                p["extra_changes"],
-                _fmt_pct(p["extra_changes"]),
-                n,
-                sev=_sev_class(p["extra_changes"], 0.3, 0.6),
-            )
-            if p["extra_any"]
-            else '<td class="num cell"><span class="muted">n/a</span></td>'
-        )
         pr_fail_text = _fmt_pct(p["pr_fail"])
         if (p["pr_fail"][0] or 0) >= 0.5:
             pr_fail_text += " ⚠"
@@ -1015,7 +1005,6 @@ def _render_pipeline_table(
                 n,
                 sev=_sev_class(p["sim_changes"], 0.3, 0.6),
             )
-            + extra_cell
             + _cell(p["pr_fail"], pr_fail_text, n, sev=_sev_class(p["pr_fail"], 0.25, 0.5))
             # code output
             + _cell(p["ins"], "+" + _fmt_num(p["ins"], 0), n, group=True)
@@ -1078,7 +1067,6 @@ def _render_pipeline_table(
         <th class="num" title="wall-clock duration">dur</th>
         <th class="num grp-start" title="highest SIM review round reached">sim r</th>
         <th class="num" title="% of reviewed runs SIM requested changes at least once">sim Δ</th>
-        <th class="num" title="% of runs the extra reviewer requested changes">extra Δ</th>
         <th class="num" title="% of reviewed runs the post-publish CLI review said MUST_FIX">PR fail</th>
         <th class="num grp-start" title="avg lines inserted (net diff)">+LoC</th>
         <th class="num" title="avg lines deleted (net diff)">−LoC</th>
@@ -1134,8 +1122,8 @@ def _render_body(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
     legend = """
 <div class="legend">
   <div class="legend-title">columns</div>
-  <b>verdict</b> · the orchestrator's terminal verdict (READY_FOR_DRAFT_PR / NO_PR_* / FAILED_INFRA).
-  <b>models</b> · agent / sim / extra-reviewer (provider prefix stripped).
+  <b>verdict</b> · the orchestrator's terminal verdict (READY_FOR_DRAFT_PR / PR_NEEDS_HUMAN / NO_PR_* / FAILED_INFRA).
+  <b>models</b> · agent / sim (provider prefix stripped).
   <b>PR</b> · published PR title + link, or the kind if no PR (NO_PR, DRY_RUN, …).
   Click any row to open that run's <code>viewer.html</code>.
 </div>
@@ -1200,10 +1188,6 @@ def _render_row(r: dict[str, Any]) -> str:
     if r["sim_model"]:
         models_bits.append(
             f'<span style="color:var(--sim)">sim</span> <code>{_escape(r["sim_model"])}</code>'
-        )
-    if r["extra_model"]:
-        models_bits.append(
-            f'<span style="color:var(--extra)">extra</span> <code>{_escape(r["extra_model"])}</code>'
         )
     # One badge per cli_review on disk (orchestrator + any cli_review_extra
     # passes). Side-by-side display lets A1's cross-reviewer comparison read
