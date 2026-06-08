@@ -275,9 +275,7 @@ class BuildPromptTest(unittest.TestCase):
     def test_inlines_diff_not_path(self):
         # The diff is inlined as given data so the model reasons about it
         # directly rather than reading it from a mounted file.
-        prompt = cli_reviewer.build_prompt(
-            pr_url="https://github.com/x/y/pull/42", diff=_FAKE_DIFF
-        )
+        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/42", diff=_FAKE_DIFF)
         self.assertIn(_FAKE_DIFF, prompt)
         self.assertNotIn("/review/diff.patch", prompt)
         self.assertNotIn("/app", prompt)
