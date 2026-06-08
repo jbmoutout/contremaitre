@@ -2084,7 +2084,6 @@ def _render_event(event: dict[str, Any]):
     return t
 
 
-
 _CLI_REVIEW_VERDICT_RANK = {
     "MUST_FIX": 3,
     "NEEDS_ATTENTION": 2,
