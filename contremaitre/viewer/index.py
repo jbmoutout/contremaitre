@@ -614,12 +614,14 @@ def _diffstat_loc(run_dir: Path) -> tuple[int, int] | None:
 
 
 def _pr_review_verdict(run_dir: Path) -> str | None:
-    """Worst post-publish CLI-review verdict, or None if no review ran.
+    """Worst post-publish CLI-review verdict across all rounds, or None if no review ran.
 
     Read from the structured `cli_review_completed` guardrail event rather
-    than scraping `<tool>_review.md`. With `--cli-reviewer both` there are
-    two events; we keep the worst (MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD)
-    so the failure column reflects the strictest reviewer.
+    than scraping `<tool>_review.md`. One event is emitted per completed round
+    (only for parseable verdicts); we keep the worst across all rounds
+    (MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD) so the pipeline column reflects
+    the most severe finding. None verdicts (old-format runs from before the
+    event-ordering fix) are skipped via the `in order` guard.
     """
 
     order = {"LOOKS_GOOD": 1, "NEEDS_ATTENTION": 2, "MUST_FIX": 3}
