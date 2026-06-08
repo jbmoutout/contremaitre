@@ -8,8 +8,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - uses: astral-sh/setup-uv@v8.1.0
         with:
@@ -22,7 +26,17 @@ jobs:
         run: uv run ruff check .
 
       - name: Format
-        run: uv run ruff format --check .
+        run: |
+          uv run ruff format .
+          if git diff --quiet; then exit 0; fi
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Formatting changes detected on non-PR event — commit formatted files."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "style: ruff format"
+          git push
 
       - name: Test
         run: uv run --with pytest pytest tests/ -q
