@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import cli_reviewer
+from .models import CliReviewVerdict
 from .jsonlog import append_jsonl, utc_ts
 
 
@@ -157,7 +158,7 @@ def run_extra(
                 "exit_code": result.exit_code,
                 "duration_s": round(duration_s, 1),
                 "review_chars": len(result.markdown),
-                "verdict": cli_reviewer.parse_verdict(result.markdown),
+                "verdict": CliReviewVerdict.parse(result.markdown),
                 "error": result.error,
             }
         )

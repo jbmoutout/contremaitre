@@ -56,8 +56,8 @@ from contremaitre.tui import (
     _verdict_glyph,
     _warnings_token,
 )
+from contremaitre.models import CliReviewVerdict
 from contremaitre.tui import (
-    _aggregate_cli_review_verdict,
     _cli_review_tool_header,
     _derive_cli_review_states,
     _review_status_tail,
@@ -1299,20 +1299,20 @@ def test_aggregate_verdict_picks_worst():
     # MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD. If either reviewer
     # found a blocker the operator must see `MUST_FIX` in the footer,
     # not the rosier of the two.
-    assert _aggregate_cli_review_verdict(["LOOKS_GOOD", "MUST_FIX"]) == "MUST_FIX"
-    assert _aggregate_cli_review_verdict(["NEEDS_ATTENTION", "LOOKS_GOOD"]) == "NEEDS_ATTENTION"
-    assert _aggregate_cli_review_verdict(["LOOKS_GOOD", "LOOKS_GOOD"]) == "LOOKS_GOOD"
+    assert CliReviewVerdict.worst_of(["LOOKS_GOOD", "MUST_FIX"]) == "MUST_FIX"
+    assert CliReviewVerdict.worst_of(["NEEDS_ATTENTION", "LOOKS_GOOD"]) == "NEEDS_ATTENTION"
+    assert CliReviewVerdict.worst_of(["LOOKS_GOOD", "LOOKS_GOOD"]) == "LOOKS_GOOD"
 
 
 def test_aggregate_verdict_empty_is_none():
-    assert _aggregate_cli_review_verdict([]) is None
-    assert _aggregate_cli_review_verdict([None, None]) is None
+    assert CliReviewVerdict.worst_of([]) is None
+    assert CliReviewVerdict.worst_of([None, None]) is None
 
 
 def test_aggregate_verdict_ignores_unknown_keys():
     # Defensive — a renamed verdict in a future review prompt shouldn't
     # silently outrank the known keys.
-    assert _aggregate_cli_review_verdict(["BIZARRE", "MUST_FIX"]) == "MUST_FIX"
+    assert CliReviewVerdict.worst_of(["BIZARRE", "MUST_FIX"]) == "MUST_FIX"
 
 
 def test_derive_cli_review_states_both_streaming():

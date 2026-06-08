@@ -224,7 +224,8 @@ def _assemble_cli_review(
 
     # Lazy import — `cli_reviewer` imports `jsonlog` etc.; keep the viewer
     # import-cycle clean by deferring to call time.
-    from ..cli_reviewer import extract_model, parse_verdict
+    from ..cli_reviewer import extract_model
+    from ..models import CliReviewVerdict
 
     sink_name = f"{tool}_review_raw_export.jsonl"
     sink = paths.run_dir / sink_name
@@ -234,7 +235,7 @@ def _assemble_cli_review(
     if completed_evt is not None:
         verdict = completed_evt.get("verdict")
     if not verdict and markdown:
-        verdict = parse_verdict(markdown)
+        verdict = CliReviewVerdict.parse(markdown)
 
     duration_s = _event_duration(started_evt, completed_evt or failed_evt)
 

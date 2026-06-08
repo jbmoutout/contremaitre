@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from contremaitre import cli_reviewer
+from contremaitre.models import CliReviewVerdict
 from contremaitre.paths import build_run_paths
 from contremaitre.tui import _derive_phase
 
@@ -572,27 +573,31 @@ class PostCommentTest(unittest.TestCase):
 
 class WorstVerdictTest(unittest.TestCase):
     def test_empty_is_none(self):
-        self.assertIsNone(cli_reviewer.worst_verdict([]))
+        self.assertIsNone(CliReviewVerdict.worst_of([]))
 
     def test_all_none_is_none(self):
         # Every reviewer failed/drifted — nothing to project.
-        self.assertIsNone(cli_reviewer.worst_verdict([None, None]))
+        self.assertIsNone(CliReviewVerdict.worst_of([None, None]))
 
     def test_single(self):
-        self.assertEqual(cli_reviewer.worst_verdict(["LOOKS_GOOD"]), "LOOKS_GOOD")
+        self.assertEqual(CliReviewVerdict.worst_of(["LOOKS_GOOD"]), "LOOKS_GOOD")
 
     def test_must_fix_beats_looks_good(self):
         # `both`: one reviewer clean, one blocking → the block wins.
-        self.assertEqual(cli_reviewer.worst_verdict(["LOOKS_GOOD", "MUST_FIX"]), "MUST_FIX")
+        self.assertEqual(CliReviewVerdict.worst_of(["LOOKS_GOOD", "MUST_FIX"]), "MUST_FIX")
 
     def test_needs_attention_beats_looks_good(self):
         self.assertEqual(
-            cli_reviewer.worst_verdict(["NEEDS_ATTENTION", "LOOKS_GOOD"]),
+            CliReviewVerdict.worst_of(["NEEDS_ATTENTION", "LOOKS_GOOD"]),
             "NEEDS_ATTENTION",
         )
 
     def test_ignores_none_among_real(self):
-        self.assertEqual(cli_reviewer.worst_verdict([None, "MUST_FIX"]), "MUST_FIX")
+        self.assertEqual(CliReviewVerdict.worst_of([None, "MUST_FIX"]), "MUST_FIX")
+
+    def test_ignores_unparseable_among_real(self):
+        # A reviewer that drifted to a non-key string must not crash worst-of.
+        self.assertEqual(CliReviewVerdict.worst_of(["BIZARRE", "MUST_FIX"]), "MUST_FIX")
 
 
 class VerdictCommitStateTest(unittest.TestCase):
@@ -705,34 +710,36 @@ class ParseVerdictTest(unittest.TestCase):
 
     def test_looks_good(self):
         self.assertEqual(
-            cli_reviewer.parse_verdict("🟢 LOOKS_GOOD — no blocking issues\n\nlooks fine\n"),
+            CliReviewVerdict.parse("🟢 LOOKS_GOOD — no blocking issues\n\nlooks fine\n"),
             "LOOKS_GOOD",
         )
 
     def test_needs_attention(self):
         self.assertEqual(
-            cli_reviewer.parse_verdict("🟠 NEEDS_ATTENTION — non-blocking concerns\n\n…"),
+            CliReviewVerdict.parse("🟠 NEEDS_ATTENTION — non-blocking concerns\n\n…"),
             "NEEDS_ATTENTION",
         )
 
     def test_must_fix(self):
         self.assertEqual(
-            cli_reviewer.parse_verdict(
-                "🔴 MUST_FIX — blocking issues found\n\nblocking issue at …"
-            ),
+            CliReviewVerdict.parse("🔴 MUST_FIX — blocking issues found\n\nblocking issue at …"),
             "MUST_FIX",
         )
 
     def test_returns_none_when_no_key(self):
         # Agent didn't follow format; better to fall back gracefully than
         # crash. TUI maps None → ✓ as a permissive default.
-        self.assertIsNone(cli_reviewer.parse_verdict("Looks good\n\n…"))
+        self.assertIsNone(CliReviewVerdict.parse("Looks good\n\n…"))
+
+    def test_returns_none_on_empty(self):
+        self.assertIsNone(CliReviewVerdict.parse(""))
+        self.assertIsNone(CliReviewVerdict.parse(None))
 
     def test_tolerates_leading_blanks(self):
         # Agent sometimes emits a stray blank line before the verdict.
         # Scan a few lines defensively per the parser comment.
         self.assertEqual(
-            cli_reviewer.parse_verdict("\n\n🟢 LOOKS_GOOD — fine\n\n…"),
+            CliReviewVerdict.parse("\n\n🟢 LOOKS_GOOD — fine\n\n…"),
             "LOOKS_GOOD",
         )
 
@@ -740,9 +747,18 @@ class ParseVerdictTest(unittest.TestCase):
         # The KEY is the canonical machine-parseable token. If the agent
         # drops the glyph but still emits the key, we still classify.
         self.assertEqual(
-            cli_reviewer.parse_verdict("MUST_FIX — broken\n\n…"),
+            CliReviewVerdict.parse("MUST_FIX — broken\n\n…"),
             "MUST_FIX",
         )
+
+    def test_within_widened_10_line_window(self):
+        # Deliberate 5→10 widening: a key on line 9 is still found.
+        body = "\n".join(["preamble"] * 8 + ["MUST_FIX — late header", "more"])
+        self.assertEqual(CliReviewVerdict.parse(body), "MUST_FIX")
+
+    def test_beyond_window_is_none(self):
+        body = "\n".join(["preamble"] * 12 + ["MUST_FIX — too late"])
+        self.assertIsNone(CliReviewVerdict.parse(body))
 
 
 class HeaderTest(unittest.TestCase):

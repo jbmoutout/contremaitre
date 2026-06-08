@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from .manifest import manifest_digest
+from .models import CliReviewVerdict
 
 
 GOLDEN_CASES_DIRNAME = "golden_cases"
@@ -485,13 +486,6 @@ _REQUIRED_ARTIFACTS = (
 )
 
 
-_VERDICT_KEY_TO_SCORE = {
-    "LOOKS_GOOD": 1.0,
-    "NEEDS_ATTENTION": 0.5,
-    "MUST_FIX": 0.0,
-}
-_VERDICT_KEYS = tuple(_VERDICT_KEY_TO_SCORE.keys())
-
 _TERMINAL_TO_SCORE = {
     "READY_FOR_DRAFT_PR": 1.0,
     "NO_PR_CHANGES_REQUESTED": 0.0,
@@ -599,15 +593,11 @@ def _parse_cli_review(run_dir: Path, cli_reviewer: str) -> dict[str, Any]:
         # shifts but doesn't blind us — citation/finding counts use the
         # whole body and the header is benign.
 
-    verdict_key = None
-    if text:
-        head = "\n".join(text.splitlines()[:10])
-        for key in _VERDICT_KEYS:
-            if key in head:
-                verdict_key = key
-                break
-
-    parse_ok = verdict_key is not None
+    # `CliReviewVerdict.parse` owns the first-10-lines key scan; we keep the
+    # text/no-text distinction here so a posted-but-keyless review still reads
+    # as PARSE_FAIL rather than collapsing into the no-review `None`.
+    verdict = CliReviewVerdict.parse(text)
+    parse_ok = verdict is not None
     finding_count = len(_FINDING_RE.findall(text)) if text else 0
     citation_count = len(_CITATION_RE.findall(text)) if text else 0
     by_label: dict[str, int] = {label: 0 for label in _FINDING_LABELS}
@@ -617,8 +607,8 @@ def _parse_cli_review(run_dir: Path, cli_reviewer: str) -> dict[str, Any]:
 
     return {
         "ran": bool(text),
-        "verdict_key": verdict_key if parse_ok else ("PARSE_FAIL" if text else None),
-        "verdict_score": _VERDICT_KEY_TO_SCORE.get(verdict_key) if parse_ok else None,
+        "verdict_key": verdict.value if verdict else ("PARSE_FAIL" if text else None),
+        "verdict_score": verdict.quality_score if verdict else None,
         "finding_count": finding_count,
         "citation_count": citation_count,
         "by_label": by_label,
