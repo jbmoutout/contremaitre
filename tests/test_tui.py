@@ -16,6 +16,7 @@ import json
 import pytest
 
 from contremaitre import events
+from contremaitre.models import ModelSpec
 from contremaitre.tui import (
     _PAL_ERROR,
     _PAL_TEXT,
@@ -1643,65 +1644,118 @@ def test_render_event_survives_claude_iso_string_timestamp():
     _render_event(ev)  # must not raise
 
 
-def test_model_from_init_events_surfaces_claude_model():
-    from contremaitre.tui import _model_from_init_events
+def test_resolved_model_from_events_surfaces_claude_model():
+    from contremaitre.models import resolved_model_from_events
 
     events = [
         {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5},
         {"type": "system", "subtype": "init", "model": "claude-sonnet-4-6", "session_id": "s"},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
     ]
-    assert _model_from_init_events(events) == "claude-sonnet-4-6"
-    # No init event (e.g. codex stream) → None (header keeps its configured label).
-    assert _model_from_init_events([{"type": "turn.started"}]) is None
+    assert resolved_model_from_events(events) == "claude-sonnet-4-6"
+    # No init event (e.g. codex stream) → None (spec keeps its requested model).
+    assert resolved_model_from_events([{"type": "turn.started"}]) is None
 
 
-def test_relabel_with_real_model_keeps_effort_suffix():
-    from contremaitre.tui import _relabel_with_real_model
+def test_with_resolved_sharpens_identity_keeping_effort():
+    from contremaitre.models import ModelSpec
 
-    # Back-filling the stream's real model must preserve the effort annotation
-    # built by role_model_label — the header would otherwise lose effort the
-    # moment a claude run starts.
+    # The live relabel: back-filling the stream's real model must keep the
+    # effort — the header would otherwise lose it the moment a claude run starts.
+    spec = ModelSpec(runtime="claude", requested="", effort="high")
+    sharp = spec.with_resolved("claude-opus-4-8")
+    assert sharp.display() == "claude/claude-opus-4-8 high"
+    assert sharp.canonical() == ("claude-opus-4-8", "claude")
+    # No stream model (codex) → unchanged spec, by identity.
+    assert spec.with_resolved(None) is spec
+
+
+def test_model_spec_display_shows_runtime_prefix():
+    from contremaitre.models import ModelSpec
+
+    # CLI roles: `<runtime>/<short-model> <effort>`.
+    assert ModelSpec.from_record("gpt-5.5 (codex, effort=high)").display() == "codex/gpt-5.5 high"
     assert (
-        _relabel_with_real_model("claude default (claude, effort=high)", "claude-opus-4-8")
-        == "claude-opus-4-8 (claude, effort=high)"
-    )
-    assert (
-        _relabel_with_real_model("opus (claude, effort=max)", "claude-opus-4-8")
-        == "claude-opus-4-8 (claude, effort=max)"
-    )
-    # A bare label (no annotation) just becomes the real model.
-    assert _relabel_with_real_model("opus", "claude-opus-4-8") == "claude-opus-4-8"
-
-
-def test_model_effort_display_shows_runtime_prefix():
-    from contremaitre.tui import _model_effort_display
-
-    # CLI roles: `<tool>/<short-model> <effort>` — no `effort=`, no nesting.
-    assert _model_effort_display("gpt-5.5 (codex, effort=high)") == "codex/gpt-5.5 high"
-    assert (
-        _model_effort_display("claude-opus-4-8 (claude, effort=max)")
+        ModelSpec.from_record("claude-opus-4-8 (claude, effort=max)").display()
         == "claude/claude-opus-4-8 max"
     )
     # opencode role: keep `<provider>/<short-model>`, no effort.
     assert (
-        _model_effort_display("opencode/deepseek-v4-flash-free")
+        ModelSpec.from_record("opencode/deepseek-v4-flash-free").display()
         == "opencode/deepseek-v4-flash-free"
     )
     # openrouter slug drops the middle org segment: `<provider>/<short-model>`.
     assert (
-        _model_effort_display("openrouter/deepseek/deepseek-v4-flash")
+        ModelSpec.from_record("openrouter/deepseek/deepseek-v4-flash").display()
         == "openrouter/deepseek-v4-flash"
     )
     # Unknown/empty → null sentinel.
-    assert _model_effort_display("?") == "?"
-    assert _model_effort_display(None) == "?"
-    assert _model_effort_display("") == "?"
+    assert ModelSpec.from_record("?").display() == "?"
+    assert ModelSpec.from_record(None).display() == "?"
+    assert ModelSpec.from_record("").display() == "?"
 
 
-def test_read_run_models_reconstructs_cli_role_labels_from_run_config(tmp_path):
+def test_read_run_models_reads_model_specs_from_run_config(tmp_path):
     from contremaitre.tui import _read_run_models
 
+    # run_config.json now persists the canonical ModelSpec dict per role.
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": {
+                    "runtime": "codex",
+                    "requested": "gpt-5.5",
+                    "effort": "high",
+                    "resolved": None,
+                    "provider": None,
+                },
+                "sim_model": {
+                    "runtime": "claude",
+                    "requested": "opus",
+                    "effort": "max",
+                    "resolved": None,
+                    "provider": None,
+                },
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, _cli_review, _image, _target, _base = _read_run_models(tmp_path)
+    assert agent.display() == "codex/gpt-5.5 high"
+    assert sim.display() == "claude/opus max"
+
+
+def test_read_run_models_tolerates_legacy_string_run_config(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    # Historical run dirs hold the legacy label/slug string; from_record absorbs
+    # it so the reader still renders them.
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": "gpt-5.5 (codex, effort=high)",
+                "sim_model": "opencode/deepseek-v4-flash-free",
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, *_ = _read_run_models(tmp_path)
+    assert agent.display() == "codex/gpt-5.5 high"
+    assert sim.canonical() == ("deepseek-v4-flash-free", "opencode")
+
+
+def test_read_run_models_reconstructs_legacy_cli_run_config(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    # Legacy run_config: agent_model/sim_model are the raw opencode slug a CLI
+    # role ignores, with runtime/tool/effort in sibling fields. Reconstruct via
+    # ModelSpec.build so the CLI roles aren't mislabeled opencode.
     (tmp_path / "run_config.json").write_text(
         json.dumps(
             {
@@ -1722,9 +1776,34 @@ def test_read_run_models_reconstructs_cli_role_labels_from_run_config(tmp_path):
         encoding="utf-8",
     )
 
-    agent, sim, _cli_review, _image, _target, _base = _read_run_models(tmp_path)
-    assert agent == "gpt-5.5 (codex, effort=high)"
-    assert sim == "opus (claude, effort=max)"
+    agent, sim, *_ = _read_run_models(tmp_path)
+    assert agent.canonical() == ("gpt-5.5", "codex")
+    assert agent.display() == "codex/gpt-5.5 high"
+    assert sim.canonical() == ("opus", "claude")
+    assert sim.display() == "claude/opus max"
+
+
+def test_read_run_models_legacy_opencode_run_config_stays_opencode(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    # A legacy opencode run_config reconstructs to the slug identity, not a
+    # spurious CLI label.
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": "openrouter/deepseek/deepseek-v4-flash",
+                "sim_model": "opencode/big-pickle",
+                "actor_mode": "opencode",
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, *_ = _read_run_models(tmp_path)
+    assert agent.canonical() == ("deepseek-v4-flash", "opencode")
+    assert sim.canonical() == ("big-pickle", "opencode")
 
 
 # ===== claude footer usage (statusLine rate-limit indicator) =====
@@ -1872,8 +1951,8 @@ def test_footer_meter_tokens_are_per_role_and_show_unknown_counters():
     from contremaitre.tui import _footer_meter_tokens
 
     tokens = _footer_meter_tokens(
-        agent_model="gpt-5.5 (codex, effort=high)",
-        sim_model="claude-sonnet-4-6 (claude, effort=high)",
+        agent_model=ModelSpec.from_record("gpt-5.5 (codex, effort=high)"),
+        sim_model=ModelSpec.from_record("claude-sonnet-4-6 (claude, effort=high)"),
         agent_events=[],
         sim_events=[],
         codex_usage=None,
@@ -1915,8 +1994,8 @@ def test_footer_meter_tokens_mix_free_paid_codex_and_model_specific_claude():
     assert [
         t.plain
         for t in _footer_meter_tokens(
-            agent_model="opencode/deepseek-v4-flash-free",
-            sim_model="openrouter/qwen/qwen3-max",
+            agent_model=ModelSpec.from_record("opencode/deepseek-v4-flash-free"),
+            sim_model=ModelSpec.from_record("openrouter/qwen/qwen3-max"),
             agent_events=[],
             sim_events=[{"type": "step_finish", "part": {"cost_usd": 0.1234}}],
             codex_usage=codex_usage,
@@ -1928,8 +2007,8 @@ def test_footer_meter_tokens_mix_free_paid_codex_and_model_specific_claude():
     assert [
         t.plain
         for t in _footer_meter_tokens(
-            agent_model="gpt-5.5 (codex, effort=high)",
-            sim_model="claude-opus-4-8 (claude, effort=max)",
+            agent_model=ModelSpec.from_record("gpt-5.5 (codex, effort=high)"),
+            sim_model=ModelSpec.from_record("claude-opus-4-8 (claude, effort=max)"),
             agent_events=[],
             sim_events=[],
             codex_usage=codex_usage,

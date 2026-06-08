@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..models import RunPaths
+from ..models import ModelSpec, RunPaths
 
 _HERE = Path(__file__).resolve().parent
 _CSS_PATH = _HERE / "_styles.css"
@@ -110,6 +110,12 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
 
     stats = {
         **stats_raw,
+        # Persisted model identity is a ModelSpec dict; the per-run renderer JS
+        # must never see the raw record. This Python reader routes it through
+        # ModelSpec and embeds the derived display string, so `_renderer.js`
+        # consumes a string, never an object.
+        "agent_model": ModelSpec.from_record(stats_raw.get("agent_model")).display(),
+        "sim_model": ModelSpec.from_record(stats_raw.get("sim_model")).display(),
         "cost_usd": stats_raw.get("recorded_cost_usd"),
         "n_events": agent_summary["n_events"] + sim_summary["n_events"],
         "n_tool_uses": agent_summary["n_tool_uses"] + sim_summary["n_tool_uses"],

@@ -959,7 +959,16 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
     }
 
     base_sha = run_config.get("base_sha")
-    system_digest = manifest_digest(run_config) if run_config else ""
+    # `run_config.json` is written at run START, so its model specs carry no
+    # `resolved` (a claude account-default run reads as "?" there). `stats.json`
+    # is written at run END with `resolved` back-filled, so prefer its identity
+    # records for the digest — otherwise two account-default runs that resolved
+    # to different models would collide into one system_digest.
+    digest_manifest = dict(run_config) if run_config else {}
+    for key in ("agent_model", "sim_model"):
+        if isinstance(stats.get(key), dict):
+            digest_manifest[key] = stats[key]
+    system_digest = manifest_digest(digest_manifest) if run_config else ""
     input_digest = _input_digest(case, config, base_sha)
 
     # `ok` distinguishes "system behaved correctly" from "system broke".

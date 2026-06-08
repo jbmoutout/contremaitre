@@ -43,17 +43,18 @@ from .gates import INTERNAL_PATHS, evaluate_l0, only_internal_changes
 from .extract import extract_run_artifacts
 from .viewer import build_viewer
 from .git_utils import GitRepo
-from .jsonlog import append_jsonl, write_json
+from .jsonlog import append_jsonl, read_jsonl, write_json
 from .manifest import build_manifest
 from .models import (
     ActorMode,
+    ModelSpec,
     ParsedVerdict,
     ReviewVerdict,
     RunConfig,
     RunResult,
     State,
     TerminalVerdict,
-    role_model_label,
+    resolved_model_from_events,
 )
 from .paths import build_run_paths, new_run_id, validate_slug
 from .preflight import enforce_preflight
@@ -1414,6 +1415,16 @@ class Orchestrator:
         )
         return snapshot
 
+    def _role_spec(self, role: str, raw_export: Path) -> ModelSpec:
+        """The role's `ModelSpec`, with `resolved` back-filled from its raw
+        stream (claude echoes the model it actually ran in `system/init`;
+        codex/opencode are silent, so `resolved` stays None there)."""
+
+        spec = ModelSpec.for_role(self.config, role)
+        if raw_export.exists():
+            spec = spec.with_resolved(resolved_model_from_events(read_jsonl(raw_export)))
+        return spec
+
     def _write_final_stats(
         self, terminal_state: State, verdict: TerminalVerdict, reason: str
     ) -> None:
@@ -1426,24 +1437,8 @@ class Orchestrator:
                 "reason": reason,
                 "turns": self.turns,
                 "duration_seconds": round(time.monotonic() - self.started, 3),
-                "agent_model": role_model_label(
-                    actor_mode=self.config.actor_mode,
-                    opencode_model=self.config.agent_model,
-                    codex_model=self.config.codex_model,
-                    codex_effort=self.config.codex_effort,
-                    cli_tool=self.config.cli_tool,
-                    claude_model=self.config.claude_model,
-                    claude_effort=self.config.claude_effort,
-                ),
-                "sim_model": role_model_label(
-                    actor_mode=self.config.sim_actor_mode or self.config.actor_mode,
-                    opencode_model=self.config.sim_model,
-                    codex_model=self.config.codex_model,
-                    codex_effort=self.config.codex_effort,
-                    cli_tool=self.config.sim_cli_tool or self.config.cli_tool,
-                    claude_model=self.config.claude_model,
-                    claude_effort=self.config.claude_effort,
-                ),
+                "agent_model": self._role_spec("agent", self.paths.raw_export).to_dict(),
+                "sim_model": self._role_spec("sim", self.paths.sim_raw_export).to_dict(),
                 "actor_mode": self.config.actor_mode.value,
                 "publish_mode": self.config.publish_mode.value,
                 "recorded_cost_usd": estimate_recorded_cost_usd(

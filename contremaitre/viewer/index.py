@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from ..costs import sum_token_usage
 from ..flow_use import compute_phases
+from ..models import ModelSpec
 from ..paths import build_run_paths
 from . import VIEWER_FILENAME
 
@@ -80,8 +81,8 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "run_id": run_dir.name,
         "viewer_href": f"{run_dir.name}/{VIEWER_FILENAME}",
         "when": _format_when(run_dir.name),
-        "agent_model": _short_model(stats.get("agent_model")),
-        "sim_model": _short_model(stats.get("sim_model")),
+        "agent_model": _spec_canonical(stats.get("agent_model"))[0],
+        "sim_model": _spec_canonical(stats.get("sim_model"))[0],
         "repo": repo,
         "base": base,
         "verdict": stats.get("verdict") or "?",
@@ -289,43 +290,17 @@ def _format_when(run_id: str) -> str:
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
-def _short_model(model: str | None) -> str | None:
-    if not model:
-        return None
-    # `provider/model-name` → `model-name`
-    return model.split("/", 1)[-1]
+def _spec_canonical(model: object) -> tuple[str | None, str | None]:
+    """Uniform `(name, runtime)` for a role's persisted model identity.
 
-
-# `<model> (codex, effort=high)` / `claude default (claude, effort=high)` —
-# the fixed shape `models.role_model_label` emits for a CLI role. We treat it
-# as a parse contract, not freeform prose: it is the ONLY place a run records
-# its codex/claude model (run_config.json keeps only the ignored opencode
-# slug; the raw stream never echoes the model id).
-_CLI_LABEL_RE = re.compile(r"^(?P<model>.+?)\s*\((?P<runtime>codex|claude),\s*effort=[^)]*\)\s*$")
-
-
-def _canonical_model(label: str | None) -> tuple[str | None, str | None]:
-    """Uniform `(name, runtime)` for a role's model — provider/effort agnostic.
-
-    Normalizes the three runtimes to one naming scheme so the same model
-    groups and sorts consistently regardless of how it was spelled:
-      - CLI roles (the deterministic `… (codex|claude, effort=…)` label):
-        strip the effort suffix, tag the runtime, collapse spaces so
-        `claude default` → `claude-default`.
-      - everything else is an opencode/OpenRouter slug `provider/…/model`;
-        take the final path segment so `openrouter/deepseek/deepseek-v4-flash`
-        and `opencode/deepseek-v4-flash-free` normalize the same way (the old
-        `split("/", 1)` left a stray `deepseek/` vendor on the former).
-
-    Returns `(None, None)` for an empty label.
+    Routes through `ModelSpec.from_record` (which absorbs the canonical dict
+    *and* any legacy on-disk label/slug string), so the viewer never parses a
+    model string itself. Returns `(None, None)` when identity is absent.
     """
 
-    if not label:
+    if not model:
         return None, None
-    m = _CLI_LABEL_RE.match(label)
-    if m:
-        return m.group("model").strip().replace(" ", "-"), m.group("runtime")
-    return label.rsplit("/", 1)[-1], "opencode"
+    return ModelSpec.from_record(model).canonical()
 
 
 def _slug_from_pr_url(url: str | None) -> str | None:
@@ -677,8 +652,8 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     stats = _read_json(run_dir / "stats.json", default=None)
     if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
         return None
-    agent, agent_rt = _canonical_model(stats.get("agent_model"))
-    sim, sim_rt = _canonical_model(stats.get("sim_model"))
+    agent, agent_rt = _spec_canonical(stats.get("agent_model"))
+    sim, sim_rt = _spec_canonical(stats.get("sim_model"))
     if not agent or not sim:
         return None
     if stats.get("verdict") in _INFRA_VERDICTS:
@@ -924,8 +899,8 @@ def _infra_only_pairings(runs_root: Path) -> list[dict[str, Any]]:
         stats = _read_json(entry / "stats.json", default=None)
         if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
             continue
-        agent, agent_rt = _canonical_model(stats.get("agent_model"))
-        sim, sim_rt = _canonical_model(stats.get("sim_model"))
+        agent, agent_rt = _spec_canonical(stats.get("agent_model"))
+        sim, sim_rt = _spec_canonical(stats.get("sim_model"))
         if not agent or not sim:
             continue
         real_infra = counts.setdefault((agent, agent_rt, sim, sim_rt), [0, 0])
