@@ -3,7 +3,7 @@
 After the Draft PR lands, optionally invoke a locally-installed frontier CLI
 (`claude` or `codex`) on the operator's interactive subscription to read the
 diff and post a code-review comment on the PR. The subscription path avoids
-the API quota the SIM + extra reviewers consume.
+the API quota the SIM consumes.
 
 Boundaries:
   - Detection is `shutil.which("claude" | "codex")`; nothing else.
@@ -11,9 +11,11 @@ Boundaries:
     CLI cannot silently fall through to paid API usage if the operator has
     those vars set in their shell.
   - Output streams line-by-line into a per-tool `<tool>_review_raw_export.jsonl`
-    sink matching the existing `*_raw_export.jsonl` pattern (agent, sim,
-    extra). One sink per run.
-  - Comment posting shells out to `gh pr comment <url> --body-file <path>`.
+    sink matching the existing `*_raw_export.jsonl` pattern (agent, sim).
+    One sink per run.
+  - The reviewer container receives host-built PR context under `/review:ro`;
+    it does not receive GitHub credentials and does not fetch GitHub.
+  - Host-side comment posting shells out to `gh pr comment <url> --body-file <path>`.
     Any failure is logged but does NOT raise — the PR is already published
     and a missed review comment is recoverable by the human reviewer.
   - The worst-of-N verdict is also projected onto a GitHub commit status on
@@ -190,20 +192,31 @@ def resolve_choice(
 # ---------- prompt assembly ----------
 
 
-def build_prompt(*, pr_url: str, round_n: int = 1, round_of: int = 1) -> str:
+def build_prompt(
+    *,
+    pr_url: str,
+    round_n: int = 1,
+    round_of: int = 1,
+    review_path: str = "/review",
+) -> str:
     """The prompt handed to the CLI reviewer in Docker.
 
     Body lives in `contremaitre/prompts/cli_reviewer_prompt.md` so it can
-    be tuned without touching Python. The MD file has `{pr_url}`, `{round_n}`,
-    and `{round_of}` placeholders.
-
-    Pointing the reviewer at a PR URL lets it fetch the full diff, surrounding
-    files, CI status, and linked issues itself via the local `gh` CLI.
+    be tuned without touching Python. The MD file has `{round_n}`,
+    `{round_of}`, and `{review_path}` placeholders. `pr_url` remains part of
+    the function signature because the caller records it in guardrails and
+    host-side posting still uses it, but it is not injected into the reviewer
+    instructions: GitHub access is host-owned.
     """
 
     from .prompts import CLI_REVIEWER_PROMPT
 
-    return CLI_REVIEWER_PROMPT.format(pr_url=pr_url, round_n=round_n, round_of=round_of)
+    return CLI_REVIEWER_PROMPT.format(
+        pr_url=pr_url,
+        round_n=round_n,
+        round_of=round_of,
+        review_path=review_path,
+    )
 
 
 # ---------- worktree prep ----------

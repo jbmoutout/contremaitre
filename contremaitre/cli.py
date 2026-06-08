@@ -879,18 +879,21 @@ def _pick_models_interactive(
 
 
 def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
-    """True when a codex (CLI) role should auto-provision its locked egress.
+    """True when a CLI role should auto-provision its locked egress.
 
-    Checks BOTH roles (agent + SIM): a codex role in either position carries the
-    exfiltratable in-container JWT, so the *default* is to lock. The lock is the
-    secure default, not mandatory — `--allow-open-egress` is the explicit,
-    warned override (the operator accepts the token risk, e.g. so the agent can
-    install deps from PyPI/npm that the provider-only allowlist would block).
-    Explicit `--docker-network`/`--https-proxy` also win (operator's own policy).
+    Checks agent, SIM, and post-publish CLI reviewer: a CLI tool in any of
+    those positions carries an exfiltratable in-container subscription token,
+    so the *default* is to lock. The lock is the secure default, not mandatory
+    — `--allow-open-egress` is the explicit, warned override (the operator
+    accepts the token risk, e.g. so the agent can install deps from PyPI/npm
+    that the provider-only allowlist would block). Explicit
+    `--docker-network`/`--https-proxy` also win (operator's own policy).
     """
 
     modes = {getattr(args, "actor", None), getattr(args, "sim_actor", None)}
-    if ActorMode.CLI.value not in modes:
+    reviewer = getattr(args, "cli_reviewer", "none")
+    reviewer_cli_active = reviewer in {"codex", "claude", "both"}
+    if ActorMode.CLI.value not in modes and not reviewer_cli_active:
         return False
     if getattr(args, "allow_open_egress", False):
         return False
@@ -900,7 +903,7 @@ def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
 def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
     """Stand up the shared allowlist egress proxy and point the run at it.
 
-    Fires whenever a codex (CLI) role is active with no explicit
+    Fires whenever a CLI role or post-publish CLI reviewer is active with no explicit
     `--docker-network`/`--https-proxy` and without `--allow-open-egress` (the
     explicit open-egress override). Mutates `args` so the resolved config (and
     the runner) see a locked egress. Failure is non-fatal here — preflight and

@@ -9,7 +9,7 @@ Files:
   - `sim_tooled_persona.md`    — sent to the SIM on its first turn of the WORK session.
   - `sim_review_prompt.md`     — sent to the SIM in the single-shot REVIEW pass.
   - `cli_reviewer_prompt.md`   — sent to the local CLI reviewer (claude / codex)
-                                 post-publish; takes a `{pr_url}` placeholder.
+                                 post-publish; reads host context at `/review`.
 
 The agent and SIM share one multi-turn opencode session each (re-using
 session IDs across turns), so first-turn prompts are baked into session memory

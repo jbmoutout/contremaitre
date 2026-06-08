@@ -506,10 +506,9 @@ class Orchestrator:
         always runs read-only in Docker; the agent revision uses the existing
         session (resumes from WORK context).
 
-        The CLI reviewer needs open egress (GitHub access). A `CliActorRunner`
-        is created per round with `allow_open_egress=True` — this matches the
-        previous host-based reviewer's posture and is required for `gh pr diff`
-        and comment posting.
+        GitHub access is host-owned: the host builds a read-only `/review`
+        bundle for the container, then posts the returned markdown as a PR
+        comment after the reviewer exits.
         """
 
         from . import cli_reviewer as _cli_reviewer
@@ -525,29 +524,50 @@ class Orchestrator:
         last_round_verdicts: list[tuple[str, str | None]] = []
 
         for cli_round in range(1, max_rounds + 1):
-            self._transition(
-                State.APPROVED, f"CLI review round {cli_round}/{max_rounds}"
-            )
+            self._transition(State.APPROVED, f"CLI review round {cli_round}/{max_rounds}")
             round_verdicts: list[tuple[str, str | None]] = []
             round_needs_revision = False
             all_required_changes: list[str] = []
 
-            for tool in tools:
-                extras_dir = self.paths.run_dir / "extras" / f"cli_review_{cli_round:03d}"
-                extras_dir.mkdir(parents=True, exist_ok=True)
-                sink = extras_dir / f"{tool}_raw_export.jsonl"
-
-                self._emit(
-                    events.CLI_REVIEW_STARTED, tool=tool, url=outcome.url, round=cli_round
+            extras_dir = self.paths.run_dir / "extras" / f"cli_review_{cli_round:03d}"
+            try:
+                review_dir = self._write_cli_review_context(
+                    worktree_git=worktree_git,
+                    outcome=outcome,
+                    cli_round=cli_round,
+                    max_rounds=max_rounds,
+                    extras_dir=extras_dir,
                 )
+            except Exception as exc:
+                self._emit(
+                    events.CLI_REVIEW_LOOP_BLOCKED,
+                    round=cli_round,
+                    reason=f"review context failed: {exc}",
+                )
+                return TerminalVerdict.PR_NEEDS_HUMAN
+
+            for tool in tools:
+                sink = _cli_reviewer.jsonl_sink_for(self.paths, tool)
+                sink_start_offset = sink.stat().st_size if sink.exists() else 0
+
+                self._emit(events.CLI_REVIEW_STARTED, tool=tool, url=outcome.url, round=cli_round)
                 prompt = _cli_reviewer.build_prompt(
                     pr_url=outcome.url, round_n=cli_round, round_of=max_rounds
                 )
                 start = time.monotonic()
                 markdown = self._run_one_cli_reviewer(
-                    tool=tool, prompt=prompt, sink=sink, round_n=cli_round
+                    tool=tool,
+                    prompt=prompt,
+                    sink=sink,
+                    round_n=cli_round,
+                    review_dir=review_dir,
                 )
                 duration_s = time.monotonic() - start
+                _copy_file_slice(
+                    src=sink,
+                    dst=extras_dir / f"{tool}_raw_export.jsonl",
+                    start_offset=sink_start_offset,
+                )
 
                 if not markdown:
                     round_verdicts.append((tool, None))
@@ -566,9 +586,15 @@ class Orchestrator:
                 review_md = extras_dir / f"{tool}_review.md"
                 try:
                     review_md.write_text(final_markdown, encoding="utf-8")
+                    (self.paths.run_dir / f"{tool}_review.md").write_text(
+                        final_markdown, encoding="utf-8"
+                    )
                 except OSError as exc:
                     self._emit(
-                        events.CLI_REVIEW_FAILED, tool=tool, reason=f"write_error: {exc}", round=cli_round
+                        events.CLI_REVIEW_FAILED,
+                        tool=tool,
+                        reason=f"write_error: {exc}",
+                        round=cli_round,
                     )
                     round_verdicts.append((tool, None))
                     continue
@@ -599,9 +625,7 @@ class Orchestrator:
 
                 if verdict != "LOOKS_GOOD":
                     round_needs_revision = True
-                    all_required_changes.extend(
-                        _cli_reviewer.extract_required_changes(markdown)
-                    )
+                    all_required_changes.extend(_cli_reviewer.extract_required_changes(markdown))
 
             last_round_verdicts = round_verdicts
 
@@ -619,20 +643,27 @@ class Orchestrator:
             if cli_round == max_rounds:
                 break
 
-            # Revision round: agent addresses required changes, then commits + pushes.
+            # Revision round: agent addresses required changes, then commits, gates,
+            # and pushes only if the revised HEAD is deterministic-safe.
             self._emit(
                 events.CLI_REVIEW_LOOP_REVISION,
                 round=cli_round,
                 required_changes_count=len(all_required_changes),
                 verdicts={t: v for t, v in round_verdicts},
             )
-            revision_prompt = prompts.cli_revision_followup(
-                all_required_changes, round_n=cli_round, round_of=max_rounds
+            revision_ready = self._run_cli_review_revision(
+                actor=actor,
+                worktree_git=worktree_git,
+                branch=branch,
+                required_changes=all_required_changes,
+                cli_round=cli_round,
+                max_rounds=max_rounds,
             )
-            self._agent_turn(actor, revision_prompt)
-            self._clear_implementation_complete()
-            self._commit_agent_changes(worktree_git)
-            worktree_git.run("push", "origin", f"HEAD:{branch}", check=False)
+            if not revision_ready:
+                self._post_cli_review_status(
+                    worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
+                )
+                return TerminalVerdict.PR_NEEDS_HUMAN
 
         # Max rounds exhausted without reaching LOOKS_GOOD on all tools.
         self._emit(
@@ -645,6 +676,115 @@ class Orchestrator:
         )
         return TerminalVerdict.PR_NEEDS_HUMAN
 
+    def _run_cli_review_revision(
+        self,
+        *,
+        actor,
+        worktree_git: GitRepo,
+        branch: str,
+        required_changes: list[str],
+        cli_round: int,
+        max_rounds: int,
+    ) -> bool:
+        """Apply one post-publish CLI-review revision and gate it before push."""
+
+        revision_prompt = prompts.cli_revision_followup(
+            required_changes, round_n=cli_round, round_of=max_rounds
+        )
+        self._clear_implementation_complete()
+        self._agent_turn(actor, revision_prompt)
+        if not self._implementation_complete():
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason="revision ended without IMPLEMENTATION_COMPLETE",
+            )
+            return False
+        if self._cap_tripped():
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason="cap tripped during CLI revision",
+            )
+            return False
+
+        self._commit_agent_changes(worktree_git)
+        revision_hash = diff_hash(worktree_git, self._diff_base)
+        try:
+            checks = run_checks(
+                config=self.config,
+                paths=self.paths,
+                emit_event=self._emit,
+            )
+        except Exception as exc:
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason=f"executable checks raised: {exc}",
+            )
+            return False
+        self._record_worktree_state(worktree_git, f"after-cli-revision-checks-round{cli_round}")
+        if not self._cli_revision_gates_passed(
+            worktree_git=worktree_git,
+            revision_hash=revision_hash,
+            checks=checks,
+            cli_round=cli_round,
+        ):
+            return False
+
+        push = worktree_git.run("push", "origin", f"HEAD:{branch}", check=False)
+        if push.returncode != 0:
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason="push failed",
+                stderr=push.stderr[-1000:],
+            )
+            return False
+        return True
+
+    def _cli_revision_gates_passed(
+        self,
+        *,
+        worktree_git: GitRepo,
+        revision_hash: str,
+        checks: list[CheckResult],
+        cli_round: int,
+    ) -> bool:
+        """Run deterministic L0/L1 gates for a post-publish revision."""
+
+        recomputed_hash = diff_hash(worktree_git, self._diff_base)
+        diff_hash_matched = recomputed_hash == revision_hash
+        diff_scan = scan_diff(worktree_git, self._diff_base)
+        clean = _only_contremaitre_changes(worktree_git.status_porcelain())
+        hard_gates = hard_gate_payload(
+            diff_scan=diff_scan,
+            clean_worktree=clean,
+            diff_hash_matched=diff_hash_matched,
+        )
+        checks_failed = any(not check.passed for check in checks)
+        self._emit(
+            events.HARD_GATES_CHECKED,
+            context="cli_review_revision",
+            round=cli_round,
+            passed=bool(hard_gates["passed"]) and not checks_failed,
+            diff_hash_matched=diff_hash_matched,
+            diff_scan_passed=diff_scan.passed if diff_scan else False,
+            clean_worktree=clean,
+            changed_files=len(diff_scan.changed_files) if diff_scan else 0,
+            failed_checks=[check.cmd for check in checks if not check.passed],
+        )
+        if hard_gates["passed"] and not checks_failed:
+            return True
+        self._emit(
+            events.CLI_REVIEW_LOOP_BLOCKED,
+            round=cli_round,
+            reason="hard gate failed" if not hard_gates["passed"] else "executable checks failed",
+            hard_gates=hard_gates,
+            failed_checks=[check.cmd for check in checks if not check.passed],
+        )
+        return False
+
     def _run_one_cli_reviewer(
         self,
         *,
@@ -652,26 +792,26 @@ class Orchestrator:
         prompt: str,
         sink: Path,
         round_n: int,
+        review_dir: Path,
     ) -> str:
         """Run one CLI reviewer tool in Docker for one round. Returns markdown or "".
 
-        Creates a `CliActorRunner` with `allow_open_egress=True` since the
-        reviewer must reach GitHub to fetch the PR diff and post comments.
-        Failures are caught and emitted as CLI_REVIEW_FAILED events — the
-        loop continues without this tool's verdict.
+        The reviewer sees only `/app:ro` plus the host-built `/review:ro`
+        bundle. GitHub credentials and PR side effects stay host-owned.
+        Failures are caught and emitted as CLI_REVIEW_FAILED events; the loop
+        continues without this tool's verdict.
         """
-
-        import dataclasses as _dc
 
         from .cli_actor import CliActorRunner as _CliActorRunner
 
-        # Reviewer needs GitHub access (open egress). This matches the prior
-        # host-based reviewer's security posture — the credential is passed in
-        # via the driver (neutered codex home / OAuth env var), not inlined.
-        reviewer_config = _dc.replace(self.config, allow_open_egress=True)
-        runner = _CliActorRunner(config=reviewer_config, paths=self.paths, tool=tool)
+        runner = _CliActorRunner(config=self.config, paths=self.paths, tool=tool)
         try:
-            output = runner.cli_reviewer_turn(prompt=prompt, raw_export=sink, round_n=round_n)
+            output = runner.cli_reviewer_turn(
+                prompt=prompt,
+                raw_export=sink,
+                round_n=round_n,
+                review_dir=review_dir,
+            )
             return output.text
         except Exception as exc:
             self._emit(
@@ -681,6 +821,68 @@ class Orchestrator:
                 round=round_n,
             )
             return ""
+
+    def _write_cli_review_context(
+        self,
+        *,
+        worktree_git: GitRepo,
+        outcome: PublishOutcome,
+        cli_round: int,
+        max_rounds: int,
+        extras_dir: Path,
+    ) -> Path:
+        """Write the host-owned PR context mounted into CLI reviewer Docker."""
+
+        review_dir = extras_dir / "input"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        head_sha = worktree_git.output("rev-parse", "HEAD").strip()
+        current_hash = diff_hash(worktree_git, self._diff_base)
+        write_review_diff(worktree_git, self._diff_base, review_dir / "diff.patch")
+        changed = worktree_git.output("diff", "--name-only", f"{self._diff_base}...HEAD")
+        (review_dir / "changed_files.txt").write_text(changed, encoding="utf-8")
+        (review_dir / "head_sha.txt").write_text(f"{head_sha}\n", encoding="utf-8")
+
+        settled = self.paths.worktree / SETTLED_RELPATH
+        if settled.is_file():
+            (review_dir / "SETTLED_DESIGN.md").write_text(
+                settled.read_text(encoding="utf-8", errors="replace"),
+                encoding="utf-8",
+            )
+        else:
+            (review_dir / "SETTLED_DESIGN.md").write_text("", encoding="utf-8")
+
+        pr_body = self.paths.run_dir / "pr_body.md"
+        if pr_body.is_file():
+            (review_dir / "pr_body.md").write_text(
+                pr_body.read_text(encoding="utf-8", errors="replace"),
+                encoding="utf-8",
+            )
+        else:
+            (review_dir / "pr_body.md").write_text("", encoding="utf-8")
+
+        payload = {
+            "url": outcome.url,
+            "title": outcome.title,
+            "base": outcome.base,
+            "branch": outcome.branch,
+            "round": cli_round,
+            "round_of": max_rounds,
+            "head_sha": head_sha,
+            "diff_base": self._diff_base,
+            "approved_diff_hash": outcome.approved_diff_hash,
+            "current_diff_hash": current_hash,
+        }
+        write_json(review_dir / "pr.json", payload)
+        (review_dir / "PR.md").write_text(
+            _render_cli_review_context_markdown(payload),
+            encoding="utf-8",
+        )
+        _write_previous_cli_reviews(
+            extras_root=self.paths.run_dir / "extras",
+            current_round=cli_round,
+            dst=review_dir / "previous_cli_reviews.md",
+        )
+        return review_dir
 
     def _post_cli_review_status(
         self,
@@ -1394,6 +1596,76 @@ def _only_contremaitre_changes(porcelain: str) -> bool:
         if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
             return False
     return True
+
+
+def _copy_file_slice(*, src: Path, dst: Path, start_offset: int) -> None:
+    """Copy bytes appended to `src` since `start_offset` into `dst`."""
+
+    if not src.exists():
+        return
+    try:
+        with src.open("rb") as fh:
+            fh.seek(start_offset)
+            data = fh.read()
+    except OSError:
+        return
+    if not data:
+        return
+    try:
+        dst.write_bytes(data)
+    except OSError:
+        return
+
+
+def _render_cli_review_context_markdown(payload: dict[str, object]) -> str:
+    """Small manifest telling the reviewer what the host mounted."""
+
+    lines = [
+        "# Pull Request Context",
+        "",
+        "GitHub access is host-owned. The reviewer container must not fetch the PR,",
+        "call `gh`, or use GitHub credentials. Review only the mounted files below",
+        "and the read-only worktree at `/app`.",
+        "",
+        f"- PR URL: {payload.get('url') or '(unknown)'}",
+        f"- Title: {payload.get('title') or '(unknown)'}",
+        f"- Base: {payload.get('base') or '(unknown)'}",
+        f"- Branch: {payload.get('branch') or '(unknown)'}",
+        f"- Round: {payload.get('round')}/{payload.get('round_of')}",
+        f"- Head SHA: {payload.get('head_sha') or '(unknown)'}",
+        f"- Diff base: {payload.get('diff_base') or '(unknown)'}",
+        f"- Current diff hash: {payload.get('current_diff_hash') or '(unknown)'}",
+        "",
+        "## Mounted Files",
+        "",
+        "- `/review/diff.patch` — current PR diff against the run base",
+        "- `/review/changed_files.txt` — changed file list",
+        "- `/review/SETTLED_DESIGN.md` — design the agent claimed to implement",
+        "- `/review/pr_body.md` — PR body posted by the host",
+        "- `/review/pr.json` — structured PR metadata",
+        "- `/review/previous_cli_reviews.md` — previous CLI-review comments in this run",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _write_previous_cli_reviews(*, extras_root: Path, current_round: int, dst: Path) -> None:
+    parts: list[str] = []
+    for round_n in range(1, current_round):
+        round_dir = extras_root / f"cli_review_{round_n:03d}"
+        if not round_dir.is_dir():
+            continue
+        for review_md in sorted(round_dir.glob("*_review.md")):
+            tool = review_md.name.removesuffix("_review.md")
+            try:
+                body = review_md.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if body:
+                parts.append(f"## Round {round_n} — {tool}\n\n{body}\n")
+    if parts:
+        dst.write_text("\n".join(parts), encoding="utf-8")
+    else:
+        dst.write_text("No previous CLI-review comments in this run.\n", encoding="utf-8")
 
 
 def run(config: RunConfig) -> RunResult:

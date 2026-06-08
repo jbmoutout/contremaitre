@@ -271,6 +271,20 @@ class BuildCommandTest(unittest.TestCase):
             self.assertIn(f"{runner.worktree}:/app:ro", joined)
             self.assertIn("/tmp/rev:/review:ro", joined)
 
+    def test_docker_env_scrubs_github_credentials(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_secret", "GH_TOKEN": "ghs_secret"}),
+        ):
+            runner, _ = _make_runner(
+                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
+            )
+
+            env = runner._docker_env()
+
+            self.assertNotIn("GITHUB_TOKEN", env)
+            self.assertNotIn("GH_TOKEN", env)
+
 
 class CodexModelArgTest(unittest.TestCase):
     def test_omits_namespaced_and_empty(self):
@@ -328,12 +342,13 @@ class RoleModelLabelTest(unittest.TestCase):
 
 def _cli_config(root: Path, **over) -> RunConfig:
     over.setdefault("cli_tool", "codex")
+    actor_mode = over.pop("actor_mode", ActorMode.CLI)
     return RunConfig(
         repo=root,
         base="main",
         runs_root=root / "runs",
         run_slug="t",
-        actor_mode=ActorMode.CLI,
+        actor_mode=actor_mode,
         **over,
     )
 
@@ -1236,6 +1251,26 @@ class ActiveCliToolsTest(unittest.TestCase):
             cfg = _cli_config(Path(tmp), cli_tool="claude", sim_actor_mode=ActorMode.OPENCODE)
             self.assertEqual(_active_cli_tools(cfg), {"claude"})
 
+    def test_opencode_agent_with_cli_reviewer_reports_reviewer_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(
+                Path(tmp),
+                actor_mode=ActorMode.OPENCODE,
+                sim_actor_mode=ActorMode.OPENCODE,
+                cli_reviewer="codex",
+            )
+            self.assertEqual(_active_cli_tools(cfg), {"codex"})
+
+    def test_both_cli_reviewers_report_both_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(
+                Path(tmp),
+                actor_mode=ActorMode.OPENCODE,
+                sim_actor_mode=ActorMode.OPENCODE,
+                cli_reviewer="both",
+            )
+            self.assertEqual(_active_cli_tools(cfg), {"claude", "codex"})
+
 
 # ===== F3: CLI turns emit the actor-start guardrail (telemetry parity) =====
 
@@ -1331,8 +1366,12 @@ class CliActorStartEventTest(unittest.TestCase):
             self.assertIn("--permission-mode", actor_cmd)
             post_turn_meter = meter_calls[-1]
             self.assertNotIn("--permission-mode", post_turn_meter.kwargs["cmd"])
-            self.assertEqual(post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_MODEL"], "claude-opus-4-8")
-            self.assertEqual(post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_PROMPT"], "OK")
+            self.assertEqual(
+                post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_MODEL"], "claude-opus-4-8"
+            )
+            self.assertEqual(
+                post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_PROMPT"], "OK"
+            )
 
 
 if __name__ == "__main__":

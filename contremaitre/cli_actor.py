@@ -992,17 +992,14 @@ class CliActorRunner:
         prompt: str,
         raw_export: Path,
         round_n: int,
+        review_dir: Path,
     ) -> ActorOutput:
         """Single-shot post-PR CLI reviewer turn in Docker (no session resume).
 
-        The reviewer mounts the worktree read-only — it fetches the diff via
-        the local `gh` CLI and reads files in place, but must not modify the
-        worktree between revision rounds. The `reviewer_id` routes the log
-        stream to the cli_reviewer pane in the TUI.
-
-        Open egress is required: the reviewer must reach GitHub to fetch the
-        PR diff and post its comment. This matches the prior host-based
-        reviewer's security posture (no egress restriction on the host).
+        The reviewer mounts the worktree read-only and receives host-owned PR
+        context at `/review:ro`. It emits markdown only; the host posts that
+        markdown to GitHub after the container exits. The `reviewer_id` routes
+        the log stream to the cli_reviewer pane in the TUI.
         """
         home = self.paths.run_dir / f"{self.driver.home_dir_prefix}-cli-review-{round_n}-home"
         return self._cli_turn(
@@ -1017,6 +1014,7 @@ class CliActorRunner:
             phase="CLI_REVIEW",
             speaker="cli_reviewer",
             reviewer_id="cli_review",
+            extra_mounts=((review_dir, "/review", "ro"),),
         )
 
     # ----- security-critical seam ------------------------------------------
@@ -1312,6 +1310,8 @@ class CliActorRunner:
         """
 
         env = os.environ.copy()
+        env.pop("GITHUB_TOKEN", None)
+        env.pop("GH_TOKEN", None)
         for var, val in (
             ("HTTP_PROXY", self.config.http_proxy),
             ("HTTPS_PROXY", self.config.https_proxy),

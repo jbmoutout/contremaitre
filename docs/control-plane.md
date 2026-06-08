@@ -31,15 +31,15 @@ Audience: humans modifying the orchestrator, and LLMs that need to reason about 
 │   agent container   role=agent      /app  RW    ─┼─►   │   OpenRouter             │
 │   sim container     role=sim        /app  :ro   ─┼─►   │   / OpenCode Zen         │
 │   review container  role=review     /review :ro ─┼─►   │                          │
-│   cli-reviewer      role=cli_review /review :ro ─┼─►   │   GitHub (open egress)   │
+│   cli-reviewer      role=cli_review /review :ro ─┼─►   │   model providers only   │
 │   check sidecar     role=check      /app  RW   ◄─┼─── (host `gh pr create --draft`; │
-│                                                 │      `gh pr comment` per round)│
+│                                                 │      `gh pr comment` + status) │
 │   deps-install      role=deps-install        │     │                          │
 │   deps-clone        role=deps-clone          │     └──────────────────────────┘
 │                                               │
 │   Mount layout                                │
 │     /app             → run worktree           │
-│     /review          → diff + SETTLED only    │
+│     /review          → host-built PR context  │
 │     /app/<deps_mount>→ per-run deps volume    │
 │                                               │
 └───────────────────────────────────────────────┘
@@ -86,11 +86,11 @@ Because that token is exfiltratable, a CLI container's egress is locked **by def
 
 > **Locked ≠ full network.** The allowlist is model-providers-only — **package registries (PyPI / npm / GitHub / …) are NOT on it.** A locked run therefore can't `uv sync` / `npm install` ad-hoc tooling; a run that needs to install deps must opt into open egress with `--allow-open-egress` (or pre-bake the deps via the [deps volume](#deps-caching)).
 
-The lock is the **secure default, not mandatory** — `--allow-open-egress` is the explicit, warned override. The accepted risk differs by tool: codex's neutered refresh token bounds it to ~10-day quota abuse; claude's long-lived OAuth token has no such bound, so open egress on a claude role is closer to account-level exposure — keep it locked. Three layers cooperate:
+The lock is the **secure default, not mandatory** — `--allow-open-egress` is the explicit, warned override. The accepted risk differs by tool: codex's neutered refresh token bounds it to ~10-day quota abuse; claude's long-lived OAuth token has no such bound, so open egress on a claude role is closer to account-level exposure — keep it locked. A post-publish CLI reviewer is treated as a CLI role for this policy even when the agent and SIM are opencode. Three layers cooperate:
 
 | Layer | Function | Behavior for a CLI role |
 |---|---|---|
-| Host (pre-run) | `_maybe_provision_cli_egress` ([cli.py](../contremaitre/cli.py)) | Auto-provisions the network + proxy whenever a CLI role is active (agent *or* SIM) and neither an explicit `--docker-network`/`--https-proxy` nor `--allow-open-egress` was given. |
+| Host (pre-run) | `_maybe_provision_cli_egress` ([cli.py](../contremaitre/cli.py)) | Auto-provisions the network + proxy whenever a CLI role is active (agent, SIM, or post-publish CLI reviewer) and neither an explicit `--docker-network`/`--https-proxy` nor `--allow-open-egress` was given. |
 | Preflight | `_check_network_policy` ([preflight.py](../contremaitre/preflight.py)) | `--allow-open-egress` → WARN-passes (opted in). Otherwise a CLI role with no policy → FAIL (auto-provision failed; refuse rather than run open). |
 | Runner (launch) | `_assert_egress_locked` ([cli_actor.py](../contremaitre/cli_actor.py)) | Launches if egress is locked OR `--allow-open-egress` is set; else refuses. |
 
@@ -223,18 +223,26 @@ HARD GATES (host, all must pass; deterministic)
 
 POST-PUBLISH CLI REVIEW LOOP  (only when --cli-reviewer != none)
 
-  Runs in Docker (role=cli_review, /review :ro, open egress for GitHub).
+  Runs in Docker (role=cli_review, /review :ro, provider-only CLI egress).
   Up to max_cli_review_rounds (default 3) rounds. cli_reviewer.py + _run_cli_review_loop():
 
-    - prompt: prompts/cli_reviewer_prompt.md with {pr_url, round_n, round_of}
-    - runtime: CliActorRunner with allow_open_egress=True (reviewer reads PR diff
-        via GitHub API, session_attr=None → fresh session each round)
-    - per round: each configured tool runs, posts `gh pr comment <pr_url> --body-file`
+    - host writes extras/cli_review_{n:03d}/input/ with:
+        PR.md, pr.json, pr_body.md, diff.patch, changed_files.txt,
+        SETTLED_DESIGN.md, previous_cli_reviews.md, head_sha.txt
+    - prompt: prompts/cli_reviewer_prompt.md with {review_path, round_n, round_of}
+    - runtime: CliActorRunner, session_attr=None → fresh session each round;
+        reviewer reads `/review` + `/app:ro` and emits markdown only
+    - GitHub stays host-owned: no GitHub credentials are passed into Docker;
+        host posts `gh pr comment <pr_url> --body-file` after the reviewer exits
     - LOOKS_GOOD (all tools in the same round): loop exits → READY_FOR_DRAFT_PR;
         worst verdict projected as commit status → success
     - NEEDS_ATTENTION or MUST_FIX: extract `## Required changes` numbered list,
         send cli_revision_followup() (tagged [CLI]) to agent on same branch,
-        commit + push HEAD → branch, then next round
+        require a fresh IMPLEMENTATION_COMPLETE marker, commit, rerun L1 checks,
+        rerun deterministic L0 gates (diff scan, clean worktree, diff hash stable
+        across checks), push HEAD → branch only if all pass, then next round
+    - revision gate or push failure after publication → PR_NEEDS_HUMAN;
+        existing PR remains published for human follow-up
     - max_cli_review_rounds exhausted without all-LOOKS_GOOD → PR_NEEDS_HUMAN;
         worst verdict projected as commit status
     - tool failure (exception or empty output): logged, that tool skipped for
@@ -251,6 +259,7 @@ POST-PUBLISH CLI REVIEW LOOP  (only when --cli-reviewer != none)
     (missing/failure)→ treated as revision trigger, no comment posted
 
   Artifacts per round stored under extras/cli_review_{n:03d}/:
+    input/                    host-built PR context mounted as /review:ro
     {tool}_raw_export.jsonl   raw CLI stream
     {tool}_review.md          H3 header + review body (posted as PR comment)
 ```
@@ -282,7 +291,7 @@ All six values from `TerminalVerdict` ([models.py:35-45](../contremaitre/models.
 | Verdict | Trigger | Reference |
 |---|---|---|
 | `READY_FOR_DRAFT_PR` | APPROVED + hard gates pass + checks pass + publisher succeeds + CLI review loop all-LOOKS_GOOD (or skipped) | [orchestrator.py:761](../contremaitre/orchestrator.py#L761) |
-| `PR_NEEDS_HUMAN` | PR published but CLI review loop exhausted `max_cli_review_rounds` without all-LOOKS_GOOD. Yellow: PR exists on GitHub, a human should review before merging. | [orchestrator.py:646](../contremaitre/orchestrator.py#L646) |
+| `PR_NEEDS_HUMAN` | PR published but CLI review loop exhausted `max_cli_review_rounds` without all-LOOKS_GOOD, or a post-publish revision could not pass gates / push safely. Yellow: PR exists on GitHub, a human should review before merging. | [orchestrator.py:646](../contremaitre/orchestrator.py#L646) |
 | `NO_PR_CHANGES_REQUESTED` | `max_review_rounds` exhausted on CHANGES_REQUESTED | [orchestrator.py:319](../contremaitre/orchestrator.py#L319) |
 | `NO_PR_NEEDS_HUMAN` | NEEDS_HUMAN verdict / malformed verdict (after retries) / missing SETTLED / missing IMPLEMENTATION_COMPLETE / cap trip / hard-gates fail / executable check fail | [orchestrator.py:243, 249, 257, 278, 287, 804, 811, 815](../contremaitre/orchestrator.py#L243) |
 | `FAILED_INFRA` | Unhandled exception during run; SIGTERM | [orchestrator.py:151, 178](../contremaitre/orchestrator.py#L151) |
@@ -386,7 +395,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`models.py`](../contremaitre/models.py) — `State`, `ReviewVerdict`, `CliReviewVerdict`, `TerminalVerdict`, `ActorMode` (`fake` / `opencode` / `cli`), `PublishMode` enums; `RunConfig` (incl. `actor_mode`, `sim_actor_mode`, `cli_tool`, `codex_model`, `codex_effort`, `claude_model`, `claude_effort`), `RunPaths`, `Caps`, `DepsVolume`, `ParsedVerdict`, `RunResult` dataclasses. The stable seam between CLI, orchestrator, and actors.
 - [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
 - [`paths.py`](../contremaitre/paths.py) — slug validation, run-id generation, contained-path builder (prevents escape outside `run_dir`).
-- [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + codex runs, validated as the per-role union: repo/base ref, Docker image, `:ro` mount, network policy (codex defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), `_check_codex_auth` (codex). See [Preflight](#preflight).
+- [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + CLI runs, validated as the per-role union plus the post-publish CLI reviewer: repo/base ref, Docker image, `:ro` mount, network policy (CLI defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), codex / claude auth checks for active CLI tools. See [Preflight](#preflight).
 - [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
 - [`publisher.py`](../contremaitre/publisher.py) — publication boundary: `StubPublisher` (dry-run) vs `GhPublisher` (real `gh pr create --draft`). PR title + body derived from `.contremaitre/SETTLED_DESIGN.md` + SIM verdict summary; `--pr-title` / `--pr-body` override.
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
@@ -403,6 +412,7 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 - `initial_prompt.txt` — agent's turn-1 message
 - `raw_export.jsonl` — agent JSONL stream
 - `sim_raw_export.jsonl` — SIM JSONL stream
+- `extras/cli_review_{n:03d}/input/` — host-built PR context mounted read-only at `/review` for the post-publish CLI reviewer (`PR.md`, `pr.json`, `pr_body.md`, `diff.patch`, `changed_files.txt`, `SETTLED_DESIGN.md`, `previous_cli_reviews.md`, `head_sha.txt`)
 - `extras/cli_review_{n:03d}/{tool}_raw_export.jsonl` — per-round CLI reviewer stream (only when `--cli-reviewer` is set)
 - `extras/cli_review_{n:03d}/{tool}_review.md` — per-round posted PR-comment body, H3 metadata header + review text
 - `claude-*-home/.contremaitre/statusline.jsonl` — claude CLI roles only; whitelisted Claude Code status-line snapshots used by the TUI footer for exact 5-hour / 7-day Claude.ai subscription-window usage when the account exposes those fields. Populated by the post-turn no-tools statusLine meter for the role's active Claude model, not by the main `claude -p` event stream.
@@ -570,7 +580,7 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--openrouter-env-var NAME` | `OPENROUTER_API_KEY` | Env-var name holding the OpenRouter key. |
 | `--docker-network NAME` | — | Docker `--network` for opencode containers. |
 | `--http-proxy URL` / `--https-proxy URL` / `--no-proxy LIST` | — | Container proxy settings (host env is not forwarded). |
-| `--allow-open-egress` | False | Accept unrestricted egress (otherwise a network/proxy is required for opencode, and a codex role auto-locks). For a **codex** role this is the explicit override of the default lock — warned, since the token is exfiltratable; use it when the agent must reach package registries the allowlist blocks. |
+| `--allow-open-egress` | False | Accept unrestricted egress (otherwise a network/proxy is required for opencode, and a CLI role/reviewer auto-locks). For a **codex/claude** role this is the explicit override of the default lock — warned, since the token is exfiltratable; use it when the agent must reach package registries the allowlist blocks. |
 | `--skip-openrouter-key-check` | False | Don't query OpenRouter key metadata. |
 | `--allow-unlimited-openrouter-key` | False | Accept a key with no provider-side credit limit. |
 | `--openrouter-key-url URL` | `https://openrouter.ai/api/v1/key` | OpenRouter key-metadata endpoint. |

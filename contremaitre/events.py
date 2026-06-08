@@ -78,6 +78,7 @@ CLI_REVIEW_STATUS = "cli_review_status"
 CLI_REVIEW_LOOP_REVISION = "cli_review_loop_revision"
 CLI_REVIEW_LOOP_DONE = "cli_review_loop_done"
 CLI_REVIEW_LOOP_EXHAUSTED = "cli_review_loop_exhausted"
+CLI_REVIEW_LOOP_BLOCKED = "cli_review_loop_blocked"
 
 # ----- Cleanup -----
 

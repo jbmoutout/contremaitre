@@ -148,6 +148,17 @@ class PreflightTest(unittest.TestCase):
         )
         self.assertEqual(_check_network_policy(config).status, "FAIL")
 
+    def test_cli_reviewer_no_policy_no_flag_fails(self):
+        # Opencode agent + opencode SIM still needs the CLI egress lock when
+        # a post-publish codex/claude reviewer is configured.
+        config = self._config(
+            actor_mode=ActorMode.OPENCODE,
+            sim_actor_mode=ActorMode.OPENCODE,
+            cli_reviewer="codex",
+            allow_open_egress=False,
+        )
+        self.assertEqual(_check_network_policy(config).status, "FAIL")
+
     def test_codex_role_passes_with_explicit_lock(self):
         config = self._config(
             actor_mode=ActorMode.CLI,

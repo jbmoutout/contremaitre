@@ -320,16 +320,20 @@ class CommandForTest(unittest.TestCase):
 
 
 class BuildPromptTest(unittest.TestCase):
-    def test_includes_pr_url(self):
+    def test_uses_host_review_bundle_not_pr_url_fetching(self):
         prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/42")
-        self.assertIn("https://github.com/x/y/pull/42", prompt)
+        self.assertIn("/review/diff.patch", prompt)
+        self.assertIn("/review/PR.md", prompt)
+        self.assertIn("/app", prompt)
+        self.assertIn("Do not call `gh`", prompt)
+        self.assertNotIn("https://github.com/x/y/pull/42", prompt)
 
     def test_stays_compact(self):
-        # The whole point of the URL-only prompt is that we don't pay for
+        # The whole point of the host-mounted context is that we don't pay for
         # an inline diff. Guard the size so a future "helpful" addition
         # doesn't silently put us back in paste-the-diff territory.
         prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
-        self.assertLess(len(prompt), 2000)
+        self.assertLess(len(prompt), 2600)
 
     def test_specifies_verdict_format(self):
         # Output format locks down the three SCREAMING_SNAKE_CASE keys so

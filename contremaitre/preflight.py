@@ -59,13 +59,22 @@ class PreflightReport:
 
 
 def _active_cli_tools(config: RunConfig) -> set[str]:
-    """The CLI tool(s) in play this run — agent and SIM may differ (cross-CLI)."""
+    """The CLI tool(s) in play this run.
+
+    Agent, SIM, and post-publish reviewer may differ. The reviewer is included
+    because it is still a Dockerized subscription-CLI container and needs the
+    same provider auth + egress lock checks.
+    """
 
     tools: set[str] = set()
     if config.actor_mode == ActorMode.CLI:
         tools.add(config.cli_tool)
     if (config.sim_actor_mode or config.actor_mode) == ActorMode.CLI:
         tools.add(config.sim_cli_tool or config.cli_tool)
+    if config.cli_reviewer == "both":
+        tools.update({"claude", "codex"})
+    elif config.cli_reviewer in {"claude", "codex"}:
+        tools.add(config.cli_reviewer)
     return tools
 
 
@@ -84,13 +93,14 @@ def run_preflight(config: RunConfig) -> PreflightReport:
             _check_network_policy,
             _check_openrouter_key,
         ]
-    if ActorMode.CLI in modes:
+    active_cli_tools = _active_cli_tools(config)
+    if active_cli_tools:
         # CLI actor: no OpenRouter key (the CLI uses the operator's subscription),
         # but the SAME egress policy applies (the in-container token is
         # long-lived), plus an auth-source check per ACTIVE CLI tool — so a mixed
         # codex+claude run validates both the codex token and the claude OAuth token.
         funcs += [_check_docker_image, _check_readonly_mount, _check_network_policy]
-        for tool in sorted(_active_cli_tools(config)):
+        for tool in sorted(active_cli_tools):
             funcs.append(_check_claude_auth if tool == "claude" else _check_codex_auth)
     # Dedupe by function identity (image/readonly/network are shared) so each
     # check runs once even when both runtimes are active.
@@ -212,7 +222,7 @@ def _check_readonly_mount(config: RunConfig) -> PreflightCheck:
 
 
 def _check_network_policy(config: RunConfig) -> PreflightCheck:
-    cli_active = ActorMode.CLI in {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    cli_active = bool(_active_cli_tools(config))
     # A CLI role's egress is locked by default and the runner requires BOTH layers
     # — an `--internal` docker network AND an allowlisting https proxy (exactly
     # `cli_actor._assert_egress_locked`). A generic "either is set" check would

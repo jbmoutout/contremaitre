@@ -114,6 +114,7 @@ class CliEgressIsAutoTest(unittest.TestCase):
         ns = argparse.Namespace(
             actor="cli",
             sim_actor=None,
+            cli_reviewer="none",
             allow_open_egress=False,
             docker_network=None,
             https_proxy=None,
@@ -127,6 +128,9 @@ class CliEgressIsAutoTest(unittest.TestCase):
 
     def test_not_auto_for_pure_opencode(self):
         self.assertFalse(_cli_egress_is_auto(self._args(actor="opencode")))
+
+    def test_auto_for_cli_reviewer_with_opencode_roles(self):
+        self.assertTrue(_cli_egress_is_auto(self._args(actor="opencode", cli_reviewer="codex")))
 
     def test_auto_for_codex_sim_with_opencode_agent(self):
         # Reverse mix: opencode agent + codex SIM still needs the lock (the codex
