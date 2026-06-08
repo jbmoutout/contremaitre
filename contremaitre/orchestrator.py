@@ -547,6 +547,11 @@ class Orchestrator:
                     round=cli_round,
                     reason=f"review context failed: {exc}",
                 )
+                self._post_cli_review_status(
+                    worktree_git=worktree_git,
+                    outcome=outcome,
+                    verdicts=last_round_verdicts,
+                )
                 return TerminalVerdict.PR_NEEDS_HUMAN
 
             for tool in tools:

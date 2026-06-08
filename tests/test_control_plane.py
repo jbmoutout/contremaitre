@@ -251,6 +251,31 @@ class CliReviewRevisionGateTest(unittest.TestCase):
         self.assertTrue(blocked)
         self.assertEqual(blocked[-1]["reason"], "executable checks failed")
 
+    def test_blocked_cli_review_context_posts_commit_status_before_return(self):
+        orch, worktree_git, branch = self._prepared_orchestrator()
+        outcome = self._published_outcome(orch, branch)
+
+        with (
+            mock.patch.object(
+                orch,
+                "_write_cli_review_context",
+                side_effect=OSError("disk full"),
+            ),
+            mock.patch.object(orch, "_agent_turn") as agent_turn,
+            mock.patch.object(orch, "_post_cli_review_status") as post_status,
+        ):
+            verdict = orch._run_cli_review_loop(
+                worktree_git=worktree_git,
+                branch=branch,
+                outcome=outcome,
+                actor=object(),
+            )
+
+        self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        agent_turn.assert_not_called()
+        post_status.assert_called_once()
+        self.assertIn("review context failed", orch._last_cli_review_reason)
+
     def test_empty_cli_reviewer_output_requires_human_without_revision(self):
         orch, worktree_git, branch = self._prepared_orchestrator()
         outcome = self._published_outcome(orch, branch)
