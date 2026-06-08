@@ -1,20 +1,8 @@
-Review the host-provided pull request context mounted at `{review_path}`.
+Review this pull request (round {round_n} of {round_of}). Do not call `gh` — no GitHub credentials exist in this container.
 
-This is review round {round_n} of {round_of}.
-
-Read:
-- `{review_path}/PR.md`
-- `{review_path}/pr.json`
-- `{review_path}/pr_body.md`
-- `{review_path}/diff.patch`
-- `{review_path}/changed_files.txt`
-- `{review_path}/SETTLED_DESIGN.md`
-- `{review_path}/previous_cli_reviews.md`
-
-You may read, grep, and inspect the read-only worktree at `/app` to verify the
-diff against the actual files. Do not call `gh`, do not fetch GitHub, and do
-not assume any GitHub credentials exist in the container. The host will post
-your final markdown as the PR comment.
+```diff
+{diff}
+```
 
 Write the review as markdown to stdout (the caller posts it verbatim as one PR comment — be the comment, no preamble).
 

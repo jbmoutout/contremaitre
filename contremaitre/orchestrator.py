@@ -546,7 +546,10 @@ class Orchestrator:
 
                 self._emit(events.CLI_REVIEW_STARTED, tool=tool, url=outcome.url, round=cli_round)
                 prompt = _cli_reviewer.build_prompt(
-                    pr_url=outcome.url, round_n=cli_round, round_of=max_rounds
+                    pr_url=outcome.url,
+                    diff=(review_dir / "diff.patch").read_text(encoding="utf-8"),
+                    round_n=cli_round,
+                    round_of=max_rounds,
                 )
                 start = time.monotonic()
                 markdown = self._run_one_cli_reviewer(

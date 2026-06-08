@@ -13,6 +13,10 @@ from contremaitre.paths import build_run_paths
 from contremaitre.tui import _derive_phase
 
 
+def _noop(*_: object, **__: object) -> None:
+    pass
+
+
 class DetectAvailableTest(unittest.TestCase):
     def test_neither_installed(self):
         with mock.patch("shutil.which", return_value=None):
@@ -53,7 +57,7 @@ class ResolveChoiceTest(unittest.TestCase):
             flag_value="claude",
             available={},
             tty=True,
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -87,7 +91,7 @@ class ResolveChoiceTest(unittest.TestCase):
             available={"claude": "/bin/claude"},
             tty=True,
             input_fn=lambda _: "",  # Enter = accept
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "claude")
 
@@ -97,7 +101,7 @@ class ResolveChoiceTest(unittest.TestCase):
             available={"codex": "/bin/codex"},
             tty=True,
             input_fn=lambda _: "n",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -107,7 +111,7 @@ class ResolveChoiceTest(unittest.TestCase):
             available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
             input_fn=lambda _: "1",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "codex")
 
@@ -117,7 +121,7 @@ class ResolveChoiceTest(unittest.TestCase):
             available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
             input_fn=lambda _: "s",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -130,7 +134,7 @@ class ResolveChoiceTest(unittest.TestCase):
             tty=True,
             saved_default="codex",
             input_fn=lambda _: "",  # Enter = accept saved
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "codex")
 
@@ -142,7 +146,7 @@ class ResolveChoiceTest(unittest.TestCase):
             tty=True,
             saved_default="codex",
             input_fn=lambda _: "2",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "claude")
 
@@ -154,7 +158,7 @@ class ResolveChoiceTest(unittest.TestCase):
             tty=True,
             saved_default=None,
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -166,7 +170,7 @@ class ResolveChoiceTest(unittest.TestCase):
             tty=True,
             saved_default="none",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -181,7 +185,7 @@ class ResolveChoiceTest(unittest.TestCase):
             tty=True,
             saved_default="auto",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "codex")
 
@@ -194,7 +198,7 @@ class ResolveChoiceTest(unittest.TestCase):
             tty=True,
             saved_default="both",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "codex")
 
@@ -207,7 +211,7 @@ class ResolveChoiceTest(unittest.TestCase):
             tty=True,
             saved_default=None,
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -222,7 +226,7 @@ class SavedDefaultTest(unittest.TestCase):
             tty=True,
             saved_default="codex",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "codex")
 
@@ -235,7 +239,7 @@ class SavedDefaultTest(unittest.TestCase):
             tty=True,
             saved_default="none",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -246,7 +250,7 @@ class SavedDefaultTest(unittest.TestCase):
             tty=True,
             saved_default="claude",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "claude")
 
@@ -264,50 +268,42 @@ class ExpandChoiceTest(unittest.TestCase):
         self.assertEqual(cli_reviewer.expand_choice("garbage"), ())
 
 
+_FAKE_DIFF = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+
 class BuildPromptTest(unittest.TestCase):
-    def test_uses_host_review_bundle_not_pr_url_fetching(self):
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/42")
-        self.assertIn("/review/diff.patch", prompt)
-        self.assertIn("/review/PR.md", prompt)
-        self.assertIn("/app", prompt)
+    def test_inlines_diff_not_path(self):
+        # The diff is inlined as given data so the model reasons about it
+        # directly rather than reading it from a mounted file.
+        prompt = cli_reviewer.build_prompt(
+            pr_url="https://github.com/x/y/pull/42", diff=_FAKE_DIFF
+        )
+        self.assertIn(_FAKE_DIFF, prompt)
+        self.assertNotIn("/review/diff.patch", prompt)
+        self.assertNotIn("/app", prompt)
         self.assertIn("Do not call `gh`", prompt)
         self.assertNotIn("https://github.com/x/y/pull/42", prompt)
-
-    def test_stays_compact(self):
-        # The whole point of the host-mounted context is that we don't pay for
-        # an inline diff. Guard the size so a future "helpful" addition
-        # doesn't silently put us back in paste-the-diff territory.
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
-        self.assertLess(len(prompt), 2600)
 
     def test_specifies_verdict_format(self):
         # Output format locks down the three SCREAMING_SNAKE_CASE keys so
         # machine parsing is unambiguous. No emoji glyphs — just the keys.
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
+        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1", diff=_FAKE_DIFF)
         self.assertNotIn("🟢", prompt)
         self.assertNotIn("🟠", prompt)
         self.assertNotIn("🔴", prompt)
         self.assertIn("LOOKS_GOOD", prompt)
         self.assertIn("NEEDS_ATTENTION", prompt)
         self.assertIn("MUST_FIX", prompt)
-        # Conventional-comments labels for the body.
         self.assertIn("**issue:**", prompt)
         self.assertIn("**nit:**", prompt)
-        # Required changes section is documented in the prompt.
         self.assertIn("## Required changes", prompt)
 
     def test_drops_praise_category(self):
-        # Praise is dropped from the standard label list so the agent
-        # doesn't reach for it by default. Not explicitly forbidden — if
-        # the agent finds something genuinely worth noting positively, it
-        # can fold it into the headline.
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
+        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1", diff=_FAKE_DIFF)
         self.assertNotIn("**praise:**", prompt)
 
     def test_summary_is_headline_plus_why(self):
-        # The earlier "2-3 sentence read" instruction produced press-release
-        # summaries. Headline + why-it-matters lands better with humans.
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
+        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1", diff=_FAKE_DIFF)
         self.assertIn("WHAT this PR does", prompt)
         self.assertIn("WHY it matters", prompt)
 

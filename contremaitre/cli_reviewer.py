@@ -156,18 +156,19 @@ def resolve_choice(
 def build_prompt(
     *,
     pr_url: str,
+    diff: str,
     round_n: int = 1,
     round_of: int = 1,
-    review_path: str = "/review",
 ) -> str:
     """The prompt handed to the CLI reviewer in Docker.
 
     Body lives in `contremaitre/prompts/cli_reviewer_prompt.md` so it can
-    be tuned without touching Python. The MD file has `{round_n}`,
-    `{round_of}`, and `{review_path}` placeholders. `pr_url` remains part of
-    the function signature because the caller records it in guardrails and
-    host-side posting still uses it, but it is not injected into the reviewer
-    instructions: GitHub access is host-owned.
+    be tuned without touching Python. The MD file has `{round_n}`, `{round_of}`,
+    and `{diff}` placeholders. `pr_url` remains part of the function signature
+    because the caller records it in guardrails and host-side posting still uses
+    it, but it is not injected into the reviewer instructions: GitHub access is
+    host-owned. The diff is inlined directly so the model reasons about it as
+    given data rather than reading it from a mounted file.
     """
 
     from .prompts import CLI_REVIEWER_PROMPT
@@ -175,7 +176,7 @@ def build_prompt(
     return CLI_REVIEWER_PROMPT.format(
         round_n=round_n,
         round_of=round_of,
-        review_path=review_path,
+        diff=diff,
     )
 
 
