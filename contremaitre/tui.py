@@ -2315,6 +2315,11 @@ def _render_guardrail(event: dict[str, Any]):
 
 if _TEXTUAL_AVAILABLE:
 
+    class _NoFocusRichLog(RichLog):
+        # can_focus is no longer accepted as a Widget.__init__ kwarg in
+        # Textual 8.x; set it as a class attribute instead.
+        can_focus = False
+
     class ContremaitreTUI(App):
         CSS = """
         Screen { layout: vertical; padding: 0 1 1 1; }
@@ -2477,24 +2482,22 @@ if _TEXTUAL_AVAILABLE:
             yield Static("", id="header2")
             with Horizontal(id="panes"):
                 with Vertical(classes="pane", id="agent-pane"):
-                    yield RichLog(
+                    yield _NoFocusRichLog(
                         id="agent-log",
                         auto_scroll=False,
                         markup=False,
                         wrap=True,
                         highlight=False,
-                        can_focus=False,
                     )
                     yield Static("", classes="pane-sub", id="agent-sub")
                 with Vertical(id="sim-column"):
                     with Vertical(classes="sim-subpane", id="sim-pane"):
-                        yield RichLog(
+                        yield _NoFocusRichLog(
                             id="sim-log",
                             auto_scroll=False,
                             markup=False,
                             wrap=True,
                             highlight=False,
-                            can_focus=False,
                         )
                         yield Static("", classes="pane-sub", id="sim-sub")
             # Post-publish CLI reviewer (claude/codex) — full-width row that
@@ -2503,23 +2506,21 @@ if _TEXTUAL_AVAILABLE:
             # uncompressed 2-column layout above; this row only eats vertical
             # space when it's actually streaming. Stays hidden until then.
             with Vertical(id="cli-review-pane"):
-                yield RichLog(
+                yield _NoFocusRichLog(
                     id="cli-review-log",
                     auto_scroll=False,
                     markup=False,
                     wrap=True,
                     highlight=False,
-                    can_focus=False,
                 )
                 yield Static("", classes="pane-sub", id="cli-review-sub")
             with Vertical(id="activity-panel"):
-                yield RichLog(
+                yield _NoFocusRichLog(
                     id="activity-log",
                     auto_scroll=False,
                     markup=False,
                     wrap=True,
                     highlight=False,
-                    can_focus=False,
                 )
             with Horizontal(id="footer-bar"):
                 yield Static("", id="footer-left")
