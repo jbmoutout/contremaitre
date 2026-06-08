@@ -34,12 +34,12 @@ from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
 from .costs import estimate_recorded_cost_usd, sum_token_usage
-from .diffscan import DiffScanResult, scan_diff
+from .diffscan import DiffScanResult
 from .evaluator import (
-    hard_gate_payload,
     sim_review_summary,
     write_eval_reports,
 )
+from .gates import INTERNAL_PATHS, evaluate_l0, only_internal_changes
 from .extract import extract_run_artifacts
 from .viewer import build_viewer
 from .git_utils import GitRepo
@@ -69,20 +69,6 @@ from .scaffolds import (
     derive_commit_message,
 )
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
-
-# Paths held out of the host commit. `.contremaitre/` / `opencode.json` are
-# orchestration-internal; the rest are conventionally-gitignored build output
-# that some agents produce as a verification step (the worktree may not carry
-# the upstream .gitignore for all of them, so we belt-and-suspenders).
-_HOST_COMMIT_EXCLUDES = (
-    ".contremaitre",
-    "opencode.json",
-    "dist",
-    "build",
-    "out",
-    ".next",
-    "__pycache__",
-)
 
 
 @dataclass(frozen=True)
@@ -790,28 +776,29 @@ class Orchestrator:
     ) -> bool:
         """Run deterministic L0/L1 gates for a post-publish revision."""
 
-        recomputed_hash = diff_hash(worktree_git, self._diff_base)
-        diff_hash_matched = recomputed_hash == revision_hash
-        diff_scan = scan_diff(worktree_git, self._diff_base)
-        clean = _only_contremaitre_changes(worktree_git.status_porcelain())
-        hard_gates = hard_gate_payload(
-            diff_scan=diff_scan,
-            clean_worktree=clean,
-            diff_hash_matched=diff_hash_matched,
+        gate = evaluate_l0(
+            worktree_git=worktree_git,
+            diff_base=self._diff_base,
+            expected_hash=revision_hash,
         )
+        diff_scan = gate.diff_scan
+        clean = gate.clean_worktree
+        hard_gates = gate.payload
+        # L1 stays caller-side: the revision path folds executable-check failure
+        # into its emitted `passed` and block reason (publish keeps them separate).
         checks_failed = any(not check.passed for check in checks)
         self._emit(
             events.HARD_GATES_CHECKED,
             context="cli_review_revision",
             round=cli_round,
-            passed=bool(hard_gates["passed"]) and not checks_failed,
-            diff_hash_matched=diff_hash_matched,
+            passed=gate.passed and not checks_failed,
+            diff_hash_matched=gate.diff_hash_matched,
             diff_scan_passed=diff_scan.passed if diff_scan else False,
             clean_worktree=clean,
             changed_files=len(diff_scan.changed_files) if diff_scan else 0,
             failed_checks=[check.cmd for check in checks if not check.passed],
         )
-        if hard_gates["passed"] and not checks_failed:
+        if gate.passed and not checks_failed:
             return True
         self._emit(
             events.CLI_REVIEW_LOOP_BLOCKED,
@@ -987,24 +974,23 @@ class Orchestrator:
         if self.config.simulate_drift_after_approval:
             self._commit_drift(worktree_git)
 
-        recomputed_hash = diff_hash(worktree_git, self._diff_base)
-        diff_hash_matched = recomputed_hash == approved_hash
-        diff_scan = scan_diff(worktree_git, self._diff_base)
         # `.contremaitre/*` is excluded from staging by design and stays
         # untracked in the worktree for the SIM to read across rounds —
-        # don't count it against clean-worktree.
-        clean = _only_contremaitre_changes(worktree_git.status_porcelain())
-        hard_gates = hard_gate_payload(
-            diff_scan=diff_scan,
-            clean_worktree=clean,
-            diff_hash_matched=diff_hash_matched,
+        # `evaluate_l0` does not count it against clean-worktree.
+        gate = evaluate_l0(
+            worktree_git=worktree_git,
+            diff_base=self._diff_base,
+            expected_hash=approved_hash,
         )
+        recomputed_hash = gate.recomputed_hash
+        diff_scan = gate.diff_scan
+        hard_gates = gate.payload
         self._emit(
             events.HARD_GATES_CHECKED,
-            passed=bool(hard_gates["passed"]),
-            diff_hash_matched=diff_hash_matched,
+            passed=gate.passed,
+            diff_hash_matched=gate.diff_hash_matched,
             diff_scan_passed=diff_scan.passed if diff_scan else False,
-            clean_worktree=clean,
+            clean_worktree=gate.clean_worktree,
             changed_files=len(diff_scan.changed_files) if diff_scan else 0,
         )
         # L1 executable-check gate: blocks only on a configured-and-failing
@@ -1309,7 +1295,7 @@ class Orchestrator:
         self._emit(events.SIMULATED_DIFF_DRIFT)
 
     def _commit_agent_changes(self, repo: GitRepo) -> None:
-        if _only_contremaitre_changes(repo.status_porcelain()):
+        if only_internal_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
         title, body = derive_commit_message(self.paths.worktree, self.run_id)
@@ -1320,7 +1306,7 @@ class Orchestrator:
         # treats `:(exclude)X` as an explicit mention of X, and the add
         # aborts when X is also gitignored ("paths are ignored").
         excludes = [
-            f":(exclude){path}" for path in _HOST_COMMIT_EXCLUDES if not _is_gitignored(repo, path)
+            f":(exclude){path}" for path in INTERNAL_PATHS if not _is_gitignored(repo, path)
         ]
         repo.run("add", "--", ".", *excludes)
         repo.run("commit", "-m", title, "-m", body)
@@ -1611,41 +1597,6 @@ def _is_gitignored(repo: GitRepo, path: str) -> bool:
     """
 
     return repo.run("check-ignore", "-q", "--", path, check=False).returncode == 0
-
-
-def _only_contremaitre_changes(porcelain: str) -> bool:
-    """True iff every `git status --porcelain` row is orchestration-internal.
-
-    Files excluded from commits by pathspec (`.contremaitre/*`,
-    `opencode.json`) are deliberately untracked in the worktree. The
-    host-commit step and the clean-worktree hard gate both need to treat
-    a worktree whose only changes are in these paths as "clean for our
-    purposes":
-
-    - host-commit: skip instead of producing an empty PR.
-    - clean-worktree gate: pass.
-
-    Empty porcelain (no changes at all) is also "clean".
-    """
-
-    _INTERNAL_PREFIXES = (
-        ".contremaitre/",
-        ".contremaitre",
-        "opencode.json",
-        "dist/",
-        "build/",
-        "out/",
-        ".next/",
-        "__pycache__/",
-    )
-
-    for line in porcelain.splitlines():
-        if not line.strip():
-            continue
-        path = line[3:].strip().strip('"')
-        if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
-            return False
-    return True
 
 
 def _copy_file_slice(*, src: Path, dst: Path, start_offset: int) -> None:
