@@ -118,6 +118,7 @@ class Orchestrator:
         # build the `sim_review` payload without threading it through the
         # publication-gate path.
         self._last_sim_parsed: ParsedVerdict | None = None
+        self._last_cli_review_reason: str | None = None
 
     @property
     def _diff_base(self) -> str:
@@ -517,14 +518,17 @@ class Orchestrator:
         tools = list(_cli_reviewer.expand_choice(self.config.cli_reviewer))
 
         if not tools or not outcome.url:
+            self._last_cli_review_reason = None
             return TerminalVerdict.READY_FOR_DRAFT_PR
 
         last_round_verdicts: list[tuple[str, str | None]] = []
+        self._last_cli_review_reason = "post-publish CLI review did not reach LOOKS_GOOD"
 
         for cli_round in range(1, max_rounds + 1):
             self._transition(State.APPROVED, f"CLI review round {cli_round}/{max_rounds}")
             round_verdicts: list[tuple[str, str | None]] = []
             round_needs_revision = False
+            round_reviewer_failed = False
             all_required_changes: list[str] = []
 
             extras_dir = self.paths.run_dir / "extras" / f"cli_review_{cli_round:03d}"
@@ -537,6 +541,7 @@ class Orchestrator:
                     extras_dir=extras_dir,
                 )
             except Exception as exc:
+                self._last_cli_review_reason = f"review context failed: {exc}"
                 self._emit(
                     events.CLI_REVIEW_LOOP_BLOCKED,
                     round=cli_round,
@@ -568,6 +573,13 @@ class Orchestrator:
                 )
 
                 if not markdown:
+                    round_reviewer_failed = True
+                    self._emit(
+                        events.CLI_REVIEW_FAILED,
+                        tool=tool,
+                        reason="empty_output",
+                        round=cli_round,
+                    )
                     round_verdicts.append((tool, None))
                     continue
 
@@ -594,6 +606,7 @@ class Orchestrator:
                         reason=f"write_error: {exc}",
                         round=cli_round,
                     )
+                    round_reviewer_failed = True
                     round_verdicts.append((tool, None))
                     continue
 
@@ -621,11 +634,29 @@ class Orchestrator:
                 )
                 round_verdicts.append((tool, verdict))
 
+                if verdict is None:
+                    round_reviewer_failed = True
+                    self._emit(
+                        events.CLI_REVIEW_FAILED,
+                        tool=tool,
+                        reason="unparseable_verdict",
+                        round=cli_round,
+                    )
+                    continue
                 if verdict != "LOOKS_GOOD":
                     round_needs_revision = True
                     all_required_changes.extend(_cli_reviewer.extract_required_changes(markdown))
 
             last_round_verdicts = round_verdicts
+
+            if round_reviewer_failed:
+                self._last_cli_review_reason = (
+                    "post-publish CLI review failed or produced no parseable verdict"
+                )
+                self._post_cli_review_status(
+                    worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
+                )
+                return TerminalVerdict.PR_NEEDS_HUMAN
 
             if not round_needs_revision:
                 self._emit(
@@ -633,6 +664,7 @@ class Orchestrator:
                     round=cli_round,
                     verdicts={t: v for t, v in round_verdicts},
                 )
+                self._last_cli_review_reason = None
                 self._post_cli_review_status(
                     worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
                 )
@@ -658,6 +690,7 @@ class Orchestrator:
                 max_rounds=max_rounds,
             )
             if not revision_ready:
+                self._last_cli_review_reason = "post-publish CLI review revision was blocked"
                 self._post_cli_review_status(
                     worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
                 )
@@ -1032,7 +1065,20 @@ class Orchestrator:
             outcome=outcome,
             actor=actor,
         )
-        self._write_final_stats(State.APPROVED, terminal_verdict, outcome.reason)
+        final_reason = outcome.reason
+        if terminal_verdict != TerminalVerdict.READY_FOR_DRAFT_PR:
+            final_reason = (
+                self._last_cli_review_reason or "post-publish CLI review did not reach LOOKS_GOOD"
+            )
+            self._write_eval(
+                verdict=terminal_verdict,
+                checks=checks,
+                hard_gates=hard_gates,
+                needs_human=[final_reason],
+                sim_verdict=parsed,
+                reason=final_reason,
+            )
+        self._write_final_stats(State.APPROVED, terminal_verdict, final_reason)
         return RunResult(
             run_id=self.run_id,
             terminal_state=State.APPROVED,
@@ -1040,7 +1086,7 @@ class Orchestrator:
             run_dir=self.paths.run_dir,
             worktree=self.paths.worktree,
             pr_created=True,
-            reason=outcome.reason,
+            reason=final_reason,
         )
 
     def _blocked_by_gates(

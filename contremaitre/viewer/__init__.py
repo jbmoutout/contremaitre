@@ -168,13 +168,36 @@ def _assemble_cli_review(
     side effects.
     """
 
-    started_evt = next((g for g in guardrails if g.get("event") == "cli_review_started"), None)
+    started_evt = next(
+        (g for g in reversed(guardrails) if g.get("event") == "cli_review_started"),
+        None,
+    )
     if started_evt is None:
         return None
-    completed_evt = next((g for g in guardrails if g.get("event") == "cli_review_completed"), None)
-    failed_evt = next((g for g in guardrails if g.get("event") == "cli_review_failed"), None)
 
-    tool = (completed_evt or failed_evt or started_evt).get("tool") or "?"
+    tool = started_evt.get("tool") or "?"
+    round_n = started_evt.get("round")
+    completed_evt = next(
+        (
+            g
+            for g in reversed(guardrails)
+            if g.get("event") == "cli_review_completed"
+            and g.get("tool") == tool
+            and (round_n is None or g.get("round") == round_n)
+        ),
+        None,
+    )
+    failed_evt = next(
+        (
+            g
+            for g in reversed(guardrails)
+            if g.get("event") == "cli_review_failed"
+            and g.get("tool") == tool
+            and (round_n is None or g.get("round") == round_n)
+        ),
+        None,
+    )
+
     if failed_evt is not None and completed_evt is None:
         status = "failed"
     elif completed_evt is not None:

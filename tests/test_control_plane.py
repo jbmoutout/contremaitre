@@ -11,10 +11,18 @@ from unittest import mock
 from contremaitre import events
 from contremaitre.fixture import init_fixture
 from contremaitre.git_utils import GitRepo, GitResult
-from contremaitre.models import Caps, PublishMode, RunConfig, TerminalVerdict
+from contremaitre.models import (
+    Caps,
+    ParsedVerdict,
+    PublishMode,
+    ReviewVerdict,
+    RunConfig,
+    TerminalVerdict,
+)
 from contremaitre.orchestrator import Orchestrator, run
 from contremaitre.publisher import PublishOutcome, PublishOutcomeKind
 from contremaitre.scaffolds import SETTLED_RELPATH
+from contremaitre.verdicts import diff_hash
 
 
 class RecordingGitRepo(GitRepo):
@@ -242,6 +250,104 @@ class CliReviewRevisionGateTest(unittest.TestCase):
         blocked = [row for row in guardrails if row.get("event") == events.CLI_REVIEW_LOOP_BLOCKED]
         self.assertTrue(blocked)
         self.assertEqual(blocked[-1]["reason"], "executable checks failed")
+
+    def test_empty_cli_reviewer_output_requires_human_without_revision(self):
+        orch, worktree_git, branch = self._prepared_orchestrator()
+        outcome = self._published_outcome(orch, branch)
+
+        with (
+            mock.patch.object(orch, "_run_one_cli_reviewer", return_value=""),
+            mock.patch.object(orch, "_agent_turn") as agent_turn,
+            mock.patch.object(orch, "_post_cli_review_status"),
+        ):
+            verdict = orch._run_cli_review_loop(
+                worktree_git=worktree_git,
+                branch=branch,
+                outcome=outcome,
+                actor=object(),
+            )
+
+        self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        agent_turn.assert_not_called()
+        self.assertEqual(worktree_git.pushes, [])
+        guardrails = self._read_jsonl(orch.paths.guardrail_events)
+        self.assertTrue(
+            any(
+                row.get("event") == events.CLI_REVIEW_FAILED and row.get("reason") == "empty_output"
+                for row in guardrails
+            )
+        )
+
+    def test_unparseable_cli_reviewer_output_requires_human_without_revision(self):
+        orch, worktree_git, branch = self._prepared_orchestrator()
+        outcome = self._published_outcome(orch, branch)
+
+        with (
+            mock.patch.object(orch, "_run_one_cli_reviewer", return_value="Looks fine to me"),
+            mock.patch.object(orch, "_agent_turn") as agent_turn,
+            mock.patch.object(orch, "_post_cli_review_status"),
+            mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
+        ):
+            verdict = orch._run_cli_review_loop(
+                worktree_git=worktree_git,
+                branch=branch,
+                outcome=outcome,
+                actor=object(),
+            )
+
+        self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        agent_turn.assert_not_called()
+        self.assertEqual(worktree_git.pushes, [])
+        guardrails = self._read_jsonl(orch.paths.guardrail_events)
+        self.assertTrue(
+            any(
+                row.get("event") == events.CLI_REVIEW_FAILED
+                and row.get("reason") == "unparseable_verdict"
+                for row in guardrails
+            )
+        )
+
+    def test_publish_rewrites_eval_when_cli_review_needs_human(self):
+        orch, worktree_git, branch = self._prepared_orchestrator()
+        approved_hash = diff_hash(worktree_git, orch._diff_base)
+        parsed = ParsedVerdict(
+            verdict=ReviewVerdict.APPROVED,
+            confidence=0.9,
+            required_changes=[],
+            checks_performed=["read diff"],
+            summary="approved",
+            raw="{}",
+        )
+
+        outcome = self._published_outcome(orch, branch)
+
+        def cli_review_loop(**_kwargs):
+            orch._last_cli_review_reason = "post-publish CLI review exhausted"
+            return TerminalVerdict.PR_NEEDS_HUMAN
+
+        publisher = SimpleNamespace(publish=mock.Mock(return_value=outcome))
+        with (
+            mock.patch("contremaitre.orchestrator.make_publisher", return_value=publisher),
+            mock.patch.object(orch, "_run_cli_review_loop", side_effect=cli_review_loop),
+        ):
+            result = orch._publish_or_block(
+                worktree_git=worktree_git,
+                branch=branch,
+                checks=[],
+                parsed=parsed,
+                approved_hash=approved_hash,
+                actor=object(),
+            )
+
+        self.assertEqual(result.verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        self.assertEqual(result.reason, "post-publish CLI review exhausted")
+        stats = json.loads(orch.paths.stats.read_text(encoding="utf-8"))
+        self.assertEqual(stats["verdict"], "PR_NEEDS_HUMAN")
+        self.assertEqual(stats["reason"], "post-publish CLI review exhausted")
+        pr_eval = json.loads(orch.paths.pr_eval.read_text(encoding="utf-8"))
+        self.assertEqual(pr_eval["verdict"], "PR_NEEDS_HUMAN")
+        self.assertEqual(pr_eval["hard_gates"], "PASS")
+        self.assertEqual(pr_eval["needs_human"], ["post-publish CLI review exhausted"])
 
     def test_cli_review_context_is_host_built_for_docker_reviewer(self):
         orch, worktree_git, branch = self._prepared_orchestrator()

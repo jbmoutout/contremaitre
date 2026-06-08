@@ -492,6 +492,7 @@ _VERDICT_KEYS = tuple(_VERDICT_KEY_TO_SCORE.keys())
 
 _TERMINAL_TO_SCORE = {
     "READY_FOR_DRAFT_PR": 1.0,
+    "PR_NEEDS_HUMAN": 0.5,
     "NO_PR_CHANGES_REQUESTED": 0.0,
     "NO_PR_NEEDS_HUMAN": 0.0,
     "FAILED_INFRA": -1.0,
@@ -961,12 +962,13 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
     system_digest = manifest_digest(run_config) if run_config else ""
     input_digest = _input_digest(case, config, base_sha)
 
-    # `ok` distinguishes "system behaved correctly" from "system broke". A
-    # NO_PR_NEEDS_HUMAN or NO_PR_CHANGES_REQUESTED run is a *valid eval
-    # outcome* (the SIM legitimately rejected the diff) — it must count
-    # toward the baseline even though no PR was published. Only infra
-    # failures, missing artifacts, protocol parse failures, and base-SHA
-    # drift mark a run as not-ok.
+    # `ok` distinguishes "system behaved correctly" from "system broke".
+    # READY_FOR_DRAFT_PR and PR_NEEDS_HUMAN both published a draft PR; the
+    # latter is the valid yellow terminal for an exhausted post-publish CLI
+    # review loop. NO_PR_NEEDS_HUMAN / NO_PR_CHANGES_REQUESTED are also valid
+    # eval outcomes (the SIM legitimately rejected the diff). Only infra
+    # failures, missing artifacts, protocol parse failures, and base-SHA drift
+    # mark a run as not-ok.
     #
     # `hard_gates_passed` is only enforced when terminal == READY_FOR_DRAFT_PR:
     # if we published a PR, gates *must* have passed (else the pipeline is
@@ -978,10 +980,18 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
     )
     terminal_healthy = terminal in {
         "READY_FOR_DRAFT_PR",
+        "PR_NEEDS_HUMAN",
         "NO_PR_CHANGES_REQUESTED",
         "NO_PR_NEEDS_HUMAN",
     }
-    gates_consistent = terminal != "READY_FOR_DRAFT_PR" or fc["hard_gates_passed"] is True
+    gates_consistent = (
+        terminal
+        not in {
+            "READY_FOR_DRAFT_PR",
+            "PR_NEEDS_HUMAN",
+        }
+        or fc["hard_gates_passed"] is True
+    )
     ok = (
         not missing
         and bool(fc["sim_verdicts_parse_ok"])

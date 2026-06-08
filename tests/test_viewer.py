@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from contremaitre import events
 from contremaitre.fixture import init_fixture
 from contremaitre.jsonlog import write_json
 from contremaitre.models import Caps, RunConfig
@@ -168,6 +169,46 @@ class ViewerTest(unittest.TestCase):
             },
             data["cli_review_extras"],
         )
+
+    def test_root_cli_review_uses_latest_round_events(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("cli-latest"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "READY_FOR_DRAFT_PR"})
+        paths.guardrail_events.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {"event": events.CLI_REVIEW_STARTED, "tool": "codex", "round": 1},
+                    {
+                        "event": events.CLI_REVIEW_COMPLETED,
+                        "tool": "codex",
+                        "round": 1,
+                        "verdict": "MUST_FIX",
+                    },
+                    {"event": events.CLI_REVIEW_STARTED, "tool": "codex", "round": 2},
+                    {
+                        "event": events.CLI_REVIEW_COMPLETED,
+                        "tool": "codex",
+                        "round": 2,
+                        "verdict": "LOOKS_GOOD",
+                    },
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (paths.run_dir / "codex_review.md").write_text(
+            "### reviewed by `codex`\n\nLOOKS_GOOD - clean\n",
+            encoding="utf-8",
+        )
+
+        data = _extract_data_payload(build_viewer(paths).read_text(encoding="utf-8"))
+
+        self.assertEqual(data["cli_review"]["status"], "completed")
+        self.assertEqual(data["cli_review"]["verdict"], "LOOKS_GOOD")
 
 
 class CodexNormalizationTest(unittest.TestCase):
