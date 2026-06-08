@@ -25,7 +25,7 @@ from .checks import CheckResult
 from .diffscan import DiffScanResult
 from .flow_use import compute_flow_use
 from .jsonlog import write_json
-from .models import ParsedVerdict, RunPaths, TerminalVerdict
+from .models import RunPaths, TerminalVerdict
 
 
 def write_eval_reports(
@@ -69,12 +69,6 @@ def write_eval_reports(
         flow_use = {"status": "error", "reason": repr(exc), "agent": {}, "sim": {}}
         write_json(paths.flow_use_report, flow_use)
 
-    sim_block = sim_review.get("sim") if isinstance(sim_review.get("sim"), dict) else None
-    extra_block = sim_review.get("extra") if isinstance(sim_review.get("extra"), dict) else None
-    sim_confidence = sim_block["confidence"] if sim_block else sim_review.get("confidence")
-    extra_reviewer_confidence = extra_block["confidence"] if extra_block else None
-    cross_family_agreement = sim_review.get("cross_family_agreement")
-
     payload = {
         "verdict": verdict.value,
         "hard_gates": "PASS" if hard_gates.get("passed") else "FAIL",
@@ -86,9 +80,6 @@ def write_eval_reports(
         "scorecard": {
             "executable_confidence": _executable_confidence(checks_payload["status"]),
             "sim_review_confidence": sim_review.get("confidence"),
-            "sim_confidence": sim_confidence,
-            "extra_reviewer_confidence": extra_reviewer_confidence,
-            "cross_family_agreement": cross_family_agreement,
             "process_reliability": trajectory.get("process_reliability", 0.0),
             "self_verified": flow_use["agent"].get("self_verified", {}).get("value"),
             "settled_before_code": flow_use["agent"]
@@ -142,70 +133,6 @@ def sim_review_summary(
         "summary": summary,
         "required_changes": required_changes or [],
         "checks_performed": checks_performed or [],
-    }
-
-
-def combined_review_summary(
-    *,
-    sim: ParsedVerdict,
-    extra: ParsedVerdict | None,
-    merged: ParsedVerdict,
-    extra_attempted: bool,
-) -> dict[str, Any]:
-    """Build pr_eval.json's `sim_review` block from the two reviewer verdicts.
-
-    `extra_attempted=False` (extra disabled) returns the flat back-compat
-    shape so downstream readers unaware of the extra reviewer see exactly
-    the same JSON as before.
-
-    `extra_attempted=True` returns the structured shape: per-reviewer
-    sub-objects, `merged_verdict`, `cross_family_agreement`, and the merged
-    values at the top level (so downstream readers without extra-reviewer
-    awareness still pick up the load-bearing publication verdict).
-    """
-
-    sim_payload = _verdict_payload(sim)
-    flat = {
-        "verdict": sim.verdict.value,
-        "confidence": sim.confidence,
-        "summary": sim.summary,
-        "required_changes": sim.required_changes,
-        "checks_performed": sim.checks_performed,
-    }
-    if not extra_attempted:
-        return flat
-
-    extra_payload = _verdict_payload(extra) if extra is not None else None
-    cross_family_agreement: bool | None
-    if extra is None:
-        cross_family_agreement = None
-    else:
-        cross_family_agreement = sim.verdict == extra.verdict
-
-    return {
-        "sim": sim_payload,
-        "extra": extra_payload,
-        "merged_verdict": merged.verdict.value,
-        "cross_family_agreement": cross_family_agreement,
-        # Top-level mirrors of the merged verdict — kept so readers (eval
-        # markdown, downstream tools) still see a top-level verdict /
-        # confidence / required_changes without needing to know about the
-        # primary-vs-extra split.
-        "verdict": merged.verdict.value,
-        "confidence": merged.confidence,
-        "summary": merged.summary,
-        "required_changes": merged.required_changes,
-        "checks_performed": merged.checks_performed,
-    }
-
-
-def _verdict_payload(verdict: ParsedVerdict) -> dict[str, Any]:
-    return {
-        "verdict": verdict.verdict.value,
-        "confidence": verdict.confidence,
-        "summary": verdict.summary,
-        "required_changes": verdict.required_changes,
-        "checks_performed": verdict.checks_performed,
     }
 
 

@@ -68,7 +68,7 @@ The launcher takes the same flags whether you call `just tui-run …` or `python
 - `--agent-model` / `--sim-model` — OpenRouter model slug, or an OpenCode Zen model, for an opencode role. Omit to pick interactively.
 - `--codex-model` / `--codex-effort` — codex-native model (default `gpt-5.5`) and reasoning effort (default `high`) for a codex role.
 - `--claude-model` / `--claude-effort` — claude model (empty = `~/.claude` account default) and effort (`low|medium|high|max`, default `high`) for a claude role.
-- `--cli-reviewer auto|codex|claude|both|none` — after the draft PR opens, run a code review on your host via `claude -p` or `codex exec` and post the result as a PR comment. Uses your Claude Pro/Max or ChatGPT Plus subscription (NOT API). `auto` detects what's installed; `both` runs claude then codex (two comments); `none` skips. Also posts a commit status (context `contremaitre/cli-review`): worst verdict `MUST_FIX` → `failure`, else `success` — require the context in branch protection to gate merge on it.
+- `--cli-reviewer auto|codex|claude|none` — after the draft PR opens, run a post-publish revision loop: a CLI reviewer (codex/claude, in a read-only Docker container) reviews host-provided PR context mounted at `/review` plus the read-only worktree at `/app`; GitHub credentials and `gh` calls stay on the host, which posts the returned markdown as the PR comment. `LOOKS_GOOD` → loop exits as `READY_FOR_DRAFT_PR`; `NEEDS_ATTENTION` or `MUST_FIX` → the agent addresses the required changes on the same branch, then the host commits, reruns deterministic gates (`--check-cmd`, diff scan, diff hash stability, clean worktree), pushes only if they pass, and starts the next round. After `--max-cli-review-rounds` (default 3) rounds without `LOOKS_GOOD`, or if a post-publish revision cannot be safely pushed, the run ends as `PR_NEEDS_HUMAN` (PR is published, a human should review before merging). Uses your Claude Pro/Max or ChatGPT Plus subscription (NOT API). `auto` detects what's installed; `none` skips. Also projects the worst verdict as a commit status (context `contremaitre/cli-review`): `MUST_FIX` → `failure`, else `success` — require it in branch protection to gate merge.
 - `--check-cmd "<command>"` *(repeatable)* — fast deterministic check the post-implementation worktree must pass before publishing (e.g. `"npx tsc --noEmit"`, `"uv run pytest -q"`).
 - `--publish-mode stub|gh` — `stub` (default) is a full dry-run with no `git push` or `gh pr create`; `gh` opens the draft PR.
 - `--max-turns 30` / `--max-wall-minutes 180` / `--max-cost-usd 30` — per-run budgets; the orchestrator aborts cleanly on cap.
@@ -96,15 +96,14 @@ codex_effort = "high"                                    # minimal | low | mediu
 # claude_effort = "high"                                 # low | medium | high | max
 agent_model = "opencode/big-pickle"                      # used when a role is opencode
 sim_model = "opencode/big-pickle"
-extra_reviewer_model = "opencode/nemotron-3-super-free"  # or "skip" to flip Enter to skip
-cli_reviewer = "both"                                    # auto | codex | claude | both | none
+cli_reviewer = "auto"                                    # auto | codex | claude | none
 ```
 
 All keys are optional; unknown / malformed values degrade silently. `--no-prompt` skips the pickers entirely and uses these values verbatim.
 
 ### Caveats
 
-- **`--cli-reviewer` is not free.** It calls `claude -p` or `codex exec` on your machine against *your subscription* (Claude Pro/Max, ChatGPT Plus). Each review burns your usage allowance. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are scrubbed from the subprocess env so it can't silently fall through to billed API.
+- **`--cli-reviewer` is not free.** Each review round runs codex or claude headless in Docker against *your subscription* (Claude Pro/Max, ChatGPT Plus). The host provides `/review` context and posts the returned markdown; the reviewer container receives no GitHub credentials. Revision rounds also burn agent quota. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are scrubbed from the reviewer container so it can't fall through to billed API.
 - **Free models are rate-limited.** OpenCode Zen's free tier is generous but bounded; long runs or many evals eventually hit a daily cap that surfaces as `QUOTA_EXHAUSTED`.
 - **Paid OpenRouter runs cost real money.** A single `n=3` eval cell on `openrouter/anthropic/claude-sonnet-4.6` runs ~$7–10. The default eval config uses free Zen models for a reason.
 - **Subscription CLI runs burn your plan.** codex/claude roles are subscription usage, not API billing. The TUI footer shows per-role cost/free/quota: codex's 5h rollout limit, Claude's exact statusLine percentages, or `claude ?` / `codex ?` when a counter is unavailable. Claude's exact counter needs one tiny no-tools meter request after each successful Claude turn. Keep egress locked unless a run explicitly needs open internet; `CLAUDE_CODE_OAUTH_TOKEN` is long-lived.
@@ -120,7 +119,7 @@ All keys are optional; unknown / malformed values degrade silently. `--no-prompt
 - `contremaitre image build [--variant base|rust|go]` — build the runtime image. The default-variant image auto-builds on first opencode-mode run and auto-rebuilds when the Dockerfile changes.
 - `contremaitre fixture init <path>` — create a tiny git repo for fake-actor smoke runs.
 
-For controlled egress on an **opencode** run (instead of `--allow-open-egress`), pass `--docker-network`, `--http-proxy`, `--https-proxy`, `--no-proxy`. Ambient proxy env vars are *not* forwarded into containers — only what you pass explicitly. A **CLI** run (codex/claude) needs none of this by default: it auto-provisions its own internal network + allowlist proxy (and refuses to run open unless you pass `--allow-open-egress`).
+For controlled egress on an **opencode** run (instead of `--allow-open-egress`), pass `--docker-network`, `--http-proxy`, `--https-proxy`, `--no-proxy`. Ambient proxy env vars are *not* forwarded into containers — only what you pass explicitly. A **CLI** role or CLI reviewer (codex/claude) needs none of this by default: it auto-provisions its own internal network + allowlist proxy (and refuses to run open unless you pass `--allow-open-egress`).
 
 ## When something goes wrong
 

@@ -16,6 +16,7 @@ import json
 import pytest
 
 from contremaitre import events
+from contremaitre.models import ModelSpec
 from contremaitre.tui import (
     _PAL_ERROR,
     _PAL_TEXT,
@@ -46,7 +47,7 @@ from contremaitre.tui import (
     _render_guardrail,
     _reviewer_glyph,
     _reviewer_status,
-    _round_verdicts,
+    _round_verdict,
     _self_verified_in,
     _settled_in,
     _short_repo,
@@ -284,8 +285,8 @@ def test_derive_phase_done_ok_for_ready_for_draft_pr():
     assert color == "ok"
 
 
-def test_derive_phase_done_warn_for_no_pr_variants():
-    for verdict in ("NO_PR_CHANGES_REQUESTED", "NO_PR_NEEDS_HUMAN"):
+def test_derive_phase_done_warn_for_published_human_and_no_pr_variants():
+    for verdict in ("PR_NEEDS_HUMAN", "NO_PR_CHANGES_REQUESTED", "NO_PR_NEEDS_HUMAN"):
         phase, color = _derive_phase(
             terminal=True,
             terminal_verdict=verdict,
@@ -394,38 +395,27 @@ def test_verdict_glyph_unknown_or_none():
     assert g == "·"
 
 
-# ===== _round_verdicts =====
+# ===== _round_verdict =====
 
 
-def test_round_verdicts_returns_none_for_missing_round():
-    sim, extra = _round_verdicts([{"round": 1, "verdict": "APPROVED"}], 2)
-    assert sim is None
-    assert extra is None
+def test_round_verdict_returns_none_for_missing_round():
+    assert _round_verdict([{"round": 1, "verdict": "APPROVED"}], 2) is None
 
 
-def test_round_verdicts_picks_sim_only():
+def test_round_verdict_picks_sim():
     cycles = [{"round": 1, "verdict": "APPROVED"}]  # default reviewer = sim
-    sim, extra = _round_verdicts(cycles, 1)
-    assert sim == "APPROVED"
-    assert extra is None
+    assert _round_verdict(cycles, 1) == "APPROVED"
 
 
-def test_round_verdicts_picks_both_reviewers():
-    cycles = [
-        {"round": 1, "verdict": "APPROVED", "reviewer": "sim"},
-        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
-    ]
-    sim, extra = _round_verdicts(cycles, 1)
-    assert sim == "APPROVED"
-    assert extra == "CHANGES_REQUESTED"
+def test_round_verdict_ignores_non_sim_reviewer():
+    # Only the sim reviewer row is considered; any other reviewer is ignored.
+    cycles = [{"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "other"}]
+    assert _round_verdict(cycles, 1) is None
 
 
-def test_round_verdicts_skips_unavailable_entries():
-    cycles = [
-        {"round": 1, "verdict": "APPROVED", "reviewer": "sim", "unavailable": True},
-    ]
-    sim, extra = _round_verdicts(cycles, 1)
-    assert sim is None
+def test_round_verdict_skips_unavailable_entries():
+    cycles = [{"round": 1, "verdict": "APPROVED", "reviewer": "sim", "unavailable": True}]
+    assert _round_verdict(cycles, 1) is None
 
 
 # ===== _current_review_round =====
@@ -436,13 +426,10 @@ def test_current_review_round_zero_when_no_starts():
 
 
 def test_current_review_round_counts_only_sim_review_starts():
-    # Extra-reviewer actor_starts should NOT bump the round count —
-    # they're the second reviewer within an already-opened round.
     guardrails = [
         _g(events.OPENCODE_ACTOR_START, role="agent"),
         _g(events.OPENCODE_ACTOR_START, role="sim"),
         _g(events.OPENCODE_ACTOR_START, role="review"),
-        _g(events.OPENCODE_ACTOR_START, role="review", reviewer_id="extra"),
     ]
     assert _current_review_round(guardrails) == 1
 
@@ -450,10 +437,8 @@ def test_current_review_round_counts_only_sim_review_starts():
 def test_current_review_round_advances_per_loop_back():
     guardrails = [
         _g(events.OPENCODE_ACTOR_START, role="review"),
-        _g(events.OPENCODE_ACTOR_START, role="review", reviewer_id="extra"),
         _g(events.OPENCODE_ACTOR_START, role="agent"),
         _g(events.OPENCODE_ACTOR_START, role="review"),
-        _g(events.OPENCODE_ACTOR_START, role="review", reviewer_id="extra"),
         _g(events.OPENCODE_ACTOR_START, role="agent"),
         _g(events.OPENCODE_ACTOR_START, role="review"),  # round 3 just opened
     ]
@@ -464,86 +449,48 @@ def test_current_review_round_advances_per_loop_back():
 
 
 def test_reviewer_status_idle_when_no_start():
-    assert _reviewer_status(round_n=1, review_cycles=[], guardrails=[], is_extra=False) == "idle"
+    assert _reviewer_status(round_n=1, review_cycles=[], guardrails=[]) == "idle"
 
 
 def test_reviewer_status_streaming_when_started_no_verdict():
     guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=[], guardrails=guardrails, is_extra=False)
-        == "streaming"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=[], guardrails=guardrails) == "streaming"
 
 
 def test_reviewer_status_approved():
     cycles = [{"round": 1, "verdict": "APPROVED", "reviewer": "sim"}]
     guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails, is_extra=False)
-        == "approved"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails) == "approved"
 
 
 def test_reviewer_status_changes_req():
     cycles = [{"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"}]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[], is_extra=False)
-        == "changes_req"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[]) == "changes_req"
 
 
 def test_reviewer_status_needs_human():
     cycles = [{"round": 1, "verdict": "NEEDS_HUMAN", "reviewer": "sim"}]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[], is_extra=False)
-        == "needs_human"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[]) == "needs_human"
 
 
 def test_reviewer_status_unavailable():
     cycles = [{"round": 1, "reviewer": "sim", "unavailable": True}]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[], is_extra=False)
-        == "unavailable"
-    )
-
-
-def test_reviewer_status_extra_isolated_from_sim():
-    # SIM has a verdict; extra hasn't started yet for this round.
-    cycles = [{"round": 1, "verdict": "APPROVED", "reviewer": "sim"}]
-    guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails, is_extra=True)
-        == "idle"
-    )
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=[]) == "unavailable"
 
 
 def test_reviewer_status_per_round_independence():
-    # Round 1 fully done (both verdicts present), round 2 SIM streaming.
+    # Round 1 done, round 2 SIM streaming.
     cycles = [
         {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"},
-        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
     ]
     guardrails = [
-        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 1 sim
-        _g(events.OPENCODE_ACTOR_START, role="review", reviewer_id="extra"),  # round 1 extra
+        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 1
         _g(events.OPENCODE_ACTOR_START, role="agent"),  # work loop
-        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 2 sim — streaming
+        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 2 — streaming
     ]
-    assert (
-        _reviewer_status(round_n=2, review_cycles=cycles, guardrails=guardrails, is_extra=False)
-        == "streaming"
-    )
-    assert (
-        _reviewer_status(round_n=2, review_cycles=cycles, guardrails=guardrails, is_extra=True)
-        == "idle"
-    )
-    # Round 1 verdicts are still recoverable for the persistent token /
-    # warnings logic to inspect prior rounds.
-    assert (
-        _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails, is_extra=False)
-        == "changes_req"
-    )
+    assert _reviewer_status(round_n=2, review_cycles=cycles, guardrails=guardrails) == "streaming"
+    # Round 1 verdict is still recoverable for prior-round inspection.
+    assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails) == "changes_req"
 
 
 # ===== _reviewer_glyph =====
@@ -585,8 +532,6 @@ def _default_label_kwargs(**overrides):
         pr_number=None,
         current_review_round=0,
         sim_review_statuses=[],
-        extra_review_statuses=[],
-        extra_enabled=False,
     )
     base.update(overrides)
     return base
@@ -657,50 +602,15 @@ def test_phase_label_reviewing_shows_sim_verdict():
     )
     assert "Review " in text.plain
     assert "✓" in text.plain
-    assert "Extra Review" not in text.plain  # extra disabled, slot hidden
-
-
-def test_phase_label_reviewing_extra_slot_hidden_when_idle():
-    # extra_enabled=True but extra hasn't started this round — slot stays
-    # hidden until the extra actor's first event, so the label grows
-    # organically rather than showing a placeholder dot.
-    text = _current_phase_label(
-        **_default_label_kwargs(
-            phase="reviewing",
-            current_review_round=1,
-            sim_review_statuses=["streaming"],
-            extra_review_statuses=["idle"],
-            extra_enabled=True,
-        )
-    )
-    assert "Extra Review" not in text.plain
-
-
-def test_phase_label_reviewing_extra_slot_shown_when_streaming():
-    text = _current_phase_label(
-        **_default_label_kwargs(
-            phase="reviewing",
-            current_review_round=1,
-            sim_review_statuses=["approved"],
-            extra_review_statuses=["streaming"],
-            extra_enabled=True,
-        )
-    )
-    assert "Review " in text.plain
-    assert "Extra Review" in text.plain
-    # Both glyphs present: ✓ for sim, ⏵ for extra streaming
-    assert "✓" in text.plain
-    assert "⏵" in text.plain
 
 
 def test_phase_label_reviewing_multi_round():
     # Round 2 in flight — label shows round 2, not 1, even though
     # review_cycles still has round-1 verdicts recorded. Past rounds
-    # stack their glyphs after "Review" / "Extra Review" so the
-    # operator sees the full reviewing history without scrolling logs.
+    # stack their glyphs after "Review" so the operator sees the full
+    # reviewing history without scrolling logs.
     cycles = [
         {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"},
-        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
     ]
     text = _current_phase_label(
         **_default_label_kwargs(
@@ -708,15 +618,13 @@ def test_phase_label_reviewing_multi_round():
             review_cycles=cycles,
             current_review_round=2,
             sim_review_statuses=["changes_req", "streaming"],
-            extra_review_statuses=["changes_req", "streaming"],
-            extra_enabled=True,
         )
     )
     assert "round 2" in text.plain
     assert "round 1" not in text.plain
-    # Two glyphs per reviewer slot: ✗ (round 1) then ⏵ (round 2).
-    assert text.plain.count("✗") == 2
-    assert text.plain.count("⏵") == 2
+    # Two glyphs for SIM: ✗ (round 1) then ⏵ (round 2).
+    assert text.plain.count("✗") == 1
+    assert text.plain.count("⏵") == 1
 
 
 def test_phase_label_done_pr_pushed_without_title_is_just_done():
@@ -742,6 +650,20 @@ def test_phase_label_done_pr_pushed_with_title_appended():
     assert "Done" in text.plain
     assert "fix: refactor user auth" in text.plain
     assert "1234" not in text.plain  # number still belongs to verdict zone
+
+
+def test_phase_label_done_pr_needs_human_keeps_title_and_review_tail():
+    text = _current_phase_label(
+        **_default_label_kwargs(
+            phase="done",
+            terminal_verdict="PR_NEEDS_HUMAN",
+            pr_title="fix: harden cli review loop",
+            cli_review_states=[("codex", "completed", "MUST_FIX")],
+        )
+    )
+    assert "PR needs human" in text.plain
+    assert "fix: harden cli review loop" in text.plain
+    assert "CODEX Review" in text.plain
 
 
 def test_phase_label_done_truncates_long_pr_title():
@@ -818,60 +740,24 @@ def test_persistent_review_token_none_when_last_round_approved():
 
 
 def test_warnings_token_none_when_quiet():
-    assert (
-        _warnings_token(recoveries=[], test_runs=[], review_cycles=[], extra_enabled=False) is None
-    )
+    assert _warnings_token(recoveries=[], test_runs=[]) is None
 
 
 def test_warnings_token_emits_recovery_count():
-    token = _warnings_token(
-        recoveries=[{}, {}], test_runs=[], review_cycles=[], extra_enabled=False
-    )
+    token = _warnings_token(recoveries=[{}, {}], test_runs=[])
     assert token is not None
     assert "↻2" in token.plain
 
 
 def test_warnings_token_emits_tests_failed():
-    token = _warnings_token(
-        recoveries=[], test_runs=[{"returncode": 1}], review_cycles=[], extra_enabled=False
-    )
+    token = _warnings_token(recoveries=[], test_runs=[{"returncode": 1}])
     assert token is not None
     assert "tests ✗" in token.plain
 
 
 def test_warnings_token_tests_passing_stays_quiet():
     # All-pass tests SHOULD NOT surface — the warnings zone is loud signals only.
-    assert (
-        _warnings_token(
-            recoveries=[],
-            test_runs=[{"returncode": 0}, {"returncode": 0}],
-            review_cycles=[],
-            extra_enabled=False,
-        )
-        is None
-    )
-
-
-def test_warnings_token_extra_disagreed():
-    cycles = [
-        {"round": 1, "verdict": "APPROVED", "reviewer": "sim"},
-        {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "extra"},
-    ]
-    token = _warnings_token(recoveries=[], test_runs=[], review_cycles=cycles, extra_enabled=True)
-    assert token is not None
-    assert "disagreed" in token.plain
-
-
-def test_warnings_token_extra_agreed_stays_quiet():
-    # Agreement is the happy path; nothing should appear.
-    cycles = [
-        {"round": 1, "verdict": "APPROVED", "reviewer": "sim"},
-        {"round": 1, "verdict": "APPROVED", "reviewer": "extra"},
-    ]
-    assert (
-        _warnings_token(recoveries=[], test_runs=[], review_cycles=cycles, extra_enabled=True)
-        is None
-    )
+    assert _warnings_token(recoveries=[], test_runs=[{"returncode": 0}, {"returncode": 0}]) is None
 
 
 # ===== _terminal_badge =====
@@ -886,6 +772,12 @@ def test_terminal_badge_pr_pushed_with_number():
 def test_terminal_badge_pr_pushed_no_number():
     text, _ = _terminal_badge("READY_FOR_DRAFT_PR", None)
     assert text == "PR PUSHED"
+
+
+def test_terminal_badge_pr_needs_human_with_number():
+    text, _ = _terminal_badge("PR_NEEDS_HUMAN", 1234)
+    assert "PR NEEDS HUMAN" in text
+    assert "1234" in text
 
 
 def test_terminal_badge_no_pr_changes_req():
@@ -1292,7 +1184,7 @@ def test_short_repo_empty_returns_placeholder():
     assert _short_repo("") == "?"
 
 
-# ===== cli_reviewer="both" multi-tool helpers =====
+# ===== cli_reviewer multi-tool helpers =====
 
 
 def test_aggregate_verdict_picks_worst():
@@ -1315,51 +1207,39 @@ def test_aggregate_verdict_ignores_unknown_keys():
     assert _aggregate_cli_review_verdict(["BIZARRE", "MUST_FIX"]) == "MUST_FIX"
 
 
-def test_derive_cli_review_states_both_streaming():
-    # Both started, neither completed → both surfaces as streaming.
-    guardrails = [
-        _g(events.CLI_REVIEW_STARTED, tool="claude"),
-        _g(events.CLI_REVIEW_STARTED, tool="codex"),
-    ]
-    states = _derive_cli_review_states(guardrails, "both")
-    assert states == [("claude", "streaming", None), ("codex", "streaming", None)]
+def test_derive_cli_review_states_streaming():
+    # Tool started, not yet completed → surfaces as streaming.
+    guardrails = [_g(events.CLI_REVIEW_STARTED, tool="claude")]
+    states = _derive_cli_review_states(guardrails, "claude")
+    assert states == [("claude", "streaming", None)]
 
 
-def test_derive_cli_review_states_one_completed_one_streaming():
-    # Claude finished with a verdict; codex is still in flight. Order
-    # matches expand_choice — claude first, codex second.
+def test_derive_cli_review_states_completed():
+    # Tool finished with a verdict — state is "completed" with verdict attached.
     guardrails = [
         _g(events.CLI_REVIEW_STARTED, tool="claude"),
         _g(events.CLI_REVIEW_COMPLETED, tool="claude", verdict="LOOKS_GOOD"),
-        _g(events.CLI_REVIEW_STARTED, tool="codex"),
     ]
-    states = _derive_cli_review_states(guardrails, "both")
-    assert states == [
-        ("claude", "completed", "LOOKS_GOOD"),
-        ("codex", "streaming", None),
-    ]
+    states = _derive_cli_review_states(guardrails, "claude")
+    assert states == [("claude", "completed", "LOOKS_GOOD")]
 
 
 def test_derive_cli_review_states_failed_tool_surfaces_status():
+    # Tool that failed surfaces as "failed", verdict is None.
     guardrails = [
-        _g(events.CLI_REVIEW_STARTED, tool="claude"),
-        _g(events.CLI_REVIEW_FAILED, tool="claude"),
         _g(events.CLI_REVIEW_STARTED, tool="codex"),
-        _g(events.CLI_REVIEW_COMPLETED, tool="codex", verdict="MUST_FIX"),
+        _g(events.CLI_REVIEW_FAILED, tool="codex"),
     ]
-    states = _derive_cli_review_states(guardrails, "both")
-    assert states == [
-        ("claude", "failed", None),
-        ("codex", "completed", "MUST_FIX"),
-    ]
+    states = _derive_cli_review_states(guardrails, "codex")
+    assert states == [("codex", "failed", None)]
 
 
 def test_derive_cli_review_states_filters_unstarted_tools():
-    # `both` was requested but only claude has actually started yet —
-    # codex shouldn't pre-render as a dim placeholder.
-    guardrails = [_g(events.CLI_REVIEW_STARTED, tool="claude")]
-    states = _derive_cli_review_states(guardrails, "both")
-    assert states == [("claude", "streaming", None)]
+    # Tool not yet started is not pre-rendered as a dim placeholder —
+    # only tools that have emitted cli_review_started are included.
+    guardrails = []  # nothing started yet
+    states = _derive_cli_review_states(guardrails, "claude")
+    assert states == []
 
 
 def test_derive_cli_review_states_none_choice_returns_empty():
@@ -1376,13 +1256,21 @@ def test_derive_cli_review_states_single_tool_returns_single_entry():
     ]
 
 
+def test_derive_cli_review_states_latest_round_wins():
+    guardrails = [
+        _g(events.CLI_REVIEW_STARTED, tool="codex", round=1),
+        _g(events.CLI_REVIEW_COMPLETED, tool="codex", round=1, verdict="MUST_FIX"),
+        _g(events.CLI_REVIEW_STARTED, tool="codex", round=2),
+    ]
+
+    assert _derive_cli_review_states(guardrails, "codex") == [("codex", "streaming", None)]
+
+
 def test_review_status_tail_renders_two_tool_glyphs_for_both():
     # The multi-tool path renders one `<TOOL> Review <glyph>` segment
     # per tool — operator sees both verdicts at a glance.
     tail = _review_status_tail(
         sim_review_statuses=[],
-        extra_review_statuses=[],
-        extra_enabled=False,
         cli_review_states=[
             ("claude", "completed", "LOOKS_GOOD"),
             ("codex", "streaming", None),
@@ -1399,8 +1287,6 @@ def test_review_status_tail_falls_back_to_single_tool_params():
     # (status, tool, verdict) trio still drives a single segment.
     tail = _review_status_tail(
         sim_review_statuses=[],
-        extra_review_statuses=[],
-        extra_enabled=False,
         cli_review_status="completed",
         cli_review_tool="claude",
         cli_review_verdict="MUST_FIX",
@@ -1758,65 +1644,118 @@ def test_render_event_survives_claude_iso_string_timestamp():
     _render_event(ev)  # must not raise
 
 
-def test_model_from_init_events_surfaces_claude_model():
-    from contremaitre.tui import _model_from_init_events
+def test_resolved_model_from_events_surfaces_claude_model():
+    from contremaitre.models import resolved_model_from_events
 
     events = [
         {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5},
         {"type": "system", "subtype": "init", "model": "claude-sonnet-4-6", "session_id": "s"},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
     ]
-    assert _model_from_init_events(events) == "claude-sonnet-4-6"
-    # No init event (e.g. codex stream) → None (header keeps its configured label).
-    assert _model_from_init_events([{"type": "turn.started"}]) is None
+    assert resolved_model_from_events(events) == "claude-sonnet-4-6"
+    # No init event (e.g. codex stream) → None (spec keeps its requested model).
+    assert resolved_model_from_events([{"type": "turn.started"}]) is None
 
 
-def test_relabel_with_real_model_keeps_effort_suffix():
-    from contremaitre.tui import _relabel_with_real_model
+def test_with_resolved_sharpens_identity_keeping_effort():
+    from contremaitre.models import ModelSpec
 
-    # Back-filling the stream's real model must preserve the effort annotation
-    # built by role_model_label — the header would otherwise lose effort the
-    # moment a claude run starts.
+    # The live relabel: back-filling the stream's real model must keep the
+    # effort — the header would otherwise lose it the moment a claude run starts.
+    spec = ModelSpec(runtime="claude", requested="", effort="high")
+    sharp = spec.with_resolved("claude-opus-4-8")
+    assert sharp.display() == "claude/claude-opus-4-8 high"
+    assert sharp.canonical() == ("claude-opus-4-8", "claude")
+    # No stream model (codex) → unchanged spec, by identity.
+    assert spec.with_resolved(None) is spec
+
+
+def test_model_spec_display_shows_runtime_prefix():
+    from contremaitre.models import ModelSpec
+
+    # CLI roles: `<runtime>/<short-model> <effort>`.
+    assert ModelSpec.from_record("gpt-5.5 (codex, effort=high)").display() == "codex/gpt-5.5 high"
     assert (
-        _relabel_with_real_model("claude default (claude, effort=high)", "claude-opus-4-8")
-        == "claude-opus-4-8 (claude, effort=high)"
-    )
-    assert (
-        _relabel_with_real_model("opus (claude, effort=max)", "claude-opus-4-8")
-        == "claude-opus-4-8 (claude, effort=max)"
-    )
-    # A bare label (no annotation) just becomes the real model.
-    assert _relabel_with_real_model("opus", "claude-opus-4-8") == "claude-opus-4-8"
-
-
-def test_model_effort_display_shows_runtime_prefix():
-    from contremaitre.tui import _model_effort_display
-
-    # CLI roles: `<tool>/<short-model> <effort>` — no `effort=`, no nesting.
-    assert _model_effort_display("gpt-5.5 (codex, effort=high)") == "codex/gpt-5.5 high"
-    assert (
-        _model_effort_display("claude-opus-4-8 (claude, effort=max)")
+        ModelSpec.from_record("claude-opus-4-8 (claude, effort=max)").display()
         == "claude/claude-opus-4-8 max"
     )
     # opencode role: keep `<provider>/<short-model>`, no effort.
     assert (
-        _model_effort_display("opencode/deepseek-v4-flash-free")
+        ModelSpec.from_record("opencode/deepseek-v4-flash-free").display()
         == "opencode/deepseek-v4-flash-free"
     )
     # openrouter slug drops the middle org segment: `<provider>/<short-model>`.
     assert (
-        _model_effort_display("openrouter/deepseek/deepseek-v4-flash")
+        ModelSpec.from_record("openrouter/deepseek/deepseek-v4-flash").display()
         == "openrouter/deepseek-v4-flash"
     )
     # Unknown/empty → null sentinel.
-    assert _model_effort_display("?") == "?"
-    assert _model_effort_display(None) == "?"
-    assert _model_effort_display("") == "?"
+    assert ModelSpec.from_record("?").display() == "?"
+    assert ModelSpec.from_record(None).display() == "?"
+    assert ModelSpec.from_record("").display() == "?"
 
 
-def test_read_run_models_reconstructs_cli_role_labels_from_run_config(tmp_path):
+def test_read_run_models_reads_model_specs_from_run_config(tmp_path):
     from contremaitre.tui import _read_run_models
 
+    # run_config.json now persists the canonical ModelSpec dict per role.
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": {
+                    "runtime": "codex",
+                    "requested": "gpt-5.5",
+                    "effort": "high",
+                    "resolved": None,
+                    "provider": None,
+                },
+                "sim_model": {
+                    "runtime": "claude",
+                    "requested": "opus",
+                    "effort": "max",
+                    "resolved": None,
+                    "provider": None,
+                },
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, _cli_review, _image, _target, _base = _read_run_models(tmp_path)
+    assert agent.display() == "codex/gpt-5.5 high"
+    assert sim.display() == "claude/opus max"
+
+
+def test_read_run_models_tolerates_legacy_string_run_config(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    # Historical run dirs hold the legacy label/slug string; from_record absorbs
+    # it so the reader still renders them.
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": "gpt-5.5 (codex, effort=high)",
+                "sim_model": "opencode/deepseek-v4-flash-free",
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, *_ = _read_run_models(tmp_path)
+    assert agent.display() == "codex/gpt-5.5 high"
+    assert sim.canonical() == ("deepseek-v4-flash-free", "opencode")
+
+
+def test_read_run_models_reconstructs_legacy_cli_run_config(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    # Legacy run_config: agent_model/sim_model are the raw opencode slug a CLI
+    # role ignores, with runtime/tool/effort in sibling fields. Reconstruct via
+    # ModelSpec.build so the CLI roles aren't mislabeled opencode.
     (tmp_path / "run_config.json").write_text(
         json.dumps(
             {
@@ -1837,9 +1776,34 @@ def test_read_run_models_reconstructs_cli_role_labels_from_run_config(tmp_path):
         encoding="utf-8",
     )
 
-    agent, sim, _extra, _cli_review, _image, _target, _base = _read_run_models(tmp_path)
-    assert agent == "gpt-5.5 (codex, effort=high)"
-    assert sim == "opus (claude, effort=max)"
+    agent, sim, *_ = _read_run_models(tmp_path)
+    assert agent.canonical() == ("gpt-5.5", "codex")
+    assert agent.display() == "codex/gpt-5.5 high"
+    assert sim.canonical() == ("opus", "claude")
+    assert sim.display() == "claude/opus max"
+
+
+def test_read_run_models_legacy_opencode_run_config_stays_opencode(tmp_path):
+    from contremaitre.tui import _read_run_models
+
+    # A legacy opencode run_config reconstructs to the slug identity, not a
+    # spurious CLI label.
+    (tmp_path / "run_config.json").write_text(
+        json.dumps(
+            {
+                "agent_model": "openrouter/deepseek/deepseek-v4-flash",
+                "sim_model": "opencode/big-pickle",
+                "actor_mode": "opencode",
+                "cli_reviewer": "none",
+                "docker_image": "img",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent, sim, *_ = _read_run_models(tmp_path)
+    assert agent.canonical() == ("deepseek-v4-flash", "opencode")
+    assert sim.canonical() == ("big-pickle", "opencode")
 
 
 # ===== claude footer usage (statusLine rate-limit indicator) =====
@@ -1987,8 +1951,8 @@ def test_footer_meter_tokens_are_per_role_and_show_unknown_counters():
     from contremaitre.tui import _footer_meter_tokens
 
     tokens = _footer_meter_tokens(
-        agent_model="gpt-5.5 (codex, effort=high)",
-        sim_model="claude-sonnet-4-6 (claude, effort=high)",
+        agent_model=ModelSpec.from_record("gpt-5.5 (codex, effort=high)"),
+        sim_model=ModelSpec.from_record("claude-sonnet-4-6 (claude, effort=high)"),
         agent_events=[],
         sim_events=[],
         codex_usage=None,
@@ -2030,8 +1994,8 @@ def test_footer_meter_tokens_mix_free_paid_codex_and_model_specific_claude():
     assert [
         t.plain
         for t in _footer_meter_tokens(
-            agent_model="opencode/deepseek-v4-flash-free",
-            sim_model="openrouter/qwen/qwen3-max",
+            agent_model=ModelSpec.from_record("opencode/deepseek-v4-flash-free"),
+            sim_model=ModelSpec.from_record("openrouter/qwen/qwen3-max"),
             agent_events=[],
             sim_events=[{"type": "step_finish", "part": {"cost_usd": 0.1234}}],
             codex_usage=codex_usage,
@@ -2043,8 +2007,8 @@ def test_footer_meter_tokens_mix_free_paid_codex_and_model_specific_claude():
     assert [
         t.plain
         for t in _footer_meter_tokens(
-            agent_model="gpt-5.5 (codex, effort=high)",
-            sim_model="claude-opus-4-8 (claude, effort=max)",
+            agent_model=ModelSpec.from_record("gpt-5.5 (codex, effort=high)"),
+            sim_model=ModelSpec.from_record("claude-opus-4-8 (claude, effort=max)"),
             agent_events=[],
             sim_events=[],
             codex_usage=codex_usage,

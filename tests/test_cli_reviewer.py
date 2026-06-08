@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import stat
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,31 +13,8 @@ from contremaitre.paths import build_run_paths
 from contremaitre.tui import _derive_phase
 
 
-SHIM_OK = """#!/bin/sh
-echo "## Review"
-echo ""
-echo "Looks fine."
-"""
-
-SHIM_FAIL = """#!/bin/sh
-echo "boom" >&2
-exit 7
-"""
-
-SHIM_ENV_DUMP = """#!/bin/sh
-echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-unset}"
-echo "ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN-unset}"
-echo "OPENAI_API_KEY=${OPENAI_API_KEY-unset}"
-"""
-
-
-def _shim(tmp: Path, name: str, body: str) -> Path:
-    """Drop an executable shim that masquerades as `claude` / `codex`."""
-
-    path = tmp / name
-    path.write_text(body)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return path
+def _noop(*_: object, **__: object) -> None:
+    pass
 
 
 class DetectAvailableTest(unittest.TestCase):
@@ -82,7 +57,7 @@ class ResolveChoiceTest(unittest.TestCase):
             flag_value="claude",
             available={},
             tty=True,
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -116,7 +91,7 @@ class ResolveChoiceTest(unittest.TestCase):
             available={"claude": "/bin/claude"},
             tty=True,
             input_fn=lambda _: "",  # Enter = accept
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "claude")
 
@@ -126,7 +101,7 @@ class ResolveChoiceTest(unittest.TestCase):
             available={"codex": "/bin/codex"},
             tty=True,
             input_fn=lambda _: "n",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -136,7 +111,7 @@ class ResolveChoiceTest(unittest.TestCase):
             available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
             input_fn=lambda _: "1",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "codex")
 
@@ -146,66 +121,103 @@ class ResolveChoiceTest(unittest.TestCase):
             available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
             input_fn=lambda _: "s",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
-    def test_auto_both_installed_pick_both(self):
-        # The 3rd option ("both") runs codex and claude back-to-back and
-        # posts two PR comments. Surfaced only when both binaries are on
-        # PATH so we don't dangle an unselectable option.
+    def test_two_installed_enter_picks_one(self):
+        # When both are installed, Enter with a saved_default of "codex"
+        # accepts the saved tool; no "both" option is offered.
         out = cli_reviewer.resolve_choice(
             flag_value="auto",
             available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
-            input_fn=lambda _: "3",
-            print_fn=lambda *a, **k: None,
+            saved_default="codex",
+            input_fn=lambda _: "",  # Enter = accept saved
+            print_fn=_noop,
         )
-        self.assertEqual(out, "both")
+        self.assertEqual(out, "codex")
 
-    def test_explicit_both_when_both_installed(self):
+    def test_two_installed_numeric_pick_overrides_saved(self):
+        # Operator saved "codex" but picks [2] (claude) numerically — numeric wins.
         out = cli_reviewer.resolve_choice(
-            flag_value="both",
+            flag_value="auto",
             available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
-        )
-        self.assertEqual(out, "both")
-
-    def test_explicit_both_with_only_one_installed_degrades_to_that_one(self):
-        # `--cli-reviewer both` should not silently skip when only one
-        # tool is present — the operator opted in. Fall back to whichever
-        # is available and warn.
-        out = cli_reviewer.resolve_choice(
-            flag_value="both",
-            available={"claude": "/bin/claude"},
-            tty=True,
-            print_fn=lambda *a, **k: None,
+            saved_default="codex",
+            input_fn=lambda _: "2",
+            print_fn=_noop,
         )
         self.assertEqual(out, "claude")
 
-    def test_explicit_both_with_neither_installed_returns_none(self):
+    def test_two_installed_no_saved_enter_skips(self):
+        # No saved default, Enter = skip.
         out = cli_reviewer.resolve_choice(
-            flag_value="both",
-            available={},
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
-            print_fn=lambda *a, **k: None,
+            saved_default=None,
+            input_fn=lambda _: "",
+            print_fn=_noop,
+        )
+        self.assertEqual(out, "none")
+
+    def test_two_installed_saved_skip_overrides_to_none(self):
+        # saved_default="none" with both installed: Enter skips.
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="none",
+            input_fn=lambda _: "",
+            print_fn=_noop,
+        )
+        self.assertEqual(out, "none")
+
+    def test_two_installed_saved_auto_enter_picks_first_available(self):
+        # saved_default="auto" (defaults.toml value): Enter must select the
+        # first available tool, not silently skip. Without this fix the
+        # numbered picker returned "none" on Enter when no concrete tool was
+        # saved, making the CLI review loop unreachable for most operators.
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="auto",
+            input_fn=lambda _: "",
+            print_fn=_noop,
+        )
+        self.assertEqual(out, "codex")
+
+    def test_two_installed_saved_old_both_enter_picks_first_available(self):
+        # saved_default="both" is the legacy value from old defaults.toml
+        # files — must behave the same as "auto" (first available on Enter).
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default="both",
+            input_fn=lambda _: "",
+            print_fn=_noop,
+        )
+        self.assertEqual(out, "codex")
+
+    def test_two_installed_no_saved_default_enter_still_skips(self):
+        # saved_default=None (never set): Enter should still skip — we
+        # only auto-select on explicit "auto"/"both", not on unset.
+        out = cli_reviewer.resolve_choice(
+            flag_value="auto",
+            available={"codex": "/bin/codex", "claude": "/bin/claude"},
+            tty=True,
+            saved_default=None,
+            input_fn=lambda _: "",
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
 
 class SavedDefaultTest(unittest.TestCase):
     """`saved_default` prefills the auto-picker without short-circuiting it."""
-
-    def test_two_installed_enter_accepts_saved_both(self):
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default="both",
-            input_fn=lambda _: "",  # Enter
-            print_fn=lambda *a, **k: None,
-        )
-        self.assertEqual(out, "both")
 
     def test_two_installed_enter_accepts_saved_codex(self):
         out = cli_reviewer.resolve_choice(
@@ -214,33 +226,9 @@ class SavedDefaultTest(unittest.TestCase):
             tty=True,
             saved_default="codex",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "codex")
-
-    def test_two_installed_saved_default_can_be_overridden_numerically(self):
-        # Saved was "both" but operator picks `1` (codex). Numeric pick
-        # must still win over the Enter default.
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default="both",
-            input_fn=lambda _: "1",
-            print_fn=lambda *a, **k: None,
-        )
-        self.assertEqual(out, "codex")
-
-    def test_two_installed_saved_default_can_still_skip(self):
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default="both",
-            input_fn=lambda _: "s",
-            print_fn=lambda *a, **k: None,
-        )
-        self.assertEqual(out, "none")
 
     def test_one_installed_saved_none_flips_default_to_n(self):
         # `saved_default="none"` flips Enter from Y to N. Y still works
@@ -251,7 +239,7 @@ class SavedDefaultTest(unittest.TestCase):
             tty=True,
             saved_default="none",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "none")
 
@@ -262,17 +250,12 @@ class SavedDefaultTest(unittest.TestCase):
             tty=True,
             saved_default="claude",
             input_fn=lambda _: "",
-            print_fn=lambda *a, **k: None,
+            print_fn=_noop,
         )
         self.assertEqual(out, "claude")
 
 
 class ExpandChoiceTest(unittest.TestCase):
-    def test_both_expands_to_claude_first_then_codex(self):
-        # Claude first so its comment lands above codex's in the PR
-        # conversation — purely cosmetic but consistent.
-        self.assertEqual(cli_reviewer.expand_choice("both"), ("claude", "codex"))
-
     def test_single_tool_returns_one_tuple(self):
         self.assertEqual(cli_reviewer.expand_choice("codex"), ("codex",))
         self.assertEqual(cli_reviewer.expand_choice("claude"), ("claude",))
@@ -285,240 +268,42 @@ class ExpandChoiceTest(unittest.TestCase):
         self.assertEqual(cli_reviewer.expand_choice("garbage"), ())
 
 
-class CommandForTest(unittest.TestCase):
-    """Lock down sandbox / permission flags so they don't silently regress."""
-
-    def test_codex_runs_with_workspace_write_sandbox_and_cache_dir(self):
-        # codex defaults to --sandbox=read-only, which blocks uv/pip/pnpm
-        # from initialising their caches under ~/.cache and stops the
-        # reviewer from running tests against the diff.
-        cmd = cli_reviewer._command_for("codex", "x")
-        self.assertEqual(cmd[:2], ["codex", "exec"])
-        self.assertIn("--sandbox", cmd)
-        self.assertEqual(cmd[cmd.index("--sandbox") + 1], "workspace-write")
-        self.assertIn("--add-dir", cmd)
-        # cache dir entry should be a HOME-relative .cache path
-        cache_entry = cmd[cmd.index("--add-dir") + 1]
-        self.assertTrue(cache_entry.endswith("/.cache"))
-
-    def test_codex_uses_output_last_message_when_path_provided(self):
-        # Without -o, codex stdout is the full session transcript (every
-        # sed/cat/gh tool call) — past runs posted 137 KB comments because
-        # we captured stdout verbatim. -o writes only the final message.
-        path = Path("/tmp/codex-final.md")
-        cmd = cli_reviewer._command_for("codex", "x", final_message_path=path)
-        self.assertIn("-o", cmd)
-        self.assertEqual(cmd[cmd.index("-o") + 1], str(path))
-
-    def test_claude_runs_with_bypass_permissions(self):
-        # Without bypassPermissions, claude -p blocks waiting for Bash
-        # approval on stdin and the subprocess hangs forever.
-        cmd = cli_reviewer._command_for("claude", "x")
-        self.assertEqual(cmd[:2], ["claude", "-p"])
-        self.assertIn("--permission-mode", cmd)
-        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "bypassPermissions")
+_FAKE_DIFF = "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
 
 
 class BuildPromptTest(unittest.TestCase):
-    def test_includes_pr_url(self):
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/42")
-        self.assertIn("https://github.com/x/y/pull/42", prompt)
+    def test_inlines_diff_not_path(self):
+        # The diff is inlined as given data so the model reasons about it
+        # directly rather than reading it from a mounted file.
+        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/42", diff=_FAKE_DIFF)
+        self.assertIn(_FAKE_DIFF, prompt)
+        self.assertNotIn("/review/diff.patch", prompt)
+        self.assertNotIn("/app", prompt)
+        self.assertIn("Do not call `gh`", prompt)
+        self.assertNotIn("https://github.com/x/y/pull/42", prompt)
 
-    def test_stays_compact(self):
-        # The whole point of the URL-only prompt is that we don't pay for
-        # an inline diff. Guard the size so a future "helpful" addition
-        # doesn't silently put us back in paste-the-diff territory.
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
-        self.assertLess(len(prompt), 2000)
-
-    def test_specifies_traffic_light_format(self):
-        # Output format is locked down so reviews start with a scannable
-        # `<glyph> <KEY>` verdict instead of codex/claude's default verbose
-        # preamble. Both halves are specified — the glyph for humans, the
-        # SCREAMING_SNAKE_CASE key for machine parsing.
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
-        self.assertIn("🟢", prompt)
-        self.assertIn("🟠", prompt)
-        self.assertIn("🔴", prompt)
+    def test_specifies_verdict_format(self):
+        # Output format locks down the three SCREAMING_SNAKE_CASE keys so
+        # machine parsing is unambiguous. No emoji glyphs — just the keys.
+        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1", diff=_FAKE_DIFF)
+        self.assertNotIn("🟢", prompt)
+        self.assertNotIn("🟠", prompt)
+        self.assertNotIn("🔴", prompt)
         self.assertIn("LOOKS_GOOD", prompt)
         self.assertIn("NEEDS_ATTENTION", prompt)
         self.assertIn("MUST_FIX", prompt)
-        # Conventional-comments labels for the body.
         self.assertIn("**issue:**", prompt)
         self.assertIn("**nit:**", prompt)
+        self.assertIn("## Required changes", prompt)
 
     def test_drops_praise_category(self):
-        # Praise is dropped from the standard label list so the agent
-        # doesn't reach for it by default. Not explicitly forbidden — if
-        # the agent finds something genuinely worth noting positively, it
-        # can fold it into the headline.
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
+        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1", diff=_FAKE_DIFF)
         self.assertNotIn("**praise:**", prompt)
 
     def test_summary_is_headline_plus_why(self):
-        # The earlier "2-3 sentence read" instruction produced press-release
-        # summaries. Headline + why-it-matters lands better with humans.
-        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1")
+        prompt = cli_reviewer.build_prompt(pr_url="https://github.com/x/y/pull/1", diff=_FAKE_DIFF)
         self.assertIn("WHAT this PR does", prompt)
         self.assertIn("WHY it matters", prompt)
-
-
-class RunReviewTest(unittest.TestCase):
-    """Cover the subprocess streaming path with shim executables."""
-
-    def test_streams_stdout_into_jsonl_and_returns_markdown(self):
-        with TemporaryDirectory() as td:
-            tmp = Path(td)
-            shim = _shim(tmp, "codex", SHIM_OK)
-            # Make the shim accept `exec --skip-git-repo-check <prompt>` —
-            # /bin/sh discards extra positional args, so the shim doesn't
-            # need to parse them.
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '')}"}):
-                sink = tmp / "out.jsonl"
-                result = cli_reviewer.run_review(
-                    tool="codex", prompt="please review", jsonl_path=sink
-                )
-            self.assertEqual(result.exit_code, 0)
-            self.assertIn("Looks fine.", result.markdown)
-            lines = [json.loads(ln) for ln in sink.read_text().splitlines() if ln.strip()]
-            self.assertGreaterEqual(len(lines), 3)
-            self.assertEqual(lines[0]["role"], "codex_review")
-            self.assertEqual(lines[0]["type"], "text")
-            self.assertIn("## Review", lines[0]["part"]["text"])
-            del shim  # silence unused
-
-    def test_nonzero_exit_is_surfaced(self):
-        with TemporaryDirectory() as td:
-            tmp = Path(td)
-            _shim(tmp, "claude", SHIM_FAIL)
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '')}"}):
-                sink = tmp / "out.jsonl"
-                result = cli_reviewer.run_review(tool="claude", prompt="x", jsonl_path=sink)
-            self.assertEqual(result.exit_code, 7)
-            self.assertIsNotNone(result.error)
-
-    def test_unknown_tool_returns_error(self):
-        with TemporaryDirectory() as td:
-            sink = Path(td) / "out.jsonl"
-            result = cli_reviewer.run_review(tool="bogus", prompt="x", jsonl_path=sink)
-            self.assertNotEqual(result.exit_code, 0)
-            self.assertIsNotNone(result.error)
-
-    def test_codex_final_message_file_overrides_stdout(self):
-        # Codex's stdout is the full session transcript. The posted comment
-        # must come from the -o final-message file, NOT from streamed
-        # stdout, otherwise the PR comment is 100 KB of tool-call dumps.
-        # Shim mimics codex: writes the final review to the path given
-        # after `-o`, dumps noise to stdout.
-        shim_body = """#!/bin/sh
-# Locate the -o argument and write the "real" final message to it.
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-o" ]; then
-    printf 'clean review markdown\\n' > "$arg"
-    break
-  fi
-  prev="$arg"
-done
-echo "session noise line 1"
-echo "session noise line 2"
-"""
-        with TemporaryDirectory() as td:
-            tmp = Path(td)
-            _shim(tmp, "codex", shim_body)
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '')}"}):
-                sink = tmp / "out.jsonl"
-                result = cli_reviewer.run_review(tool="codex", prompt="x", jsonl_path=sink)
-            self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.markdown.strip(), "clean review markdown")
-            self.assertNotIn("session noise", result.markdown)
-            # And the JSONL still got the noise lines for the TUI to render.
-            lines = [json.loads(ln) for ln in sink.read_text().splitlines() if ln.strip()]
-            joined = " ".join(e["part"]["text"] for e in lines)
-            self.assertIn("session noise", joined)
-
-    def test_cwd_is_passed_to_subprocess(self):
-        # Worktree cwd is the whole point of switching to URL-only prompts:
-        # the agent's Bash / file tools resolve against the published branch's
-        # checkout rather than wherever contremaitre was launched from.
-        shim_body = """#!/bin/sh
-pwd
-"""
-        with TemporaryDirectory() as td:
-            tmp = Path(td)
-            _shim(tmp, "codex", shim_body)
-            workdir = tmp / "worktree"
-            workdir.mkdir()
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '')}"}):
-                sink = tmp / "out.jsonl"
-                result = cli_reviewer.run_review(
-                    tool="codex", prompt="x", jsonl_path=sink, cwd=workdir
-                )
-            self.assertEqual(result.exit_code, 0)
-            # On macOS /tmp is a symlink to /private/tmp; resolve both sides.
-            self.assertEqual(Path(result.markdown.strip()).resolve(), workdir.resolve())
-
-    def test_subscription_safety_blanks_api_keys(self):
-        """Operator's ANTHROPIC_API_KEY must NOT leak into the subprocess.
-
-        Otherwise the CLI silently falls through to paid API usage instead
-        of the operator's interactive subscription — the whole reason this
-        feature exists.
-        """
-
-        with TemporaryDirectory() as td:
-            tmp = Path(td)
-            _shim(tmp, "claude", SHIM_ENV_DUMP)
-            env_patch = {
-                "PATH": f"{tmp}:{os.environ.get('PATH', '')}",
-                "ANTHROPIC_API_KEY": "should-not-leak",
-                # OAuth token: claude CLI prefers this over the API key,
-                # so blanking only API_KEY but leaving AUTH_TOKEN set still
-                # lands paid API calls instead of subscription usage.
-                "ANTHROPIC_AUTH_TOKEN": "auth-token-must-not-leak",
-                "OPENAI_API_KEY": "also-should-not-leak",
-            }
-            with mock.patch.dict(os.environ, env_patch):
-                sink = tmp / "out.jsonl"
-                result = cli_reviewer.run_review(tool="claude", prompt="x", jsonl_path=sink)
-            self.assertEqual(result.exit_code, 0)
-            self.assertIn("ANTHROPIC_API_KEY=", result.markdown)
-            self.assertIn("ANTHROPIC_AUTH_TOKEN=", result.markdown)
-            self.assertNotIn("should-not-leak", result.markdown)
-            self.assertNotIn("auth-token-must-not-leak", result.markdown)
-            self.assertNotIn("also-should-not-leak", result.markdown)
-
-
-class ScrubbedEnvTest(unittest.TestCase):
-    """Lock the deny set on `_scrubbed_env` so a future refactor that
-    removes an entry from the list (e.g. drops `ANTHROPIC_AUTH_TOKEN` by
-    mistake) fails loudly instead of silently shipping a leak."""
-
-    def test_blanks_all_known_provider_keys(self):
-        env_patch = {
-            "ANTHROPIC_API_KEY": "a",
-            "ANTHROPIC_AUTH_TOKEN": "b",
-            "OPENAI_API_KEY": "c",
-            "UNRELATED_KEY": "keep-me",
-        }
-        with mock.patch.dict(os.environ, env_patch, clear=False):
-            env = cli_reviewer._scrubbed_env()
-        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
-        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
-        self.assertEqual(env["OPENAI_API_KEY"], "")
-        # Unrelated env vars pass through — operator's PATH / HOME / shell
-        # plumbing must not get clobbered.
-        self.assertEqual(env["UNRELATED_KEY"], "keep-me")
-
-    def test_blanks_present_keys_even_if_some_unset(self):
-        # Partial operator env (only one of the three set): the present
-        # key still gets blanked, missing ones don't crash.
-        env_patch = {"OPENAI_API_KEY": "only-this-one"}
-        with mock.patch.dict(os.environ, env_patch, clear=True):
-            env = cli_reviewer._scrubbed_env()
-        self.assertEqual(env.get("OPENAI_API_KEY"), "")
-        self.assertNotIn("ANTHROPIC_API_KEY", env)
-        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
 
 
 class PostCommentTest(unittest.TestCase):
@@ -582,7 +367,7 @@ class WorstVerdictTest(unittest.TestCase):
         self.assertEqual(cli_reviewer.worst_verdict(["LOOKS_GOOD"]), "LOOKS_GOOD")
 
     def test_must_fix_beats_looks_good(self):
-        # `both`: one reviewer clean, one blocking → the block wins.
+        # One reviewer clean, one blocking → the block wins.
         self.assertEqual(cli_reviewer.worst_verdict(["LOOKS_GOOD", "MUST_FIX"]), "MUST_FIX")
 
     def test_needs_attention_beats_looks_good(self):
@@ -767,6 +552,16 @@ class HeaderTest(unittest.TestCase):
         self.assertNotIn("None", header)
         self.assertNotIn("``", header)
 
+    def test_format_includes_round_context(self):
+        header = cli_reviewer.format_header(
+            tool="codex", model=None, duration_s=5, round_n=2, round_of=3
+        )
+        self.assertIn("round 2/3", header)
+
+    def test_format_defaults_to_round_1_of_1(self):
+        header = cli_reviewer.format_header(tool="codex", model=None, duration_s=5)
+        self.assertIn("round 1/1", header)
+
     def test_extract_model_finds_codex_preamble_line(self):
         with TemporaryDirectory() as td:
             sink = Path(td) / "codex_review_raw_export.jsonl"
@@ -785,81 +580,56 @@ class HeaderTest(unittest.TestCase):
             self.assertIsNone(cli_reviewer.extract_model("claude", sink))
 
 
-class HideOrchestratorScaffoldsTest(unittest.TestCase):
-    """Suppress .contremaitre/* from `git status` in the cli_review cwd.
-
-    Without this, codex/claude see the orchestrator's per-run scaffolds
-    (SETTLED_DESIGN.md, IMPLEMENTATION_COMPLETE, …) as uncommitted files
-    and may flag them as drift from the PR.
+class ExtractRequiredChangesTest(unittest.TestCase):
+    """extract_required_changes is on the critical revision path:
+    MUST_FIX verdict → parsed items → cli_revision_followup prompt.
+    Wrong parse = empty or garbled revision instruction.
     """
 
-    def test_appends_to_dir_style_git_info_exclude(self):
-        with TemporaryDirectory() as td:
-            worktree = Path(td)
-            (worktree / ".git" / "info").mkdir(parents=True)
-            cli_reviewer.hide_orchestrator_scaffolds(worktree)
-            exclude = (worktree / ".git" / "info" / "exclude").read_text()
-            self.assertIn(".contremaitre/", exclude)
+    def test_extracts_numbered_items_from_section(self):
+        md = (
+            "🔴 MUST_FIX — two problems\n\n"
+            "## Summary\n\nStuff.\n\n"
+            "## Required changes\n\n"
+            "1. src/foo.py:42 — remove dead branch\n"
+            "2. src/bar.py:10 — rename variable\n\n"
+            "## Praise\n\nGood tests.\n"
+        )
+        self.assertEqual(
+            cli_reviewer.extract_required_changes(md),
+            ["src/foo.py:42 — remove dead branch", "src/bar.py:10 — rename variable"],
+        )
 
-    def test_idempotent(self):
-        # Running cli_review on the same cached repo across runs must not
-        # grow the exclude file with duplicates.
-        with TemporaryDirectory() as td:
-            worktree = Path(td)
-            (worktree / ".git" / "info").mkdir(parents=True)
-            cli_reviewer.hide_orchestrator_scaffolds(worktree)
-            cli_reviewer.hide_orchestrator_scaffolds(worktree)
-            cli_reviewer.hide_orchestrator_scaffolds(worktree)
-            exclude = (worktree / ".git" / "info" / "exclude").read_text()
-            self.assertEqual(exclude.count(".contremaitre/"), 1)
+    def test_returns_empty_when_section_absent(self):
+        md = "🟢 LOOKS_GOOD — all fine\n\n## Summary\n\nGreat work.\n"
+        self.assertEqual(cli_reviewer.extract_required_changes(md), [])
 
-    def test_follows_gitlink_to_per_worktree_exclude(self):
-        # `git worktree add` makes `<worktree>/.git` a file pointing to the
-        # main repo's worktrees/<name> dir. Writing to that PER-WORKTREE
-        # exclude keeps other concurrent runs sharing the cache clean.
-        with TemporaryDirectory() as td:
-            root = Path(td)
-            main_git = root / "main" / ".git"
-            per_worktree = main_git / "worktrees" / "run-x"
-            per_worktree.mkdir(parents=True)
-            worktree = root / "wt"
-            worktree.mkdir()
-            (worktree / ".git").write_text(f"gitdir: {per_worktree}\n")
+    def test_returns_empty_when_section_has_no_numbered_items(self):
+        md = "🔴 MUST_FIX\n\n## Required changes\n\nSee inline comments.\n"
+        self.assertEqual(cli_reviewer.extract_required_changes(md), [])
 
-            cli_reviewer.hide_orchestrator_scaffolds(worktree)
+    def test_stops_at_next_heading(self):
+        md = (
+            "## Required changes\n\n"
+            "1. fix this\n"
+            "2. fix that\n"
+            "## Praise\n\n"
+            "3. this is praise not a required change\n"
+        )
+        result = cli_reviewer.extract_required_changes(md)
+        self.assertEqual(result, ["fix this", "fix that"])
+        self.assertNotIn("this is praise not a required change", result)
 
-            self.assertTrue((per_worktree / "info" / "exclude").exists())
-            self.assertIn(
-                ".contremaitre/",
-                (per_worktree / "info" / "exclude").read_text(),
-            )
-            # Main repo's exclude must NOT have been touched.
-            self.assertFalse((main_git / "info" / "exclude").exists())
+    def test_strips_leading_number_and_dot(self):
+        md = "## Required changes\n\n1. foo:1 — do X\n"
+        self.assertEqual(cli_reviewer.extract_required_changes(md), ["foo:1 — do X"])
 
-    def test_preserves_existing_excludes(self):
-        # Don't clobber other patterns the operator already had in there.
-        with TemporaryDirectory() as td:
-            worktree = Path(td)
-            info = worktree / ".git" / "info"
-            info.mkdir(parents=True)
-            (info / "exclude").write_text("# operator's patterns\n*.log\nbuild/\n")
-            cli_reviewer.hide_orchestrator_scaffolds(worktree)
-            content = (info / "exclude").read_text()
-            self.assertIn("*.log", content)
-            self.assertIn("build/", content)
-            self.assertIn(".contremaitre/", content)
+    def test_case_insensitive_section_header(self):
+        md = "## REQUIRED CHANGES\n\n1. bar:5 — fix Y\n"
+        self.assertEqual(cli_reviewer.extract_required_changes(md), ["bar:5 — fix Y"])
 
-    def test_no_git_dir_is_a_noop(self):
-        # Best-effort: cli_review still works without this if the cwd
-        # somehow isn't a git checkout. Two invariants: (a) doesn't raise,
-        # (b) doesn't fabricate a .git directory or any other files —
-        # otherwise we'd silently turn a non-git directory into one.
-        with TemporaryDirectory() as td:
-            tmp = Path(td)
-            before = sorted(tmp.iterdir())
-            cli_reviewer.hide_orchestrator_scaffolds(tmp)
-            self.assertFalse((tmp / ".git").exists())
-            self.assertEqual(sorted(tmp.iterdir()), before)
+    def test_empty_string_returns_empty(self):
+        self.assertEqual(cli_reviewer.extract_required_changes(""), [])
 
 
 class JsonlSinkForTest(unittest.TestCase):

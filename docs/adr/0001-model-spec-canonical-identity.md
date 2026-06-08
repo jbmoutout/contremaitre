@@ -1,17 +1,33 @@
 ---
-status: proposed
+status: accepted
 date: 2026-06-07
 ---
 
 # Model identity is a stored structured record, not a display string
 
+> **Implemented 2026-06-08.** `ModelSpec` is live in `models.py`; identity is
+> persisted as the per-role dict in `stats.json` and `run_config.json`, and the
+> five normalizers are deleted. Two deviations from the proposal below, both
+> driven by `AGENTS.md` conventions:
+>
+> - **No dual-write (no-shim).** `AGENTS.md` forbids backwards-compat layers
+>   pre-1.0, so `agent_model`/`sim_model` *became* the `ModelSpec` dict and
+>   `role_model_label` was deleted outright — no legacy string kept alongside.
+>   `ModelSpec.from_record` still *reads* legacy on-disk strings (a reader-edge
+>   adapter only; the sole home of the old regex), so historical run dirs render.
+> - **`model_family.py` deleted, not re-expressed.** It had zero importers — the
+>   deletion test said delete it rather than rebuild it on `ModelSpec`.
+>
+> The digest change landed with a `DIGEST_VERSION` bump (`manifest.py`), which
+> resets promoted baselines as the Consequences section warns.
+
 ## Context
 
-A run's model identity — for the agent, the SIM, and the extra reviewer — has
-to survive four very different surfaces: the `default.toml`/`defaults.toml`
-operator config, the live TUI, the orchestrator's internal logic, and the
-post-hoc `viewer/`. Today identity is smuggled inside a **display string** and
-re-parsed downstream, which has produced five distinct, compounding defects.
+A run's model identity — for the agent and the SIM — has to survive four very
+different surfaces: the `default.toml`/`defaults.toml` operator config, the
+live TUI, the orchestrator's internal logic, and the post-hoc `viewer/`.
+Today identity is smuggled inside a **display string** and re-parsed
+downstream, which has produced five distinct, compounding defects.
 
 The string is built by `role_model_label()` in
 [models.py](../../contremaitre/models.py) (lines 70-95):
@@ -131,45 +147,47 @@ class ModelSpec:
 | opencode zen | `opencode/deepseek-v4-flash-free` | `("deepseek-v4-flash-free", "opencode")` |
 | OpenRouter | `openrouter/deepseek-v4-flash` | `("deepseek-v4-flash", "opencode")` |
 
-### Storage layout (dual-write, both files, same schema)
+### Storage layout (the dict owns `agent_model` / `sim_model`, both files)
+
+> **As built (no-shim).** The proposal originally weighed a non-breaking
+> dual-write (legacy string kept, new dict added under `*_spec`). That was
+> **not** taken — `AGENTS.md` forbids backwards-compat layers pre-1.0. The
+> `ModelSpec` dict **is** the value of `agent_model`/`sim_model`; there is no
+> legacy string and no `*_spec` key. The strikethrough text below is preserved
+> only to show what the keying note debated.
 
 The orchestrator persists one `ModelSpec.to_dict()` per role into **both**
-`stats.json` and `run_config.json` under a new `*_spec` key, while leaving the
-existing string/slug key exactly as it is today:
+`stats.json` and `run_config.json`, as the value of `agent_model`/`sim_model`:
 
 ```jsonc
 // stats.json  AND  run_config.json — identical schema in both (fixes defect #2)
 {
-  "agent_model": "gpt-5.5 (codex, effort=high)",   // LEGACY string — UNCHANGED, old readers untouched
-  "agent_model_spec": {                            // NEW canonical record — new readers prefer this
+  "agent_model": {                                 // the canonical record IS the value
     "runtime": "codex",
     "requested": "gpt-5.5",
     "effort": "high",
     "resolved": null,                              // codex stream is silent
     "provider": null
   },
-  "sim_model": "...", "sim_model_spec": { ... },
-  "extra_reviewer_model": "...", "extra_reviewer_model_spec": { ... }
+  "sim_model": { ... }
 }
 ```
 
-> **Keying note (one open sub-decision).** The dual-write was chosen so *old
-> readers keep working untouched*. That goal is only fully met if the existing
-> `agent_model` key keeps its existing type — the legacy **string** in
-> `stats.json`, the legacy **slug** in `run_config.json` — and the new dict is
-> added under `agent_model_spec`. The alternative (make `agent_model` itself the
-> dict and move the string to `agent_model_label`) would force a touch of every
-> current reader, e.g. `_short_model(stats["agent_model"])` would crash on a
-> dict — which defeats "untouched." This ADR recommends the non-breaking keying
-> above; flip it only if you specifically want the dict to own the canonical key
-> name.
+> **Keying note (resolved).** The proposal recommended the non-breaking keying —
+> ~~keep `agent_model` as the legacy string/slug and add the dict under
+> `agent_model_spec`~~ — to leave old readers untouched. The implementation took
+> the rejected alternative instead: **the dict owns `agent_model`** and every
+> reader was updated. Because we control all four readers (tui, viewer,
+> manifest-digest, eval) and `AGENTS.md` forbids shims, "untouched old readers"
+> was not a goal worth a legacy key. Pre-migration run dirs that still hold the
+> legacy string are tolerated at read time by `ModelSpec.from_record`, which is
+> the only place the old shape is understood.
 
-**Resolved back-fill.** At run end the orchestrator reads the raw stream
-(reusing the claude `system/init` parser already in
-[cli_actor.py:328](../../contremaitre/cli_actor.py)) and fills `resolved`
-before writing — so the effective model becomes durable on disk, not merely
-on-screen (fixes defect #3). For codex and opencode `resolved` stays `null`
-(codex is silent; opencode's `requested` *is* the resolved model).
+**Resolved back-fill.** At run end the orchestrator reads the raw stream via
+`models.resolved_model_from_events` (the claude `system/init` parser) and fills
+`resolved` before writing — so the effective model becomes durable on disk, not
+merely on-screen (fixes defect #3). For codex and opencode `resolved` stays
+`null` (codex is silent; opencode's `requested` *is* the resolved model).
 
 ### Reading & display: five normalizers collapse to one
 
@@ -203,10 +221,16 @@ swaps and effort changes then register as a different system under test
   normalizers in place.
 
 - **Structured dict only (no legacy string), with a read-time shim for old run
-  dirs.** Viable and cleaner on disk, but the chosen path keeps the legacy
-  string *alongside* the dict so existing readers and tests stay byte-for-byte
-  untouched during rollout. The redundancy is the deliberate price of a
-  zero-break migration.
+  dirs.** **Chosen.** The dict owns `agent_model`/`sim_model`; no legacy string
+  is written. `ModelSpec.from_record` reads old run dirs (the read-time shim).
+  Per `AGENTS.md` (no backwards-compat layers pre-1.0), the dual-write
+  alternative below was rejected. _(The proposal originally recommended
+  dual-write; the implementation reversed that — see the as-built notes.)_
+
+- ~~**Dual-write: keep the legacy string alongside a new `*_spec` dict.**~~
+  Rejected at implementation: it is a backwards-compat layer `AGENTS.md`
+  forbids, and we control every reader, so "untouched old readers" bought
+  nothing worth the on-disk redundancy.
 
 ## Consequences
 
@@ -223,37 +247,45 @@ swaps and effort changes then register as a different system under test
   `requested` (`config.codex_model`, which *is* authoritative for codex). This
   is correct, but means "resolved vs requested drift" is a claude-only signal.
 
-- **On-disk redundancy.** Dual-write stores identity twice (string + dict). The
-  string is legacy ballast that a later ADR can drop once no reader depends on
-  it; until then it is the back-compat guarantee.
+- **No on-disk redundancy.** Identity is stored once, as the dict under
+  `agent_model`/`sim_model`. There is no legacy string. (The proposal weighed a
+  dual-write that stored it twice; that was rejected — see Considered options.)
 
-- **`role_model_label()` becomes a thin shim** over `ModelSpec.for_role(...)
-  .legacy_string()` so the legacy key keeps emitting the exact same string and
-  no current test snapshot moves.
+- **`role_model_label()` is deleted, not retained as a shim.** Its callers
+  (orchestrator stats, manifest, tui recap/header, cli recap) now build a
+  `ModelSpec` and call `display()` (for humans) or persist `to_dict()`. Test
+  snapshots that asserted on the legacy string were updated to the dict shape —
+  the no-shim choice means snapshots move, and that is accepted.
 
-## Implementation checklist (for a later session)
+## Implementation checklist (as built, no-shim)
 
-1. `models.py` — add `ModelSpec` (+ `for_role`, `to_dict`, `from_record`,
-   `canonical`, `display`, `legacy_string`); reduce `role_model_label` to a
-   shim calling `legacy_string()`. Keep `is_zen_model` as the
-   provider-detection helper feeding `provider`.
-2. `orchestrator.py:_write_final_stats` — write `*_spec` dicts alongside the
-   existing `*_model` strings; back-fill `resolved` from the raw stream
-   (`raw_export` / `sim_raw_export`) via the claude-init parser.
-3. `manifest.py:build_manifest` — add the `*_spec` dicts next to the existing
-   slug fields; `manifest_digest` → canonical()+effort, behind a digest version
-   bump.
-4. `tui.py` — delete `_short_model` / `_model_effort_display` /
-   `_relabel_with_real_model`; header, pane titles, and launch recap call
-   `ModelSpec.from_record(...).display()`. The live relabel becomes "prefer the
-   spec's `resolved`, else stream-fill it" — same behavior, no string surgery.
-5. `viewer/index.py` — delete `_short_model`, `_canonical_model`, `_CLI_LABEL_RE`;
-   `_summarize_run`, `_collect_pipeline_pairings`, `_infra_only_pairings`, and
-   `_model_html` consume `ModelSpec`. The pipeline tab's `(name, runtime)`
-   bucket key becomes `spec.canonical()` directly.
-6. `model_family.py` — re-express `model_family()` on top of `ModelSpec`, or
-   fold the family notion into the record if the picker still needs it.
-7. Tests — new `ModelSpec` unit tests (each runtime, account-default, the three
-   slug shapes, legacy-string round-trip via `from_record`); update any
-   snapshot that asserts on `stats.json`/`run_config.json` to expect the added
-   `*_spec` keys (the legacy strings should not move).
+1. `models.py` — added `ModelSpec` (+ `build`, `for_role`, `to_dict`,
+   `from_record`, `canonical`, `display`, `with_resolved`) and
+   `resolved_model_from_events`. **Deleted** `role_model_label` (no
+   `legacy_string` shim). `from_record` reads the canonical dict *or* a legacy
+   on-disk string — the only place the old regex survives. `is_zen_model` kept
+   as the provider-detection helper feeding `provider`.
+2. `orchestrator.py:_write_final_stats` — writes the `ModelSpec.to_dict()` per
+   role as the value of `agent_model`/`sim_model`; back-fills `resolved` from
+   the raw stream (`raw_export` / `sim_raw_export`) via
+   `resolved_model_from_events`.
+3. `manifest.py:build_manifest` — writes the dict under `agent_model`/`sim_model`;
+   `manifest_digest` → canonical()+effort, behind a `DIGEST_VERSION` bump.
+4. `tui.py` — deleted `_short_model` / `_model_effort_display` /
+   `_relabel_with_real_model` (and the small label-parse helpers); header, pane
+   titles, and launch recap call `ModelSpec(...).display()`. The live relabel is
+   `spec.with_resolved(stream_model)` — prefer the spec's `resolved`, else
+   stream-fill it. No string surgery.
+5. `viewer/index.py` — deleted `_short_model`, `_canonical_model`,
+   `_CLI_LABEL_RE`; `_summarize_run`, `_collect_pipeline_pairings`, and
+   `_infra_only_pairings` route through `ModelSpec.from_record(...).canonical()`.
+   `viewer/__init__.py:_assemble_data` embeds `from_record(...).display()` so the
+   per-run `_renderer.js` consumes a derived string, never the raw dict.
+6. `model_family.py` — **deleted** (zero importers; dead code). The TUI's
+   claude-footer family scan moved to a local `_claude_family(name)` over a
+   plain model name.
+7. Tests — new `tests/test_models.py` unit tests (each runtime, account-default
+   with empty `requested` preserved, the slug shapes, legacy-string +
+   dict round-trips via `from_record`); snapshots that asserted on
+   `stats.json`/`run_config.json` updated to the dict shape (no `*_spec` keys;
+   the legacy strings are gone).

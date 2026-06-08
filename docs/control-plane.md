@@ -18,7 +18,7 @@ Audience: humans modifying the orchestrator, and LLMs that need to reason about 
 │        ├── verdicts.py ──── fence-tolerant strict-JSON parser, diff hash       │
 │        ├── checks.py ────── --check-cmd runner (sidecar container)             │
 │        ├── publisher.py ─── StubPublisher / GhPublisher (`gh pr create`)       │
-│        ├── cli_reviewer.py  post-publish `claude -p` / `codex exec`            │
+│        ├── cli_reviewer.py  post-publish Docker CLI review loop helpers         │
 │        ├── runtime_image.py lockhash-keyed deps volumes                        │
 │        └── manifest.py ─── provenance: model IDs, image digest, prompt hashes  │
 │                                                                                │
@@ -28,17 +28,18 @@ Audience: humans modifying the orchestrator, and LLMs that need to reason about 
              ▼                                                                 ▼
 ┌─ DOCKER ──────────────────────────────────────┐     ┌─ EXTERNAL ───────────────┐
 │                                               │     │                          │
-│   agent container   role=agent   /app  RW    ─┼─►   │   OpenRouter             │
-│   sim container     role=sim     /app  :ro   ─┼─►   │   / OpenCode Zen         │
-│   review container  role=review  /review :ro ─┼─►   │                          │
-│   extra reviewer    role=sim     /review :ro │     │   GitHub                  │
-│   check sidecar     role=check   /app  RW   ◄┼─── (host `gh pr create --draft`)│
+│   agent container   role=agent      /app  RW    ─┼─►   │   OpenRouter             │
+│   sim container     role=sim        /app  :ro   ─┼─►   │   / OpenCode Zen         │
+│   review container  role=review     /review :ro ─┼─►   │                          │
+│   cli-reviewer      role=cli_review /review :ro ─┼─►   │   model providers only   │
+│   check sidecar     role=check      /app  RW   ◄─┼─── (host `gh pr create --draft`; │
+│                                                 │      `gh pr comment` + status) │
 │   deps-install      role=deps-install        │     │                          │
 │   deps-clone        role=deps-clone          │     └──────────────────────────┘
 │                                               │
 │   Mount layout                                │
 │     /app             → run worktree           │
-│     /review          → diff + SETTLED only    │
+│     /review          → host-built PR context  │
 │     /app/<deps_mount>→ per-run deps volume    │
 │                                               │
 └───────────────────────────────────────────────┘
@@ -85,11 +86,11 @@ Because that token is exfiltratable, a CLI container's egress is locked **by def
 
 > **Locked ≠ full network.** The allowlist is model-providers-only — **package registries (PyPI / npm / GitHub / …) are NOT on it.** A locked run therefore can't `uv sync` / `npm install` ad-hoc tooling; a run that needs to install deps must opt into open egress with `--allow-open-egress` (or pre-bake the deps via the [deps volume](#deps-caching)).
 
-The lock is the **secure default, not mandatory** — `--allow-open-egress` is the explicit, warned override. The accepted risk differs by tool: codex's neutered refresh token bounds it to ~10-day quota abuse; claude's long-lived OAuth token has no such bound, so open egress on a claude role is closer to account-level exposure — keep it locked. Three layers cooperate:
+The lock is the **secure default, not mandatory** — `--allow-open-egress` is the explicit, warned override. The accepted risk differs by tool: codex's neutered refresh token bounds it to ~10-day quota abuse; claude's long-lived OAuth token has no such bound, so open egress on a claude role is closer to account-level exposure — keep it locked. A post-publish CLI reviewer is treated as a CLI role for this policy even when the agent and SIM are opencode. Three layers cooperate:
 
 | Layer | Function | Behavior for a CLI role |
 |---|---|---|
-| Host (pre-run) | `_maybe_provision_cli_egress` ([cli.py](../contremaitre/cli.py)) | Auto-provisions the network + proxy whenever a CLI role is active (agent *or* SIM) and neither an explicit `--docker-network`/`--https-proxy` nor `--allow-open-egress` was given. |
+| Host (pre-run) | `_maybe_provision_cli_egress` ([cli.py](../contremaitre/cli.py)) | Auto-provisions the network + proxy whenever a CLI role is active (agent, SIM, or post-publish CLI reviewer) and neither an explicit `--docker-network`/`--https-proxy` nor `--allow-open-egress` was given. |
 | Preflight | `_check_network_policy` ([preflight.py](../contremaitre/preflight.py)) | `--allow-open-egress` → WARN-passes (opted in). Otherwise a CLI role with no policy → FAIL (auto-provision failed; refuse rather than run open). |
 | Runner (launch) | `_assert_egress_locked` ([cli_actor.py](../contremaitre/cli_actor.py)) | Launches if egress is locked OR `--allow-open-egress` is set; else refuses. |
 
@@ -182,11 +183,6 @@ REVIEW round N  (N = 1 … max_review_rounds, default 3)
   parser: verdicts.parse_sim_verdict — fence-tolerant
   event:  review_verdict
 
-  Extra reviewer (optional, --extra-reviewer-model)
-    Runs in parallel for the same round. Both verdicts must APPROVE.
-    Disagreement is tracked (`cross_family_agreement_rate`) but does NOT
-    gate the publication decision on its own.
-
   ┌── APPROVED ─────────────────────────► hard gates → publish
   │
   ├── CHANGES_REQUESTED                    event: `revision_requested`
@@ -225,34 +221,52 @@ HARD GATES (host, all must pass; deterministic)
                               │
                               ▼
 
-POST-PUBLISH CLI REVIEW  (only when --cli-reviewer != none)
+POST-PUBLISH CLI REVIEW LOOP  (only when --cli-reviewer != none)
 
-  Runs on the HOST (no container). cli_reviewer.py:
-    - detect: `shutil.which("claude")`, `shutil.which("codex")`
-    - both: claude first, then codex (sequentially, two PR comments)
-    - prompt: prompts/cli_reviewer_prompt.md with {pr_url} substituted
-    - command (subprocess receives expanded paths, not shell `~`):
-        claude:  claude -p --permission-mode bypassPermissions <prompt>
-        codex:   codex exec --skip-git-repo-check --sandbox workspace-write
-                 --add-dir <Path.home() / ".cache">
-                 -o <final_message_path> <prompt>
-    - env: ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OPENAI_API_KEY blanked
-           in the subprocess env (forces OAuth subscription, never billed API)
-    - timeout: 600s per tool
-    - post: `gh pr comment <pr_url> --body-file <tool>_review.md`
-    - status: after all tools run, the worst-of-N verdict is projected onto a
-        GitHub commit status on the published HEAD via
-        `gh api .../statuses/{sha}` (context `contremaitre/cli-review`).
+  Runs in Docker (role=cli_review, /review :ro, provider-only CLI egress).
+  Up to max_cli_review_rounds (default 3) rounds. cli_reviewer.py + _run_cli_review_loop():
+
+    - host writes extras/cli_review_{n:03d}/input/ with:
+        PR.md, pr.json, pr_body.md, diff.patch, changed_files.txt,
+        SETTLED_DESIGN.md, previous_cli_reviews.md, head_sha.txt
+    - prompt: prompts/cli_reviewer_prompt.md with {review_path, round_n, round_of}
+    - runtime: CliActorRunner, session_attr=None → fresh session each round;
+        reviewer reads `/review` + `/app:ro` and emits markdown only
+    - GitHub stays host-owned: no GitHub credentials are passed into Docker;
+        host posts `gh pr comment <pr_url> --body-file` after the reviewer exits
+    - LOOKS_GOOD (all tools in the same round): loop exits → READY_FOR_DRAFT_PR;
+        worst verdict projected as commit status → success
+    - NEEDS_ATTENTION or MUST_FIX: extract `## Required changes` numbered list,
+        send cli_revision_followup() (tagged [CLI]) to agent on same branch,
+        require a fresh IMPLEMENTATION_COMPLETE marker, commit, rerun L1 checks
+        (every --check-cmd in the sidecar container), rerun L0 gates: diff_scan
+        (forbidden paths), diff_hash_matched (hash stable across checks),
+        clean_worktree (git status clean except .contremaitre/*), draft_only
+        (always passes post-publish); push HEAD → branch only if all pass,
+        then next round
+    - revision gate or push failure after publication → PR_NEEDS_HUMAN;
+        existing PR remains published for human follow-up
+    - max_cli_review_rounds exhausted without all-LOOKS_GOOD → PR_NEEDS_HUMAN;
+        worst verdict projected as commit status
+    - tool failure (exception or empty output): logged, that tool skipped for
+        the round; does NOT abort the loop
+    - commit status (context `contremaitre/cli-review`):
         MUST_FIX → state=failure; everything else → success. PAT-viable (the
-        Checks API would need a GitHub App). Informational until the operator
-        requires the context in branch protection, which then gates merge.
-    - failures: logged, NEVER block the run — the PR is already published
+        Checks API would need a GitHub App). Require the context in branch
+        protection to gate merge on it.
 
-  Verdict glyph (parsed from line 1 of the review):
-    🟢 LOOKS_GOOD   → 1.0    cli_review_score   → status success
-    🟠 NEEDS_ATTENTION → 0.5                     → status success
-    🔴 MUST_FIX     → 0.0                        → status failure (gates merge
-                                                   if context is required)
+  Verdict format: prompt enforces `<glyph> KEY — one-sentence justification`
+    on line 1 of the markdown output. Parser scans the first 5 lines
+    defensively (containment check, in case the agent prepends stray text):
+    LOOKS_GOOD       → loop done
+    NEEDS_ATTENTION  → revision triggered
+    MUST_FIX         → revision triggered
+    (missing/failure)→ treated as revision trigger, no comment posted
+
+  Artifacts per round stored under extras/cli_review_{n:03d}/:
+    input/                    host-built PR context mounted as /review:ro
+    {tool}_raw_export.jsonl   raw CLI stream
+    {tool}_review.md          H3 header + review body (posted as PR comment)
 ```
 
 ## State machine reference
@@ -277,11 +291,12 @@ INIT  ──►  WORK  ──►  REVIEW  ──►  APPROVED  ──►  (hard 
 
 ## Terminal verdicts
 
-All five values from `TerminalVerdict` ([models.py:35-45](../contremaitre/models.py#L35-L45)):
+All six values from `TerminalVerdict` ([models.py:35-45](../contremaitre/models.py#L35-L45)):
 
 | Verdict | Trigger | Reference |
 |---|---|---|
-| `READY_FOR_DRAFT_PR` | APPROVED + hard gates pass + checks pass + publisher succeeds | [orchestrator.py:761](../contremaitre/orchestrator.py#L761) |
+| `READY_FOR_DRAFT_PR` | APPROVED + hard gates pass + checks pass + publisher succeeds + CLI review loop all-LOOKS_GOOD (or skipped) | [orchestrator.py:761](../contremaitre/orchestrator.py#L761) |
+| `PR_NEEDS_HUMAN` | PR published but CLI review loop exhausted `max_cli_review_rounds` without all-LOOKS_GOOD, or a post-publish revision could not pass gates / push safely. Yellow: PR exists on GitHub, a human should review before merging. | [orchestrator.py:646](../contremaitre/orchestrator.py#L646) |
 | `NO_PR_CHANGES_REQUESTED` | `max_review_rounds` exhausted on CHANGES_REQUESTED | [orchestrator.py:319](../contremaitre/orchestrator.py#L319) |
 | `NO_PR_NEEDS_HUMAN` | NEEDS_HUMAN verdict / malformed verdict (after retries) / missing SETTLED / missing IMPLEMENTATION_COMPLETE / cap trip / hard-gates fail / executable check fail | [orchestrator.py:243, 249, 257, 278, 287, 804, 811, 815](../contremaitre/orchestrator.py#L243) |
 | `FAILED_INFRA` | Unhandled exception during run; SIGTERM | [orchestrator.py:151, 178](../contremaitre/orchestrator.py#L151) |
@@ -335,10 +350,10 @@ On TTY runs the launcher walks through (`cli.py:_launch_screen`):
 
 0. **Per-role runtime picker** (`_pick_runtimes_interactive`) — when `--actor` (or the saved default) is not `fake`, the screen opens by picking the agent then the SIM runtime: `opencode`, `codex`, or `claude` (codex/claude both map to the `cli` runtime and set `cli_tool`; Enter keeps the current choice). This is what makes a mixed run selectable interactively. A `fake` default skips the picker (fixture runs only).
 1. **OpenRouter key banner** — *opencode roles only.* Probes `$OPENROUTER_API_KEY` (or `--openrouter-env-var`), reports presence / limit / remaining via `GET /api/v1/key`. A pure-CLI run replaces steps 1–2 with a one-line **CLI status** (`_cli_status_lines`, dispatched on `cli_tool`): codex token validity (hours left) or claude `CLAUDE_CODE_OAUTH_TOKEN` presence, plus egress posture.
-2. **Model picker** — *opencode roles only.* Numbered list of OpenCode Zen free models, plus a paste box for OpenRouter slugs when a key is set. Picks agent → SIM → optional extra-reviewer in sequence. (codex roles take their model from `codex_model`, not this picker.)
+2. **Model picker** — *opencode roles only.* Numbered list of OpenCode Zen free models, plus a paste box for OpenRouter slugs when a key is set. Picks agent → SIM in sequence. (codex roles take their model from `codex_model`, not this picker.)
 3. **CLI-reviewer availability banner** — detects `claude` / `codex` on PATH; prompts when `--cli-reviewer auto`.
 4. **Pre-flight ping** — probes the chosen Zen models via `_probe_zen_model()` so `FreeUsageLimitError` surfaces *before* the run starts; OpenRouter slugs are verified against the catalog fetch.
-5. **Run summary recap** — target URL, branch, per-role runtime, agent / SIM / extra models (or codex model + effort), cli-reviewer choice, cost + wall caps, network posture (codex shows the auto-lock).
+5. **Run summary recap** — target URL, branch, per-role runtime, agent / SIM models (or codex model + effort), cli-reviewer choice, cost + wall caps, network posture (codex shows the auto-lock).
 6. **Confirmation prompt** — `Continue? [Y/n]`.
 
 Non-TTY runs and `-y` / `--yes` auto-confirm. `--no-prompt` skips the pickers even on TTY and uses `.contremaitre/defaults.toml` (or the hardcoded fallback below). All three modes still emit `[info]` log lines so the run log explains what was auto-assumed.
@@ -365,10 +380,9 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`cli.py`](../contremaitre/cli.py) — argparse, subcommand dispatch, auto-derived clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/`, launch-screen banners + per-role runtime picker + codex token/egress status, codex egress auto-provision (`_maybe_provision_cli_egress`), image staleness rebuild (compares `contremaitre.dockerfile-sha256` label).
 - [`cli_actor.py`](../contremaitre/cli_actor.py) — `CliActorRunner` + the `CliDriver` abstraction (`CodexDriver` / `ClaudeDriver`): drives `codex` or `claude` headless in the per-run container as agent / SIM / reviewer. The runner owns shared orchestration (egress lock, per-run home, detached run + stdout→raw_export, timestamp back-fill, session-attr, transcript, docker wrapper); each driver owns its auth (codex: neutered refresh token, per-turn re-seed, host-side expiry refresh / claude: env OAuth token forwarded by name, empty home), in-container argv, and event parsing. See [CLI actor (codex / claude)](#cli-actor-codex--claude-auth--egress-lock).
 - [`cli_egress.py`](../contremaitre/cli_egress.py) (+ [`cli_egress_squid.conf`](../contremaitre/cli_egress_squid.conf)) — turnkey two-layer egress lock for codex: an `--internal` docker network + an allowlist squid proxy (`ensure_egress_proxy`). Idempotent + shared across runs; recreates the proxy on squid-conf hash drift (`contremaitre.squid-sha256` label).
-- [`cli_review_extra.py`](../contremaitre/cli_review_extra.py) — utility for re-judging a finished run with a different CLI reviewer.
-- [`cli_reviewer.py`](../contremaitre/cli_reviewer.py) — post-publish CLI reviewer: detection, prompt assembly, `claude` / `codex` subprocess, API-key scrubbing, `gh pr comment` posting, verdict + model extraction, H3 metadata header, worst-of-N verdict → `gh api` commit-status projection (context `contremaitre/cli-review`).
+- [`cli_reviewer.py`](../contremaitre/cli_reviewer.py) — post-publish CLI review loop helpers: prompt assembly (`build_prompt` with round context), verdict parsing (`parse_verdict`, `extract_required_changes`), model extraction, H3 metadata header (`format_header`), `gh pr comment` posting, worst-of-N verdict → `gh api` commit-status projection (context `contremaitre/cli-review`). The reviewer itself runs via `CliActorRunner.cli_reviewer_turn()` in Docker; this module owns only the stateless helpers + host-side `gh` calls.
 - [`costs.py`](../contremaitre/costs.py) — recorded-cost extraction from JSONL streams; provider-side limits remain the real guardrail.
-- [`defaults.py`](../contremaitre/defaults.py) — operator picker prefills from `.contremaitre/defaults.toml` (cwd-local) or XDG fallback. Keys: `actor` / `sim_actor` (with `codex`/`claude` → `cli` aliases that also derive `cli_tool`), `codex_model`, `codex_effort`, `claude_model`, `claude_effort`, `agent_model`, `sim_model`, `extra_reviewer_model`, `cli_reviewer`. Hand-edited TOML; missing / malformed / unknown-enum values degrade to empty (never raise).
+- [`defaults.py`](../contremaitre/defaults.py) — operator picker prefills from `.contremaitre/defaults.toml` (cwd-local) or XDG fallback. Keys: `actor` / `sim_actor` (with `codex`/`claude` → `cli` aliases that also derive `cli_tool`), `codex_model`, `codex_effort`, `claude_model`, `claude_effort`, `agent_model`, `sim_model`, `cli_reviewer`. Hand-edited TOML; missing / malformed / unknown-enum values degrade to empty (never raise).
 - [`diffscan.py`](../contremaitre/diffscan.py) — deterministic forbidden-path scanner against the working diff.
 - [`envfile.py`](../contremaitre/envfile.py) — dependency-free `.env` loader; shell env wins, never overwritten.
 - [`eval.py`](../contremaitre/eval.py) — v0 regression canary against `golden_cases/<id>/`. Subprocess-invokes `contremaitre run --actor opencode` so the production launch path is canaried as-is. Extracts a two-layer scorecard (headline + diagnostic) from artifacts the orchestrator already writes, aggregates n samples into a cell, compares against the (case, config) baseline. Generalizable methodology principles: [golden_cases/README.md](../golden_cases/README.md#methodology-notes).
@@ -378,18 +392,18 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`fake_actor.py`](../contremaitre/fake_actor.py) — deterministic fake agent/SIM for fixture smoke runs.
 - [`fixture.py`](../contremaitre/fixture.py) — local fixture repo creator for smoke tests.
 - [`flow_use.py`](../contremaitre/flow_use.py) — agent + SIM tool-use observability: `time_to_settled_design`, `self_verified`, `grilling_exchanges`, `impl_turns`, `sim_useful_call_ratio`, `runtime_install_required`.
+- [`gates.py`](../contremaitre/gates.py) — the **Hard gates (L0)** Module. `evaluate_l0()` runs the deterministic L0 recipe (diff-hash match, forbidden-path scan, clean worktree, payload assembly) and returns a typed `L0GateResult`; both the pre-publish gate and the post-publish revision gate in `orchestrator.py` call it. Owns the **internal-path policy** (`INTERNAL_PATHS` + `is_internal_path` + `only_internal_changes`) shared by the clean-worktree gate and the host-commit excludes. L0 only — L1 executable checks and the `HARD_GATES_CHECKED` emit stay caller-side, since the two call sites combine L1 and project telemetry differently.
 - [`git_utils.py`](../contremaitre/git_utils.py) — logged git command wrapper. Every invocation appended to `git_log.jsonl` for forensic audit.
 - [`jsonlog.py`](../contremaitre/jsonlog.py) — append-only JSONL + JSON-write helpers.
-- [`manifest.py`](../contremaitre/manifest.py) — provenance manifest: model IDs, image digest, dockerfile-sha256, skills-lock hash, prompt hashes, contremaitre git SHA + dirty flag, python + contremaitre versions. Tolerates missing tools (returns `None`, never raises). `manifest_digest()` hashes the fields that define "the system under test".
-- [`model_family.py`](../contremaitre/model_family.py) — coarse family classification (deepseek / qwen / glm / anthropic / openai / nemotron / minimax / etc.) for picker suggestions and TUI labels.
-- [`models.py`](../contremaitre/models.py) — `State`, `ReviewVerdict`, `CliReviewVerdict`, `TerminalVerdict`, `ActorMode` (`fake` / `opencode` / `cli`), `PublishMode` enums; `RunConfig` (incl. `actor_mode`, `sim_actor_mode`, `cli_tool`, `codex_model`, `codex_effort`, `claude_model`, `claude_effort`), `RunPaths`, `Caps`, `DepsVolume`, `ParsedVerdict`, `RunResult` dataclasses. The stable seam between CLI, orchestrator, and actors.
+- [`manifest.py`](../contremaitre/manifest.py) — provenance manifest: per-role `ModelSpec` identity dicts, image digest, dockerfile-sha256, skills-lock hash, prompt hashes, contremaitre git SHA + dirty flag, python + contremaitre versions. Tolerates missing tools (returns `None`, never raises). `manifest_digest()` hashes the fields that define "the system under test" — each role's `ModelSpec.canonical()` + effort, behind a `DIGEST_VERSION` token so a contract change resets baselines deliberately.
+- [`models.py`](../contremaitre/models.py) — `State`, `ReviewVerdict`, `CliReviewVerdict`, `TerminalVerdict`, `ActorMode` (`fake` / `opencode` / `cli`), `PublishMode` enums; `ModelSpec` (canonical model identity — atomic fields, derived `display()` / `canonical()`, one `for_role` factory, one `from_record` reader that absorbs legacy on-disk strings); `RunConfig` (incl. `actor_mode`, `sim_actor_mode`, `cli_tool`, `codex_model`, `codex_effort`, `claude_model`, `claude_effort`), `RunPaths`, `Caps`, `DepsVolume`, `ParsedVerdict`, `RunResult` dataclasses. The stable seam between CLI, orchestrator, and actors.
 - [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
 - [`paths.py`](../contremaitre/paths.py) — slug validation, run-id generation, contained-path builder (prevents escape outside `run_dir`).
-- [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + codex runs, validated as the per-role union: repo/base ref, Docker image, `:ro` mount, network policy (codex defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), `_check_codex_auth` (codex). See [Preflight](#preflight).
+- [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + CLI runs, validated as the per-role union plus the post-publish CLI reviewer: repo/base ref, Docker image, `:ro` mount, network policy (CLI defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), codex / claude auth checks for active CLI tools. See [Preflight](#preflight).
 - [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
 - [`publisher.py`](../contremaitre/publisher.py) — publication boundary: `StubPublisher` (dry-run) vs `GhPublisher` (real `gh pr create --draft`). PR title + body derived from `.contremaitre/SETTLED_DESIGN.md` + SIM verdict summary; `--pr-title` / `--pr-body` override.
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
-- [`tui.py`](../contremaitre/tui.py) — read-only Textual TUI tailing JSONL artifacts. 7-phase footer (init → exploring → grilling → implementing → reviewing → cli_review → done) + per-reviewer status glyphs + warning tokens + subscription-window usage (codex rollout snapshots / claude statusLine snapshots) + verdict badge.
+- [`tui.py`](../contremaitre/tui.py) — read-only Textual TUI tailing JSONL artifacts. 7-phase footer (init → exploring → grilling → implementing → reviewing → cli_review → done) + SIM reviewer status glyphs + CLI review loop status + warning tokens + subscription-window usage (codex rollout snapshots / claude statusLine snapshots) + verdict badge.
 - [`verdicts.py`](../contremaitre/verdicts.py) — strict SIM verdict parser (fence-tolerant JSON extraction) and `diff_hash()` used by the diff-hash gate.
 - [`viewer/`](../contremaitre/viewer/) — single-file run viewer (`viewer.html`) over the JSONL artifacts (transcript, timeline, sub-agents, written files, guardrail events, eval reports). Built by the orchestrator's `finally` so it lands on success and failure. Companion [`viewer/index.py`](../contremaitre/viewer/index.py) scans a runs root for `viewer.html` files and emits `index.html` — one summary card per run (verdict, models, PR link, cost, duration), newest first — rebuilt at the end of every run so the dashboard is always current.
 
@@ -402,10 +416,9 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 - `initial_prompt.txt` — agent's turn-1 message
 - `raw_export.jsonl` — agent JSONL stream
 - `sim_raw_export.jsonl` — SIM JSONL stream
-- `extra_reviewer_raw_export.jsonl` — extra-reviewer stream (only when `--extra-reviewer-model` is set)
-- `claude_review_raw_export.jsonl` *or* `codex_review_raw_export.jsonl` — post-publish CLI review (only when `--cli-reviewer` is set; whichever tool ran). With `--cli-reviewer both` both files are present.
-- `codex_final_message.md` — codex-only; source of `codex_review.md`
-- `<tool>_review.md` — posted PR-comment body for the CLI review, with H3 metadata header
+- `extras/cli_review_{n:03d}/input/` — host-built PR context mounted read-only at `/review` for the post-publish CLI reviewer (`PR.md`, `pr.json`, `pr_body.md`, `diff.patch`, `changed_files.txt`, `SETTLED_DESIGN.md`, `previous_cli_reviews.md`, `head_sha.txt`)
+- `extras/cli_review_{n:03d}/{tool}_raw_export.jsonl` — per-round CLI reviewer stream (only when `--cli-reviewer` is set)
+- `extras/cli_review_{n:03d}/{tool}_review.md` — per-round posted PR-comment body, H3 metadata header + review text
 - `claude-*-home/.contremaitre/statusline.jsonl` — claude CLI roles only; whitelisted Claude Code status-line snapshots used by the TUI footer for exact 5-hour / 7-day Claude.ai subscription-window usage when the account exposes those fields. Populated by the post-turn no-tools statusLine meter for the role's active Claude model, not by the main `claude -p` event stream.
 - `claude-*-home/.contremaitre/statusline_meter_*.log` — claude meter stdout / TTY diagnostics when the best-effort meter cannot populate a snapshot.
 
@@ -522,7 +535,7 @@ contremaitre cleanup --repos     # also nuke ~/.cache/contremaitre/ clones
 - **`sigterm_emergency_write`** — host process receives SIGTERM mid-run. The handler ([orchestrator.py:151](../contremaitre/orchestrator.py#L151)) writes a `FAILED_INFRA` terminal with `reason="killed_via_sigterm"`, runs `_stop_run_containers` to stop label-tagged containers, then exits. Partial artifacts are preserved (raw exports, transcript fragments, any `viewer.html` that had landed) so the run dir stays browsable.
 - **`extract_failed`** — `extract.py` raised while harvesting `task` sub-agent files or `extracted_files/*`. Logged; the rest of the artifact contract still lands.
 - **`viewer_build_failed`** — `viewer.build_viewer()` raised. Logged; other artifacts unaffected. Rebuildable later with `contremaitre viewer <run-dir>`.
-- **`extra_reviewer_unavailable`** — extra-reviewer container died or returned a malformed verdict that survived `--malformed-verdict-retries`. The run continues with the primary SIM verdict alone; `cross_family_agreement_rate` records the dropout instead of an agreement.
+- **`cli_review_failed`** — a CLI reviewer tool returned empty output or threw during a round. Logged; the round continues with the remaining tools and the loop is not aborted.
 
 None of these abort the run. The orchestrator's `finally` writes terminal state, runs the viewer build, and sweeps containers regardless — so partial information is always recoverable.
 
@@ -536,7 +549,7 @@ None of these abort the run. The orchestrator's `finally` writes terminal state,
 
 `.contremaitre/*` is **excluded from the committed diff** via `git add -- . ':(exclude).contremaitre'`. The files stay in the worktree across WORK rounds so the SIM keeps reading SETTLED after CHANGES_REQUESTED loop-back, but never enter the published commit or PR — the SETTLED content is already in the commit body + PR description.
 
-The clean-worktree hard gate filters via [`_only_contremaitre_changes`](../contremaitre/orchestrator.py#L1259). The filter tolerates more than just `.contremaitre/`: it also passes `opencode.json`, `dist/`, `build/`, `out/`, `.next/`, and `__pycache__/`. The intent is that conventional build output + opencode's emitted config file shouldn't block publication if they happen to land in the worktree.
+The clean-worktree hard gate filters via [`gates.only_internal_changes`](../contremaitre/gates.py). The filter tolerates more than just `.contremaitre/`: it also passes `opencode.json`, and build-output directories `dist/`, `build/`, `out/`, `.next/`, and `__pycache__/`. Same-named root files like `dist` stay dirty. The intent is that conventional build output + opencode's emitted config file shouldn't block publication if they happen to land in the worktree, without letting real source files be skipped because their names collide with build directories. The tolerated set lives once as `gates.INTERNAL_PATHS` — the same tuple the host commit derives its `:(exclude)<path>` pathspecs from (`orchestrator._commit_agent_changes`), so the clean-worktree predicate and the commit excludes can't name different sets.
 
 ---
 
@@ -571,7 +584,7 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--openrouter-env-var NAME` | `OPENROUTER_API_KEY` | Env-var name holding the OpenRouter key. |
 | `--docker-network NAME` | — | Docker `--network` for opencode containers. |
 | `--http-proxy URL` / `--https-proxy URL` / `--no-proxy LIST` | — | Container proxy settings (host env is not forwarded). |
-| `--allow-open-egress` | False | Accept unrestricted egress (otherwise a network/proxy is required for opencode, and a codex role auto-locks). For a **codex** role this is the explicit override of the default lock — warned, since the token is exfiltratable; use it when the agent must reach package registries the allowlist blocks. |
+| `--allow-open-egress` | False | Accept unrestricted egress (otherwise a network/proxy is required for opencode, and a CLI role/reviewer auto-locks). For a **codex/claude** role this is the explicit override of the default lock — warned, since the token is exfiltratable; use it when the agent must reach package registries the allowlist blocks. |
 | `--skip-openrouter-key-check` | False | Don't query OpenRouter key metadata. |
 | `--allow-unlimited-openrouter-key` | False | Accept a key with no provider-side credit limit. |
 | `--openrouter-key-url URL` | `https://openrouter.ai/api/v1/key` | OpenRouter key-metadata endpoint. |
@@ -587,8 +600,8 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--branch-prefix STR` | `refactor` | Prefix for generated branch names. |
 | `--agent-model SLUG` | `openrouter/deepseek/deepseek-v4-flash` | OpenRouter / OpenCode model slug for the agent (ignored in `--actor fake`; a codex agent ignores namespaced slugs and uses `--codex-model`). |
 | `--sim-model SLUG` | `openrouter/deepseek/deepseek-v4-flash` | Model for the SIM. Independent default; pickable separately from `--agent-model`. |
-| `--extra-reviewer-model SLUG` | — | Optional second SIM; both must APPROVE. Cross-family pick gives cheap bias-mitigation signal. |
-| `--cli-reviewer auto\|codex\|claude\|both\|none` | `auto` | Post-publish CLI review tool. `auto` detects + prompts on TTY; `both` runs claude first then codex, two PR comments; `none` skips. |
+| `--cli-reviewer auto\|codex\|claude\|none` | `auto` | Post-publish CLI review loop tool. `auto` detects + prompts on TTY; `none` skips. |
+| `--max-cli-review-rounds INT` | `3` | Max post-publish review + revision rounds before `PR_NEEDS_HUMAN`. |
 | `--actor fake\|opencode\|cli` | `fake` | Per-run **agent** runtime: `fake` (smoke), `opencode` (live model), `cli` (codex on your subscription). |
 | `--sim-actor fake\|opencode\|cli` | (same as `--actor`) | Override the **SIM** runtime, enabling a mixed run (e.g. codex agent + opencode SIM, or the reverse). |
 | `--sim-cli-tool codex\|claude` | (same as `--cli-tool`) | Override the **SIM's** CLI tool when it runs `cli`, enabling a cross-CLI run (codex agent + claude SIM, or the reverse). |
@@ -616,7 +629,6 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--malformed-verdict-retries INT` | `2` | Retries for an unparseable SIM verdict. |
 | `--max-review-rounds INT` | `3` | Max REVIEW → WORK loops before `NO_PR_CHANGES_REQUESTED`. |
 | `--sim-scenario {approved,changes_requested,needs_human,malformed,malformed_then_approved}` | `approved` | Fake-SIM behavior (ignored in `--actor opencode`). |
-| `--extra-reviewer-scenario {…}` | `approved` | Fake extra-reviewer behavior. |
 | `--agent-scenario {normal,forbidden_path,no_impl_complete}` | `normal` | Fake-agent behavior. |
 
 ### `cleanup` flags

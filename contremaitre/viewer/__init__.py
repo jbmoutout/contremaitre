@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..models import RunPaths
+from ..models import ModelSpec, RunPaths
 
 _HERE = Path(__file__).resolve().parent
 _CSS_PATH = _HERE / "_styles.css"
@@ -72,28 +72,15 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     # turns interleave with timestamped opencode turns instead of piling at t=0.
     agent_events = _normalize_events(_read_jsonl(paths.raw_export))
     sim_events = _normalize_events(_read_jsonl(paths.sim_raw_export))
-    extra_reviewer_events = _normalize_events(_read_jsonl(paths.extra_reviewer_raw_export))
-    _assign_synthetic_timestamps([agent_events, sim_events, extra_reviewer_events])
-    extra_reviewer_enabled = bool(extra_reviewer_events) or bool(
-        stats_raw.get("extra_reviewer_model")
-    )
+    _assign_synthetic_timestamps([agent_events, sim_events])
 
     agent_summary = _summarize_events(agent_events)
     sim_summary = _summarize_events(sim_events)
-    extra_summary = _summarize_events(extra_reviewer_events)
 
-    timeline = (
-        _build_timeline(agent_events, "agent")
-        + _build_timeline(sim_events, "sim")
-        + _build_timeline(extra_reviewer_events, "extra")
-    )
+    timeline = _build_timeline(agent_events, "agent") + _build_timeline(sim_events, "sim")
     timeline.sort(key=lambda e: e.get("timestamp") or 0)
 
-    chat = _build_chat(
-        agent_events,
-        sim_events,
-        extra_reviewer_events=extra_reviewer_events if extra_reviewer_enabled else None,
-    )
+    chat = _build_chat(agent_events, sim_events)
 
     transcript = _parse_transcript(paths.transcript)
 
@@ -123,33 +110,22 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
 
     stats = {
         **stats_raw,
+        # Persisted model identity is a ModelSpec dict; the per-run renderer JS
+        # must never see the raw record. This Python reader routes it through
+        # ModelSpec and embeds the derived display string, so `_renderer.js`
+        # consumes a string, never an object.
+        "agent_model": ModelSpec.from_record(stats_raw.get("agent_model")).display(),
+        "sim_model": ModelSpec.from_record(stats_raw.get("sim_model")).display(),
         "cost_usd": stats_raw.get("recorded_cost_usd"),
-        "n_events": agent_summary["n_events"] + sim_summary["n_events"] + extra_summary["n_events"],
-        "n_tool_uses": agent_summary["n_tool_uses"]
-        + sim_summary["n_tool_uses"]
-        + extra_summary["n_tool_uses"],
-        "n_text_events": agent_summary["n_text_events"]
-        + sim_summary["n_text_events"]
-        + extra_summary["n_text_events"],
-        "n_step_finishes": agent_summary["n_step_finishes"]
-        + sim_summary["n_step_finishes"]
-        + extra_summary["n_step_finishes"],
-        "tool_counts": _merge_counts(
-            _merge_counts(agent_summary["tool_counts"], sim_summary["tool_counts"]),
-            extra_summary["tool_counts"],
-        ),
-        "tokens_in": agent_summary["tokens_in"]
-        + sim_summary["tokens_in"]
-        + extra_summary["tokens_in"],
-        "tokens_out": agent_summary["tokens_out"]
-        + sim_summary["tokens_out"]
-        + extra_summary["tokens_out"],
+        "n_events": agent_summary["n_events"] + sim_summary["n_events"],
+        "n_tool_uses": agent_summary["n_tool_uses"] + sim_summary["n_tool_uses"],
+        "n_text_events": agent_summary["n_text_events"] + sim_summary["n_text_events"],
+        "n_step_finishes": agent_summary["n_step_finishes"] + sim_summary["n_step_finishes"],
+        "tool_counts": _merge_counts(agent_summary["tool_counts"], sim_summary["tool_counts"]),
+        "tokens_in": agent_summary["tokens_in"] + sim_summary["tokens_in"],
+        "tokens_out": agent_summary["tokens_out"] + sim_summary["tokens_out"],
         "agent_tool_counts": agent_summary["tool_counts"],
         "sim_tool_counts": sim_summary["tool_counts"],
-        "extra_reviewer_tool_counts": extra_summary["tool_counts"]
-        if extra_reviewer_enabled
-        else None,
-        "extra_reviewer_enabled": extra_reviewer_enabled,
         "files_written_count": len(extracted_files),
         "subagent_count": len(sub_agents),
     }
@@ -198,14 +174,37 @@ def _assemble_cli_review(
     side effects.
     """
 
-    started_evt = next((g for g in guardrails if g.get("event") == "cli_review_started"), None)
+    started_evt = next(
+        (g for g in reversed(guardrails) if g.get("event") == "cli_review_started"),
+        None,
+    )
     if started_evt is None:
         return None
-    completed_evt = next((g for g in guardrails if g.get("event") == "cli_review_completed"), None)
-    failed_evt = next((g for g in guardrails if g.get("event") == "cli_review_failed"), None)
 
-    tool = (completed_evt or failed_evt or started_evt).get("tool") or "?"
-    if failed_evt is not None and completed_evt is None:
+    tool = started_evt.get("tool") or "?"
+    round_n = started_evt.get("round")
+    completed_evt = next(
+        (
+            g
+            for g in reversed(guardrails)
+            if g.get("event") == "cli_review_completed"
+            and g.get("tool") == tool
+            and (round_n is None or g.get("round") == round_n)
+        ),
+        None,
+    )
+    failed_evt = next(
+        (
+            g
+            for g in reversed(guardrails)
+            if g.get("event") == "cli_review_failed"
+            and g.get("tool") == tool
+            and (round_n is None or g.get("round") == round_n)
+        ),
+        None,
+    )
+
+    if failed_evt is not None and (completed_evt is None or completed_evt.get("verdict") is None):
         status = "failed"
     elif completed_evt is not None:
         status = "completed"
@@ -251,14 +250,12 @@ def _assemble_cli_review(
 
 
 def _assemble_cli_review_extras(paths: RunPaths) -> list[dict[str, Any]]:
-    """Collect every `cli_review_extra` rerun under `<run_dir>/extras/`.
+    """Collect CLI review round artifacts from `<run_dir>/extras/cli_review_NNN/`.
 
-    Each extra was produced by `contremaitre.cli_review_extra.run_extra` and
-    lives in `extras/cli_review_<NNN>/` next to a `summary.json` (parseable
-    metadata) and `review.md` (assembled body with the `### reviewed by …`
-    header). Returns one dict per extra in index order, shape mirrors
-    `_assemble_cli_review` plus a `source` label like `extra-001` so the
-    renderer can distinguish them from the orchestrator's original.
+    Each orchestrator loop round writes `<tool>_review.md` +
+    `<tool>_raw_export.jsonl` under its own numbered sub-dir. Returns one
+    dict per artifact in index order. Shape mirrors `_assemble_cli_review`
+    plus a `source` label so the renderer can distinguish rounds.
     """
 
     extras_root = paths.run_dir / "extras"
@@ -268,6 +265,32 @@ def _assemble_cli_review_extras(paths: RunPaths) -> list[dict[str, Any]]:
     for extra_dir in sorted(extras_root.iterdir()):
         if not extra_dir.is_dir() or not extra_dir.name.startswith("cli_review_"):
             continue
+        round_label = extra_dir.name.replace("cli_review_", "round-")
+        for review_md_path in sorted(extra_dir.glob("*_review.md")):
+            tool = review_md_path.name.removesuffix("_review.md")
+            if tool not in ("codex", "claude"):
+                continue
+            try:
+                markdown = review_md_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                markdown = ""
+            from ..cli_reviewer import extract_model, parse_verdict
+
+            sink = extra_dir / f"{tool}_raw_export.jsonl"
+            out.append(
+                {
+                    "tool": tool,
+                    "source": f"{round_label}-{tool}",
+                    "status": "completed" if markdown else "failed",
+                    "verdict": parse_verdict(markdown) if markdown else None,
+                    "duration_s": None,
+                    "model": extract_model(tool, sink) if sink.is_file() else None,
+                    "url": None,
+                    "markdown": markdown,
+                    "fail_reason": None if markdown else "missing review body",
+                    "posted_to_pr": None,
+                }
+            )
         summary_path = extra_dir / "summary.json"
         review_md_path = extra_dir / "review.md"
         if not summary_path.is_file():
@@ -810,27 +833,19 @@ _CHAT_OUTPUT_CAP = 32_000
 def _build_chat(
     agent_events: list[dict[str, Any]],
     sim_events: list[dict[str, Any]],
-    *,
-    extra_reviewer_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Bucket events into agent/sim/extra turns and compute per-role totals.
+    """Bucket events into agent/sim turns and compute per-role totals.
 
     A "turn" is one text utterance plus every tool_use / step_finish that
     preceded it in that stream (since the agent's last text). This is the
     shape the chat-style renderer expects — bubbles with an attached tool
     trace. Mirrors the layout used in `agent_sim_conversation.html`.
-
-    `extra_reviewer_events=None` (no extra reviewer configured) returns the
-    original AGENT/SIM totals shape so the renderer stays back-compat.
     """
 
     agent_turns = _stream_turns(agent_events, "AGENT")
     sim_turns = _stream_turns(sim_events, "SIM")
-    extra_turns = (
-        _stream_turns(extra_reviewer_events, "EXTRA") if extra_reviewer_events is not None else []
-    )
     turns = sorted(
-        agent_turns + sim_turns + extra_turns,
+        agent_turns + sim_turns,
         key=lambda t: t["ts"] or 0,
     )
 
@@ -852,13 +867,9 @@ def _build_chat(
         if last_ts and t0:
             duration = round((last_ts - t0) / 1000, 3)
 
-    totals: dict[str, Any] = {"AGENT": _agg(agent_turns), "SIM": _agg(sim_turns)}
-    if extra_reviewer_events is not None:
-        totals["EXTRA"] = _agg(extra_turns)
-
     return {
         "turns": turns,
-        "totals": totals,
+        "totals": {"AGENT": _agg(agent_turns), "SIM": _agg(sim_turns)},
         "duration": duration,
     }
 

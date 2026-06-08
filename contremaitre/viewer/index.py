@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from ..costs import sum_token_usage
 from ..flow_use import compute_phases
+from ..models import ModelSpec
 from ..paths import build_run_paths
 from . import VIEWER_FILENAME
 
@@ -80,9 +81,8 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "run_id": run_dir.name,
         "viewer_href": f"{run_dir.name}/{VIEWER_FILENAME}",
         "when": _format_when(run_dir.name),
-        "agent_model": _short_model(stats.get("agent_model")),
-        "sim_model": _short_model(stats.get("sim_model")),
-        "extra_model": _short_model(stats.get("extra_reviewer_model")),
+        "agent_model": _spec_canonical(stats.get("agent_model"))[0],
+        "sim_model": _spec_canonical(stats.get("sim_model"))[0],
         "repo": repo,
         "base": base,
         "verdict": stats.get("verdict") or "?",
@@ -151,9 +151,10 @@ def _read_cli_reviews(run_dir: Path) -> list[dict[str, Any]]:
     Three provenance shapes are surfaced:
       - orchestrator-published: `<tool>_review.md` next to the run's other
         artifacts (the cli_reviewer post-publish step).
-      - extras from `cli_review_extra`: `extras/cli_review_<NNN>/review.md`
-        with sibling `summary.json` carrying the tool name. Source labelled
-        `extra-NNN` so the user can tell N reruns apart in the badge.
+      - orchestrator loop rounds: `extras/cli_review_<NNN>/<tool>_review.md`.
+      - legacy format: `extras/cli_review_<NNN>/review.md` with sibling
+        `summary.json` carrying the tool name. Present in older runs;
+        source labelled `extra-NNN` for backward compatibility.
 
     Each entry: `{"tool", "verdict", "blocker", "source"}`. Verdict / blocker
     come from `_classify_review_md`. The list is ordered original-first then
@@ -172,6 +173,13 @@ def _read_cli_reviews(run_dir: Path) -> list[dict[str, Any]]:
         for extra_dir in sorted(extras_root.iterdir()):
             if not extra_dir.is_dir():
                 continue
+            round_label = extra_dir.name.replace("cli_review_", "round-")
+            for review_md in sorted(extra_dir.glob("*_review.md")):
+                tool = review_md.name.removesuffix("_review.md")
+                if tool in ("codex", "claude"):
+                    reviews.append(
+                        _classify_review_md(tool, review_md, source=f"{round_label}-{tool}")
+                    )
             review_md = extra_dir / "review.md"
             if not review_md.is_file():
                 continue
@@ -182,10 +190,9 @@ def _read_cli_reviews(run_dir: Path) -> list[dict[str, Any]]:
                 if isinstance(summary, dict):
                     tool = summary.get("tool")
             if not tool:
-                # Fall back to filename guess so a hand-curated extra still
-                # renders. `<tool>_*` is the cli_review_extra naming, but
-                # the review.md itself doesn't carry the tool, so we sniff
-                # the sibling raw export filename.
+                # Fall back to filename guess for legacy extras where the
+                # review.md doesn't carry the tool name — sniff the sibling
+                # raw export filename.
                 for candidate in ("codex", "claude"):
                     if (extra_dir / f"{candidate}_review_raw_export.jsonl").exists():
                         tool = candidate
@@ -283,43 +290,17 @@ def _format_when(run_id: str) -> str:
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
-def _short_model(model: str | None) -> str | None:
-    if not model:
-        return None
-    # `provider/model-name` → `model-name`
-    return model.split("/", 1)[-1]
+def _spec_canonical(model: object) -> tuple[str | None, str | None]:
+    """Uniform `(name, runtime)` for a role's persisted model identity.
 
-
-# `<model> (codex, effort=high)` / `claude default (claude, effort=high)` —
-# the fixed shape `models.role_model_label` emits for a CLI role. We treat it
-# as a parse contract, not freeform prose: it is the ONLY place a run records
-# its codex/claude model (run_config.json keeps only the ignored opencode
-# slug; the raw stream never echoes the model id).
-_CLI_LABEL_RE = re.compile(r"^(?P<model>.+?)\s*\((?P<runtime>codex|claude),\s*effort=[^)]*\)\s*$")
-
-
-def _canonical_model(label: str | None) -> tuple[str | None, str | None]:
-    """Uniform `(name, runtime)` for a role's model — provider/effort agnostic.
-
-    Normalizes the three runtimes to one naming scheme so the same model
-    groups and sorts consistently regardless of how it was spelled:
-      - CLI roles (the deterministic `… (codex|claude, effort=…)` label):
-        strip the effort suffix, tag the runtime, collapse spaces so
-        `claude default` → `claude-default`.
-      - everything else is an opencode/OpenRouter slug `provider/…/model`;
-        take the final path segment so `openrouter/deepseek/deepseek-v4-flash`
-        and `opencode/deepseek-v4-flash-free` normalize the same way (the old
-        `split("/", 1)` left a stray `deepseek/` vendor on the former).
-
-    Returns `(None, None)` for an empty label.
+    Routes through `ModelSpec.from_record` (which absorbs the canonical dict
+    *and* any legacy on-disk label/slug string), so the viewer never parses a
+    model string itself. Returns `(None, None)` when identity is absent.
     """
 
-    if not label:
+    if not model:
         return None, None
-    m = _CLI_LABEL_RE.match(label)
-    if m:
-        return m.group("model").strip().replace(" ", "-"), m.group("runtime")
-    return label.rsplit("/", 1)[-1], "opencode"
+    return ModelSpec.from_record(model).canonical()
 
 
 def _slug_from_pr_url(url: str | None) -> str | None:
@@ -375,6 +356,7 @@ def _read_json(path: Path, *, default: Any) -> Any:
 
 _TIER_BY_VERDICT = {
     "READY_FOR_DRAFT_PR": "tier-green",
+    "PR_NEEDS_HUMAN": "tier-yellow",
     "FAILED_INFRA": "tier-red",
 }
 
@@ -607,12 +589,14 @@ def _diffstat_loc(run_dir: Path) -> tuple[int, int] | None:
 
 
 def _pr_review_verdict(run_dir: Path) -> str | None:
-    """Worst post-publish CLI-review verdict, or None if no review ran.
+    """Worst post-publish CLI-review verdict across all rounds, or None if no review ran.
 
     Read from the structured `cli_review_completed` guardrail event rather
-    than scraping `<tool>_review.md`. With `--cli-reviewer both` there are
-    two events; we keep the worst (MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD)
-    so the failure column reflects the strictest reviewer.
+    than scraping `<tool>_review.md`. One event is emitted per completed round
+    (only for parseable verdicts); we keep the worst across all rounds
+    (MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD) so the pipeline column reflects
+    the most severe finding. None verdicts (old-format runs from before the
+    event-ordering fix) are skipped via the `in order` guard.
     """
 
     order = {"LOOKS_GOOD": 1, "NEEDS_ATTENTION": 2, "MUST_FIX": 3}
@@ -627,17 +611,16 @@ def _pr_review_verdict(run_dir: Path) -> str | None:
 
 
 def _review_signals(run_dir: Path) -> dict[str, Any]:
-    """SIM/extra review signals from `review_cycles.jsonl` for one run.
+    """SIM review signals from `review_cycles.jsonl` for one run.
 
     `sim_rounds` is the highest round the primary reviewer reached;
-    `sim_changes` / `extra_changes` record whether that reviewer ever
-    bounced the diff (returned a non-APPROVED verdict). Each is None when
-    the reviewer produced no verdict row — the run never reached review, or
-    no extra reviewer was configured — so coverage stays honest.
+    `sim_changes` records whether the reviewer ever bounced the diff
+    (returned a non-APPROVED verdict). It is None when the reviewer produced
+    no verdict row, so coverage stays honest for runs that never reached
+    review.
     """
 
     sim_verdicts: list[str] = []
-    extra_verdicts: list[str] = []
     sim_rounds = 0
     for row in _jsonl(run_dir / "review_cycles.jsonl"):
         if row.get("unavailable"):
@@ -648,12 +631,9 @@ def _review_signals(run_dir: Path) -> dict[str, Any]:
         if row.get("reviewer") == "sim":
             sim_verdicts.append(verdict)
             sim_rounds = max(sim_rounds, int(row.get("round") or 0))
-        elif row.get("reviewer") == "extra":
-            extra_verdicts.append(verdict)
     return {
         "sim_rounds": sim_rounds or None,
         "sim_changes": (any(v != "APPROVED" for v in sim_verdicts) if sim_verdicts else None),
-        "extra_changes": (any(v != "APPROVED" for v in extra_verdicts) if extra_verdicts else None),
     }
 
 
@@ -672,8 +652,8 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     stats = _read_json(run_dir / "stats.json", default=None)
     if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
         return None
-    agent, agent_rt = _canonical_model(stats.get("agent_model"))
-    sim, sim_rt = _canonical_model(stats.get("sim_model"))
+    agent, agent_rt = _spec_canonical(stats.get("agent_model"))
+    sim, sim_rt = _spec_canonical(stats.get("sim_model"))
     if not agent or not sim:
         return None
     if stats.get("verdict") in _INFRA_VERDICTS:
@@ -703,15 +683,13 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
         "sim": sim,
         "sim_rt": sim_rt,
         "infra": False,
-        "extra_configured": bool(stats.get("extra_reviewer_model")),
-        "lands_pr": _verdict_tier(str(stats.get("verdict") or "")) == "tier-green",
+        "lands_pr": str(stats.get("verdict") or "") in {"READY_FOR_DRAFT_PR", "PR_NEEDS_HUMAN"},
         "turns": stats.get("turns"),
         "duration": stats.get("duration_seconds"),
         "design_rounds": phases.get("grilling_exchanges"),
         "impl_turns": phases.get("impl_turns"),
         "sim_rounds": review["sim_rounds"],
         "sim_changes": review["sim_changes"],
-        "extra_changes": review["extra_changes"],
         "pr_review_fail": (pr_verdict == "MUST_FIX") if pr_verdict else None,
         "ins": loc[0] if loc else None,
         "dele": loc[1] if loc else None,
@@ -788,8 +766,6 @@ def _collect_pipeline_pairings(runs_root: Path) -> list[dict[str, Any]]:
                 "duration": _avg(real, "duration"),
                 "sim_rounds": _avg(real, "sim_rounds"),
                 "sim_changes": _rate(real, "sim_changes"),
-                "extra_changes": _rate(real, "extra_changes"),
-                "extra_any": any(r["extra_configured"] for r in real),
                 "pr_fail": _rate(real, "pr_review_fail"),
                 "ins": ins,
                 "dele": dele,
@@ -923,8 +899,8 @@ def _infra_only_pairings(runs_root: Path) -> list[dict[str, Any]]:
         stats = _read_json(entry / "stats.json", default=None)
         if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
             continue
-        agent, agent_rt = _canonical_model(stats.get("agent_model"))
-        sim, sim_rt = _canonical_model(stats.get("sim_model"))
+        agent, agent_rt = _spec_canonical(stats.get("agent_model"))
+        sim, sim_rt = _spec_canonical(stats.get("sim_model"))
         if not agent or not sim:
             continue
         real_infra = counts.setdefault((agent, agent_rt, sim, sim_rt), [0, 0])
@@ -965,16 +941,6 @@ def _render_pipeline_table(
             f"{_model_html(p['sim'], p['sim_rt'])}"
         )
         land_tier = _rate_tier(p["pr_land"])
-        extra_cell = (
-            _cell(
-                p["extra_changes"],
-                _fmt_pct(p["extra_changes"]),
-                n,
-                sev=_sev_class(p["extra_changes"], 0.3, 0.6),
-            )
-            if p["extra_any"]
-            else '<td class="num cell"><span class="muted">n/a</span></td>'
-        )
         pr_fail_text = _fmt_pct(p["pr_fail"])
         if (p["pr_fail"][0] or 0) >= 0.5:
             pr_fail_text += " ⚠"
@@ -1015,7 +981,6 @@ def _render_pipeline_table(
                 n,
                 sev=_sev_class(p["sim_changes"], 0.3, 0.6),
             )
-            + extra_cell
             + _cell(p["pr_fail"], pr_fail_text, n, sev=_sev_class(p["pr_fail"], 0.25, 0.5))
             # code output
             + _cell(p["ins"], "+" + _fmt_num(p["ins"], 0), n, group=True)
@@ -1078,7 +1043,6 @@ def _render_pipeline_table(
         <th class="num" title="wall-clock duration">dur</th>
         <th class="num grp-start" title="highest SIM review round reached">sim r</th>
         <th class="num" title="% of reviewed runs SIM requested changes at least once">sim Δ</th>
-        <th class="num" title="% of runs the extra reviewer requested changes">extra Δ</th>
         <th class="num" title="% of reviewed runs the post-publish CLI review said MUST_FIX">PR fail</th>
         <th class="num grp-start" title="avg lines inserted (net diff)">+LoC</th>
         <th class="num" title="avg lines deleted (net diff)">−LoC</th>
@@ -1134,8 +1098,8 @@ def _render_body(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
     legend = """
 <div class="legend">
   <div class="legend-title">columns</div>
-  <b>verdict</b> · the orchestrator's terminal verdict (READY_FOR_DRAFT_PR / NO_PR_* / FAILED_INFRA).
-  <b>models</b> · agent / sim / extra-reviewer (provider prefix stripped).
+  <b>verdict</b> · the orchestrator's terminal verdict (READY_FOR_DRAFT_PR / PR_NEEDS_HUMAN / NO_PR_* / FAILED_INFRA).
+  <b>models</b> · agent / sim (provider prefix stripped).
   <b>PR</b> · published PR title + link, or the kind if no PR (NO_PR, DRY_RUN, …).
   Click any row to open that run's <code>viewer.html</code>.
 </div>
@@ -1201,12 +1165,8 @@ def _render_row(r: dict[str, Any]) -> str:
         models_bits.append(
             f'<span style="color:var(--sim)">sim</span> <code>{_escape(r["sim_model"])}</code>'
         )
-    if r["extra_model"]:
-        models_bits.append(
-            f'<span style="color:var(--extra)">extra</span> <code>{_escape(r["extra_model"])}</code>'
-        )
-    # One badge per cli_review on disk (orchestrator + any cli_review_extra
-    # passes). Side-by-side display lets A1's cross-reviewer comparison read
+    # One badge per cli_review on disk (orchestrator rounds).
+    # Side-by-side display lets a cross-reviewer comparison read
     # off the index — codex MUST_FIX next to claude NEEDS_ATTENTION etc.
     for cr in r["cli_reviews"]:
         cli_tier = _cli_review_tier(cr["verdict"])

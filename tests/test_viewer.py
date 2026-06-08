@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from contremaitre import events
 from contremaitre.fixture import init_fixture
 from contremaitre.jsonlog import write_json
 from contremaitre.models import Caps, RunConfig
@@ -127,6 +128,161 @@ class ViewerTest(unittest.TestCase):
         # The escaped payload is still parseable as JSON — escaping must
         # not corrupt the data the renderer reads.
         _extract_data_payload(html)
+
+    def test_surfaces_per_round_cli_review_artifacts(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("cli-round"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "PR_NEEDS_HUMAN"})
+        extras_dir = paths.run_dir / "extras" / "cli_review_001"
+        extras_dir.mkdir(parents=True)
+        (extras_dir / "codex_review.md").write_text(
+            "### reviewed by `codex`\n\n"
+            "MUST_FIX - blocking issue\n\n"
+            "**issue:** README.md:1 needs an update.\n",
+            encoding="utf-8",
+        )
+        (extras_dir / "codex_raw_export.jsonl").write_text(
+            '{"type":"text","part":{"text":"model: gpt-5.5"}}\n',
+            encoding="utf-8",
+        )
+
+        html = build_viewer(paths).read_text(encoding="utf-8")
+        data = _extract_data_payload(html)
+
+        self.assertIn(
+            {
+                "tool": "codex",
+                "source": "round-001-codex",
+                "status": "completed",
+                "verdict": "MUST_FIX",
+                "duration_s": None,
+                "model": "gpt-5.5",
+                "url": None,
+                "markdown": "### reviewed by `codex`\n\n"
+                "MUST_FIX - blocking issue\n\n"
+                "**issue:** README.md:1 needs an update.\n",
+                "fail_reason": None,
+                "posted_to_pr": None,
+            },
+            data["cli_review_extras"],
+        )
+
+    def test_root_cli_review_uses_latest_round_events(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("cli-latest"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "READY_FOR_DRAFT_PR"})
+        paths.guardrail_events.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {"event": events.CLI_REVIEW_STARTED, "tool": "codex", "round": 1},
+                    {
+                        "event": events.CLI_REVIEW_COMPLETED,
+                        "tool": "codex",
+                        "round": 1,
+                        "verdict": "MUST_FIX",
+                    },
+                    {"event": events.CLI_REVIEW_STARTED, "tool": "codex", "round": 2},
+                    {
+                        "event": events.CLI_REVIEW_COMPLETED,
+                        "tool": "codex",
+                        "round": 2,
+                        "verdict": "LOOKS_GOOD",
+                    },
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (paths.run_dir / "codex_review.md").write_text(
+            "### reviewed by `codex`\n\nLOOKS_GOOD - clean\n",
+            encoding="utf-8",
+        )
+
+        data = _extract_data_payload(build_viewer(paths).read_text(encoding="utf-8"))
+
+        self.assertEqual(data["cli_review"]["status"], "completed")
+        self.assertEqual(data["cli_review"]["verdict"], "LOOKS_GOOD")
+
+    def test_root_cli_review_unparseable_verdict_shows_failed_status(self):
+        # Current format: only CLI_REVIEW_FAILED emitted for unparseable verdicts
+        # (CLI_REVIEW_COMPLETED is suppressed when verdict is None).
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("cli-unparseable"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "PR_NEEDS_HUMAN"})
+        paths.guardrail_events.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {"event": events.CLI_REVIEW_STARTED, "tool": "codex", "round": 1},
+                    {
+                        "event": events.CLI_REVIEW_FAILED,
+                        "tool": "codex",
+                        "round": 1,
+                        "reason": "unparseable_verdict",
+                    },
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (paths.run_dir / "codex_review.md").write_text(
+            "### reviewed by `codex`\n\nLooks fine to me\n",
+            encoding="utf-8",
+        )
+
+        data = _extract_data_payload(build_viewer(paths).read_text(encoding="utf-8"))
+
+        self.assertEqual(data["cli_review"]["status"], "failed")
+
+    def test_root_cli_review_unparseable_old_format_backwards_compat(self):
+        # Old format (pre event-ordering fix): both CLI_REVIEW_COMPLETED(verdict=None)
+        # and CLI_REVIEW_FAILED were emitted. Viewer must still show status=failed.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("cli-old-fmt"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "PR_NEEDS_HUMAN"})
+        paths.guardrail_events.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {"event": events.CLI_REVIEW_STARTED, "tool": "codex", "round": 1},
+                    {
+                        "event": events.CLI_REVIEW_COMPLETED,
+                        "tool": "codex",
+                        "round": 1,
+                        "verdict": None,
+                    },
+                    {
+                        "event": events.CLI_REVIEW_FAILED,
+                        "tool": "codex",
+                        "round": 1,
+                        "reason": "unparseable_verdict",
+                    },
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (paths.run_dir / "codex_review.md").write_text(
+            "### reviewed by `codex`\n\nLooks fine to me\n",
+            encoding="utf-8",
+        )
+
+        data = _extract_data_payload(build_viewer(paths).read_text(encoding="utf-8"))
+
+        self.assertEqual(data["cli_review"]["status"], "failed")
 
 
 class CodexNormalizationTest(unittest.TestCase):

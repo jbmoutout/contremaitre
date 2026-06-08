@@ -58,7 +58,6 @@ def build_run_paths(runs_root: Path, run_id: str) -> RunPaths:
         initial_prompt=run_dir / "initial_prompt.txt",
         raw_export=run_dir / "raw_export.jsonl",
         sim_raw_export=run_dir / "sim_raw_export.jsonl",
-        extra_reviewer_raw_export=run_dir / "extra_reviewer_raw_export.jsonl",
         claude_review_raw_export=run_dir / "claude_review_raw_export.jsonl",
         codex_review_raw_export=run_dir / "codex_review_raw_export.jsonl",
         transcript=run_dir / "transcript.md",

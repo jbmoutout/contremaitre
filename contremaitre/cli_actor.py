@@ -970,11 +970,7 @@ class CliActorRunner:
         (review_dir / "diff.patch").write_text(
             diff_file.read_text(encoding="utf-8"), encoding="utf-8"
         )
-        raw_export = (
-            self.paths.extra_reviewer_raw_export
-            if reviewer_id == "extra"
-            else self.paths.sim_raw_export
-        )
+        raw_export = self.paths.sim_raw_export
         return self._cli_turn(
             role="review",
             prompt=SIM_REVIEW_PROMPT,
@@ -987,6 +983,37 @@ class CliActorRunner:
             phase="REVIEW",
             speaker="sim",
             reviewer_id=reviewer_id,
+            extra_mounts=((review_dir, "/review", "ro"),),
+        )
+
+    def cli_reviewer_turn(
+        self,
+        *,
+        prompt: str,
+        raw_export: Path,
+        round_n: int,
+        review_dir: Path,
+    ) -> ActorOutput:
+        """Single-shot post-PR CLI reviewer turn in Docker (no session resume).
+
+        The reviewer mounts the worktree read-only and receives host-owned PR
+        context at `/review:ro`. It emits markdown only; the host posts that
+        markdown to GitHub after the container exits. The `reviewer_id` routes
+        the log stream to the cli_reviewer pane in the TUI.
+        """
+        home = self.paths.run_dir / f"{self.driver.home_dir_prefix}-cli-review-{round_n}-home"
+        return self._cli_turn(
+            role="cli_review",
+            prompt=prompt,
+            raw_export=raw_export,
+            home=home,
+            mount_mode="ro",
+            model="",  # falls through to codex_model / claude_model in driver
+            session_attr=None,  # fresh session every round
+            timeout_seconds=self.config.agent_timeout_seconds,
+            phase="CLI_REVIEW",
+            speaker="cli_reviewer",
+            reviewer_id="cli_review",
             extra_mounts=((review_dir, "/review", "ro"),),
         )
 
@@ -1283,6 +1310,8 @@ class CliActorRunner:
         """
 
         env = os.environ.copy()
+        env.pop("GITHUB_TOKEN", None)
+        env.pop("GH_TOKEN", None)
         for var, val in (
             ("HTTP_PROXY", self.config.http_proxy),
             ("HTTPS_PROXY", self.config.https_proxy),

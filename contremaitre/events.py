@@ -67,13 +67,18 @@ IMPLEMENTATION_COMPLETE_CLEARED = "implementation_complete_cleared"
 PUBLICATION_BLOCKED = "publication_blocked"
 PUBLISHED = "published"
 
-# ----- Post-publish CLI reviewer (claude / codex) -----
+# ----- Post-publish CLI review loop (claude / codex in Docker) -----
 
 CLI_REVIEW_STARTED = "cli_review_started"
 CLI_REVIEW_COMPLETED = "cli_review_completed"
 CLI_REVIEW_FAILED = "cli_review_failed"
 # Worst-of-N verdict projected onto a GitHub commit status on the published HEAD.
 CLI_REVIEW_STATUS = "cli_review_status"
+# Loop events: revision triggered when any tool is not LOOKS_GOOD; done when all LOOKS_GOOD.
+CLI_REVIEW_LOOP_REVISION = "cli_review_loop_revision"
+CLI_REVIEW_LOOP_DONE = "cli_review_loop_done"
+CLI_REVIEW_LOOP_EXHAUSTED = "cli_review_loop_exhausted"
+CLI_REVIEW_LOOP_BLOCKED = "cli_review_loop_blocked"
 
 # ----- Cleanup -----
 
@@ -96,4 +101,3 @@ SQLITE_RECOVERY_SILENT_STALL = "sqlite_recovery_silent_stall"
 SIGTERM_EMERGENCY_WRITE = "sigterm_emergency_write"
 EXTRACT_FAILED = "extract_failed"
 VIEWER_BUILD_FAILED = "viewer_build_failed"
-EXTRA_REVIEWER_UNAVAILABLE = "extra_reviewer_unavailable"

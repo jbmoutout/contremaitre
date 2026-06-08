@@ -113,9 +113,7 @@ class DerivePrMetadataTest(unittest.TestCase):
                 {
                     "hard_gates": "PASS",
                     "scorecard": {
-                        "sim_confidence": 0.95,
-                        "extra_reviewer_confidence": 1.0,
-                        "cross_family_agreement": True,
+                        "sim_review_confidence": 0.95,
                         "self_verified": True,
                         "settled_before_code": True,
                     },
@@ -124,7 +122,6 @@ class DerivePrMetadataTest(unittest.TestCase):
             _, body = _derive_pr_metadata(paths, diff_hash="abc" * 16)
             self.assertIn("<summary>Eval scorecard</summary>", body)
             self.assertIn("Hard gates: ✓ PASS", body)
-            self.assertIn("cross-family agreement", body)
             self.assertIn("self-verified ✓", body)
             self.assertIn("settled-before-code ✓", body)
 

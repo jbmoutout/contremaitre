@@ -121,14 +121,7 @@ class FakeActorRunner:
         settled_file: Path,
         scenario: str,
         attempt: int,
-        reviewer_id: str = "sim",
-        model_override: str | None = None,
     ) -> ActorOutput:
-        export = (
-            self.paths.extra_reviewer_raw_export
-            if reviewer_id == "extra"
-            else self.paths.sim_raw_export
-        )
         return self._fake(
             [
                 "sim-review",
@@ -143,7 +136,7 @@ class FakeActorRunner:
             ],
             role="sim",
             phase="REVIEW",
-            raw_export=export,
+            raw_export=self.paths.sim_raw_export,
         )
 
     def _fake(self, args: list[str], *, role: str, phase: str, raw_export: Path) -> ActorOutput:
@@ -231,8 +224,6 @@ class OpencodeActorRunner:
         settled_file: Path,
         scenario: str,
         attempt: int,
-        reviewer_id: str = "sim",
-        model_override: str | None = None,
     ) -> ActorOutput:
         from . import prompts
 
@@ -245,26 +236,19 @@ class OpencodeActorRunner:
             diff_file.read_text(encoding="utf-8"), encoding="utf-8"
         )
         # Fresh session every review attempt so the SIM has clean context.
-        # Separate state dirs per reviewer so SIM and extra reviewer can't
-        # collide on opencode.db when called back-to-back in one round.
-        attempt_state = self.review_state / f"{reviewer_id}-attempt-{attempt}"
+        attempt_state = self.review_state / f"sim-attempt-{attempt}"
         attempt_state.mkdir(parents=True, exist_ok=True)
-        raw_export = (
-            self.paths.extra_reviewer_raw_export
-            if reviewer_id == "extra"
-            else self.paths.sim_raw_export
-        )
         return self._opencode_turn(
             role="review",
             prompt=prompts.SIM_REVIEW_PROMPT,
-            raw_export=raw_export,
+            raw_export=self.paths.sim_raw_export,
             state_dir=attempt_state,
             mount_mode="ro",
-            model=model_override or self.config.sim_model,
+            model=self.config.sim_model,
             timeout_seconds=self.config.sim_timeout_seconds,
             session_attr=None,
             extra_mounts=[(review_dir, "/review", "ro")],
-            reviewer_id=reviewer_id,
+            reviewer_id="sim",
         )
 
     def _opencode_turn(

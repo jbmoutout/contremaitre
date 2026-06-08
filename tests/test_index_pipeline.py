@@ -13,13 +13,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from contremaitre.models import ModelSpec
 from contremaitre.viewer.index import (
-    _canonical_model,
     _collect_pipeline_pairings,
     _diffstat_loc,
     _pipeline_run_metrics,
     _pr_review_verdict,
     _review_signals,
+    _verdict_tier,
 )
 
 
@@ -64,7 +65,6 @@ def _make_run(
     verdict: str = "READY_FOR_DRAFT_PR",
     turns: int = 10,
     duration: float = 600.0,
-    extra_model: str | None = None,
     diff_stat: str | None = " 2 files changed, 100 insertions(+), 40 deletions(-)\n",
     review_cycles: list[dict] | None = None,
     cli_review_verdict: str | None = None,
@@ -79,7 +79,6 @@ def _make_run(
         {
             "agent_model": agent,
             "sim_model": sim,
-            "extra_reviewer_model": extra_model,
             "actor_mode": actor_mode,
             "verdict": verdict,
             "turns": turns,
@@ -125,22 +124,27 @@ def _make_run(
 
 
 def test_canonical_model_normalizes_across_runtimes():
-    # opencode/OpenRouter slugs → final path segment, runtime "opencode"
-    assert _canonical_model("openrouter/deepseek/deepseek-v4-flash") == (
+    # The viewer now routes persisted identity through ModelSpec.from_record,
+    # which absorbs both the canonical dict and any legacy on-disk string.
+    # opencode/OpenRouter slugs → final path segment, runtime "opencode".
+    assert ModelSpec.from_record("openrouter/deepseek/deepseek-v4-flash").canonical() == (
         "deepseek-v4-flash",
         "opencode",
     )
-    assert _canonical_model("opencode/deepseek-v4-flash-free") == (
+    assert ModelSpec.from_record("opencode/deepseek-v4-flash-free").canonical() == (
         "deepseek-v4-flash-free",
         "opencode",
     )
-    # CLI labels (the deterministic role_model_label format) → model + runtime
-    assert _canonical_model("gpt-5.5 (codex, effort=high)") == ("gpt-5.5", "codex")
-    assert _canonical_model("claude default (claude, effort=high)") == (
+    # Legacy CLI label strings → model + runtime.
+    assert ModelSpec.from_record("gpt-5.5 (codex, effort=high)").canonical() == ("gpt-5.5", "codex")
+    assert ModelSpec.from_record("claude default (claude, effort=high)").canonical() == (
         "claude-default",
         "claude",
     )
-    assert _canonical_model(None) == (None, None)
+    # The canonical dict shape (what new runs persist).
+    assert ModelSpec.from_record(
+        {"runtime": "codex", "requested": "gpt-5.5", "effort": "high"}
+    ).canonical() == ("gpt-5.5", "codex")
 
 
 def test_collect_pairings_merges_differently_spelled_same_model(tmp_path):
@@ -201,25 +205,23 @@ def test_pr_review_verdict_none_when_no_review(tmp_path):
     assert _pr_review_verdict(tmp_path) is None
 
 
-def test_review_signals_distinguishes_sim_and_extra(tmp_path):
+def test_review_signals_sim_rounds_and_changes(tmp_path):
     _write_jsonl(
         tmp_path / "review_cycles.jsonl",
         [
             {"reviewer": "sim", "round": 1, "verdict": "CHANGES_REQUESTED"},
-            {"reviewer": "extra", "round": 1, "verdict": "APPROVED"},
             {"reviewer": "sim", "round": 2, "verdict": "APPROVED"},
-            {"reviewer": "extra", "round": 2, "unavailable": True, "reason": "malformed"},
         ],
     )
     sig = _review_signals(tmp_path)
     assert sig["sim_rounds"] == 2
     assert sig["sim_changes"] is True  # round 1 bounced
-    assert sig["extra_changes"] is False  # only APPROVED (unavailable row ignored)
 
 
 def test_review_signals_all_none_without_cycles(tmp_path):
     sig = _review_signals(tmp_path)
-    assert sig == {"sim_rounds": None, "sim_changes": None, "extra_changes": None}
+    assert sig["sim_rounds"] is None
+    assert sig["sim_changes"] is None
 
 
 # --------------------------------------------------------------------------
@@ -269,6 +271,17 @@ def test_pipeline_run_metrics_marks_infra_failures(tmp_path):
         m = _pipeline_run_metrics(runs / rid)
         assert m["infra"] is True
         assert "turns" not in m  # metric extraction skipped
+
+
+def test_pr_needs_human_is_published_warning_for_index_metrics(tmp_path):
+    runs = tmp_path / "runs"
+    _make_run(runs, "20260101-000005-run", agent="prov/a", sim="prov/b", verdict="PR_NEEDS_HUMAN")
+
+    metrics = _pipeline_run_metrics(runs / "20260101-000005-run")
+
+    assert _verdict_tier("PR_NEEDS_HUMAN") == "tier-yellow"
+    assert metrics["infra"] is False
+    assert metrics["lands_pr"] is True
 
 
 def test_collect_pairings_excludes_infra_from_rates(tmp_path):
@@ -337,11 +350,9 @@ def test_collect_pairings_aggregates_with_coverage(tmp_path):
         verdict="NO_PR_CHANGES_REQUESTED",
         turns=6,
         duration=300.0,
-        extra_model="prov/extraZ",
         diff_stat=" 1 file changed, 20 insertions(+)\n",
         review_cycles=[
             {"reviewer": "sim", "round": 1, "verdict": "APPROVED"},
-            {"reviewer": "extra", "round": 1, "verdict": "CHANGES_REQUESTED"},
         ],
         cli_review_verdict=None,
         output_tokens=100,
@@ -363,9 +374,6 @@ def test_collect_pairings_aggregates_with_coverage(tmp_path):
     assert p["out_tokens"] == (200.0, 2)  # (300 + 100) / 2
     assert p["sim_rounds"] == (1.5, 2)  # (2 + 1) / 2
     assert p["sim_changes"] == (0.5, 2)  # A bounced, B did not
-    # extra only configured in B → coverage 1, rate 1.0
-    assert p["extra_changes"] == (1.0, 1)
-    assert p["extra_any"] is True
     # cli review only in A → coverage 1, MUST_FIX → fail rate 1.0
     assert p["pr_fail"] == (1.0, 1)
     # phases only recoverable in A → coverage 1

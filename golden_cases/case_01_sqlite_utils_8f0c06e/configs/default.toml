@@ -15,6 +15,3 @@ publish_mode = "gh"
 agent_model = "opencode/deepseek-v4-flash-free"
 sim_model = "opencode/deepseek-v4-flash-free"
 cli_reviewer = "codex"
-# extra_reviewer_model deferred — bias mitigation via cross-family SIM
-# (qwen_sim.toml) and future claude_reviewer.toml configs, not via the
-# extra-reviewer machinery.

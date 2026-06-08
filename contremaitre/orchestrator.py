@@ -34,27 +34,27 @@ from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
 from .costs import estimate_recorded_cost_usd, sum_token_usage
-from .diffscan import DiffScanResult, scan_diff
+from .diffscan import DiffScanResult
 from .evaluator import (
-    combined_review_summary,
-    hard_gate_payload,
     sim_review_summary,
     write_eval_reports,
 )
+from .gates import INTERNAL_PATHS, evaluate_l0, only_internal_changes
 from .extract import extract_run_artifacts
 from .viewer import build_viewer
 from .git_utils import GitRepo
-from .jsonlog import append_jsonl, write_json
+from .jsonlog import append_jsonl, read_jsonl, write_json
 from .manifest import build_manifest
 from .models import (
     ActorMode,
+    ModelSpec,
     ParsedVerdict,
     ReviewVerdict,
     RunConfig,
     RunResult,
     State,
     TerminalVerdict,
-    role_model_label,
+    resolved_model_from_events,
 )
 from .paths import build_run_paths, new_run_id, validate_slug
 from .preflight import enforce_preflight
@@ -70,20 +70,6 @@ from .scaffolds import (
     derive_commit_message,
 )
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
-
-# Paths held out of the host commit. `.contremaitre/` / `opencode.json` are
-# orchestration-internal; the rest are conventionally-gitignored build output
-# that some agents produce as a verification step (the worktree may not carry
-# the upstream .gitignore for all of them, so we belt-and-suspenders).
-_HOST_COMMIT_EXCLUDES = (
-    ".contremaitre",
-    "opencode.json",
-    "dist",
-    "build",
-    "out",
-    ".next",
-    "__pycache__",
-)
 
 
 @dataclass(frozen=True)
@@ -115,12 +101,11 @@ class Orchestrator:
         # origin && git remote add origin <fork>` swap (which deletes
         # `refs/remotes/origin/<base>`).
         self._base_sha: str = ""
-        # Last-round per-reviewer verdicts. Stashed by _run_review so
-        # _write_eval can build the structured `sim_review` payload
-        # (sim / extra / merged_verdict / cross_family_agreement) without
-        # threading a wider return type through the publication-gate path.
+        # Last-round SIM verdict. Stashed by _run_review so _write_eval can
+        # build the `sim_review` payload without threading it through the
+        # publication-gate path.
         self._last_sim_parsed: ParsedVerdict | None = None
-        self._last_extra_parsed: ParsedVerdict | None = None
+        self._last_cli_review_reason: str | None = None
 
     @property
     def _diff_base(self) -> str:
@@ -233,7 +218,6 @@ class Orchestrator:
         last_required_changes: list[str] = []
         last_parsed: ParsedVerdict | None = None
         last_sim: ParsedVerdict | None = None
-        last_extra: ParsedVerdict | None = None
 
         for review_round in range(1, self.config.caps.max_review_rounds + 1):
             self._transition(State.WORK, f"WORK session round {review_round}")
@@ -242,7 +226,6 @@ class Orchestrator:
                 review_round=review_round,
                 required_changes=last_required_changes,
                 sim_parsed=last_sim,
-                extra_parsed=last_extra,
             )
             self._emit(events.WORK_SESSION_END, round=review_round, outcome=outcome)
 
@@ -303,7 +286,6 @@ class Orchestrator:
                 last_required_changes = list(parsed.required_changes)
                 last_parsed = parsed
                 last_sim = self._last_sim_parsed
-                last_extra = self._last_extra_parsed
                 self._clear_implementation_complete()
                 self._emit(
                     events.REVISION_REQUESTED,
@@ -312,13 +294,14 @@ class Orchestrator:
                 )
                 continue
 
-            # APPROVED — drift check + hard gates + publish
+            # APPROVED — drift check + hard gates + publish + CLI review loop
             return self._publish_or_block(
                 worktree_git=worktree_git,
                 branch=branch,
                 checks=checks,
                 parsed=parsed,
                 approved_hash=current_hash,
+                actor=actor,
             )
 
         # Max review rounds exhausted while still CHANGES_REQUESTED.
@@ -339,7 +322,6 @@ class Orchestrator:
         review_round: int,
         required_changes: list[str],
         sim_parsed: ParsedVerdict | None,
-        extra_parsed: ParsedVerdict | None,
     ) -> str:
         """Run the multi-turn WORK session until terminal or cap.
 
@@ -352,7 +334,6 @@ class Orchestrator:
             first_message = prompts.revision_followup(
                 required_changes,
                 sim=sim_parsed,
-                extra=extra_parsed,
             )
 
         agent_text = self._agent_turn(actor, first_message)
@@ -420,47 +401,13 @@ class Orchestrator:
             diff_file=diff_file,
             settled_file=settled_file,
             review_round=review_round,
-            reviewer_id="sim",
-            model_override=None,
             scenario=self.config.sim_scenario,
         )
         if sim_parsed is None:
             return None
         self._record_review_cycle(review_round, current_hash, sim_parsed, reviewer="sim")
         self._last_sim_parsed = sim_parsed
-        self._last_extra_parsed = None
-
-        extra_parsed: ParsedVerdict | None = None
-        if self.config.extra_reviewer_model:
-            try:
-                extra_parsed = self._run_one_reviewer(
-                    actor=actor,
-                    diff_file=diff_file,
-                    settled_file=settled_file,
-                    review_round=review_round,
-                    reviewer_id="extra",
-                    model_override=self.config.extra_reviewer_model,
-                    scenario=self.config.extra_reviewer_scenario,
-                )
-                unavailable_reason = (
-                    None if extra_parsed is not None else "malformed_verdict_exhausted"
-                )
-            except ActorError as exc:
-                extra_parsed = None
-                unavailable_reason = f"actor_error: {exc}"
-            if extra_parsed is None:
-                self._record_extra_reviewer_unavailable(
-                    review_round=review_round,
-                    reason=unavailable_reason or "unknown",
-                )
-            else:
-                self._record_review_cycle(
-                    review_round, current_hash, extra_parsed, reviewer="extra"
-                )
-                self._last_extra_parsed = extra_parsed
-
-        merged = _merge_verdicts(sim_parsed, extra_parsed)
-        return merged, current_hash
+        return sim_parsed, current_hash
 
     def _run_one_reviewer(
         self,
@@ -469,16 +416,9 @@ class Orchestrator:
         diff_file: Path,
         settled_file: Path,
         review_round: int,
-        reviewer_id: str,
-        model_override: str | None,
         scenario: str,
     ) -> ParsedVerdict | None:
-        """Run one reviewer (SIM or extra) through the malformed-verdict retry loop.
-
-        Caller distinguishes reviewer-specific failure handling: the primary
-        SIM going None terminates the review, but a None extra reviewer
-        downgrades to single-SIM for that round.
-        """
+        """Run the SIM through the malformed-verdict retry loop."""
 
         parsed: ParsedVerdict | None = None
         for attempt in range(1, self.config.caps.malformed_verdict_retries + 2):
@@ -488,8 +428,6 @@ class Orchestrator:
                 settled_file=settled_file,
                 scenario=scenario,
                 attempt=attempt,
-                reviewer_id=reviewer_id,
-                model_override=model_override,
             )
             try:
                 parsed = parse_sim_verdict(output.text)
@@ -499,7 +437,7 @@ class Orchestrator:
                     events.MALFORMED_VERDICT,
                     round=review_round,
                     attempt=attempt,
-                    reviewer=reviewer_id,
+                    reviewer="sim",
                     error=str(exc),
                 )
         return parsed
@@ -535,133 +473,444 @@ class Orchestrator:
             required_changes=len(parsed.required_changes),
         )
 
-    def _record_extra_reviewer_unavailable(
+    # ----- post-publish CLI review loop -----
+
+    def _run_cli_review_loop(
         self,
         *,
-        review_round: int,
-        reason: str,
-    ) -> None:
-        """Note an extra-reviewer dropout for this round.
-
-        Writes both an `unavailable` row to review_cycles.jsonl (so TUI / lede
-        can render a dot rather than ✓✓/✓✗) and a recovery event mirrored to
-        guardrail_events.jsonl. Does NOT terminate the run — single-SIM
-        verdict drives the round.
-        """
-
-        append_jsonl(
-            self.paths.review_cycles,
-            {
-                "round": review_round,
-                "reviewer": "extra",
-                "unavailable": True,
-                "reason": reason,
-            },
-        )
-        record = {
-            "kind": events.EXTRA_REVIEWER_UNAVAILABLE,
-            "round": review_round,
-            "reason": reason,
-        }
-        append_jsonl(self.paths.recoveries, record)
-        append_jsonl(
-            self.paths.guardrail_events,
-            {"event": f"recovery_{events.EXTRA_REVIEWER_UNAVAILABLE}", **record},
-        )
-
-    # ----- post-publish CLI reviewer -----
-
-    def _run_cli_review(
-        self,
-        *,
-        tool: str,
+        worktree_git: GitRepo,
+        branch: str,
         outcome: PublishOutcome,
-        approved_hash: str,
-    ) -> str | None:
-        """Run `claude -p` / `codex exec` against the PR, post the result.
+        actor,
+    ) -> TerminalVerdict:
+        """Post-PR CLI review loop: reviewer → revision → reviewer, up to max rounds.
 
-        Streams subprocess stdout into `<tool>_review_raw_export.jsonl` so
-        the TUI can render progressively. The agent runs with `cwd` set to
-        the worktree of the freshly-published branch, so its Bash / file
-        tools resolve against the right checkout — and it can pull the
-        full diff itself via the local `gh` CLI (no inline paste needed).
-        On success the collected markdown is posted as a single PR
-        comment. Failures are logged but not raised: the PR is already
-        published.
+        Each round runs every configured CLI tool and posts a PR comment. The
+        loop exits with READY_FOR_DRAFT_PR when all tools return LOOKS_GOOD, or
+        with PR_NEEDS_HUMAN when max_cli_review_rounds exhausts without LOOKS_GOOD.
 
-        `tool` is the concrete reviewer to invoke (`"claude"` or
-        `"codex"`), resolved by the caller from `config.cli_reviewer`.
-        For `cli_reviewer="both"` the caller invokes this twice — once
-        per tool — and each invocation produces its own JSONL sink + PR
-        comment.
+        Any verdict other than LOOKS_GOOD (including NEEDS_ATTENTION) triggers
+        an agent revision on the same branch before the next round. The reviewer
+        always runs read-only in Docker; the agent revision uses the existing
+        session (resumes from WORK context).
+
+        GitHub access is host-owned: the host builds a read-only `/review`
+        bundle for the container, then posts the returned markdown as a PR
+        comment after the reviewer exits.
         """
 
         from . import cli_reviewer as _cli_reviewer
 
-        sink = _cli_reviewer.jsonl_sink_for(self.paths, tool)
-        self._emit(events.CLI_REVIEW_STARTED, tool=tool, url=outcome.url)
+        max_rounds = self.config.max_cli_review_rounds
+        tools = list(_cli_reviewer.expand_choice(self.config.cli_reviewer))
 
-        prompt = _cli_reviewer.build_prompt(pr_url=outcome.url)
-        # Hide the orchestrator's .contremaitre/* scaffolds from `git status`
-        # in the cli_review cwd, so codex/claude don't mistake them for
-        # uncommitted drift from the PR (the host commit excludes them via
-        # a pathspec, so they exist in the worktree but never in the PR).
-        _cli_reviewer.hide_orchestrator_scaffolds(self.paths.worktree)
-        start = time.monotonic()
-        result = _cli_reviewer.run_review(
-            tool=tool,
-            prompt=prompt,
-            jsonl_path=sink,
-            cwd=self.paths.worktree,
+        if not tools or not outcome.url:
+            self._last_cli_review_reason = None
+            return TerminalVerdict.READY_FOR_DRAFT_PR
+
+        last_round_verdicts: list[tuple[str, str | None]] = []
+        self._last_cli_review_reason = "post-publish CLI review did not reach LOOKS_GOOD"
+
+        for cli_round in range(1, max_rounds + 1):
+            self._transition(State.APPROVED, f"CLI review round {cli_round}/{max_rounds}")
+            round_verdicts: list[tuple[str, str | None]] = []
+            round_needs_revision = False
+            round_reviewer_failed = False
+            all_required_changes: list[str] = []
+
+            extras_dir = self.paths.run_dir / "extras" / f"cli_review_{cli_round:03d}"
+            try:
+                review_dir = self._write_cli_review_context(
+                    worktree_git=worktree_git,
+                    outcome=outcome,
+                    cli_round=cli_round,
+                    max_rounds=max_rounds,
+                    extras_dir=extras_dir,
+                )
+            except Exception as exc:
+                self._last_cli_review_reason = f"review context failed: {exc}"
+                self._emit(
+                    events.CLI_REVIEW_LOOP_BLOCKED,
+                    round=cli_round,
+                    reason=f"review context failed: {exc}",
+                )
+                self._post_cli_review_status(
+                    worktree_git=worktree_git,
+                    outcome=outcome,
+                    verdicts=last_round_verdicts,
+                )
+                return TerminalVerdict.PR_NEEDS_HUMAN
+
+            for tool in tools:
+                sink = _cli_reviewer.jsonl_sink_for(self.paths, tool)
+                sink_start_offset = sink.stat().st_size if sink.exists() else 0
+
+                self._emit(events.CLI_REVIEW_STARTED, tool=tool, url=outcome.url, round=cli_round)
+                prompt = _cli_reviewer.build_prompt(
+                    pr_url=outcome.url,
+                    diff=(review_dir / "diff.patch").read_text(encoding="utf-8"),
+                    round_n=cli_round,
+                    round_of=max_rounds,
+                )
+                start = time.monotonic()
+                markdown = self._run_one_cli_reviewer(
+                    tool=tool,
+                    prompt=prompt,
+                    sink=sink,
+                    round_n=cli_round,
+                    review_dir=review_dir,
+                )
+                duration_s = time.monotonic() - start
+                _copy_file_slice(
+                    src=sink,
+                    dst=extras_dir / f"{tool}_raw_export.jsonl",
+                    start_offset=sink_start_offset,
+                )
+
+                if not markdown:
+                    round_reviewer_failed = True
+                    self._emit(
+                        events.CLI_REVIEW_FAILED,
+                        tool=tool,
+                        reason="empty_output",
+                        round=cli_round,
+                    )
+                    round_verdicts.append((tool, None))
+                    continue
+
+                model = _cli_reviewer.extract_model(tool=tool, jsonl_path=sink)
+                header = _cli_reviewer.format_header(
+                    tool=tool,
+                    model=model,
+                    duration_s=duration_s,
+                    round_n=cli_round,
+                    round_of=max_rounds,
+                )
+                final_markdown = header + markdown.lstrip()
+
+                review_md = extras_dir / f"{tool}_review.md"
+                try:
+                    review_md.write_text(final_markdown, encoding="utf-8")
+                    (self.paths.run_dir / f"{tool}_review.md").write_text(
+                        final_markdown, encoding="utf-8"
+                    )
+                except OSError as exc:
+                    self._emit(
+                        events.CLI_REVIEW_FAILED,
+                        tool=tool,
+                        reason=f"write_error: {exc}",
+                        round=cli_round,
+                    )
+                    round_reviewer_failed = True
+                    round_verdicts.append((tool, None))
+                    continue
+
+                posted, post_message = _cli_reviewer.post_comment(
+                    pr_url=outcome.url,
+                    body_path=review_md,
+                    git_log=self.paths.git_log,
+                )
+                if not posted:
+                    self._emit(
+                        events.CLI_REVIEW_FAILED,
+                        tool=tool,
+                        reason=f"post_failed: {post_message}",
+                        round=cli_round,
+                    )
+
+                verdict = _cli_reviewer.parse_verdict(markdown)
+                round_verdicts.append((tool, verdict))
+
+                if verdict is None:
+                    round_reviewer_failed = True
+                    self._emit(
+                        events.CLI_REVIEW_FAILED,
+                        tool=tool,
+                        reason="unparseable_verdict",
+                        round=cli_round,
+                    )
+                    continue
+
+                self._emit(
+                    events.CLI_REVIEW_COMPLETED,
+                    tool=tool,
+                    url=outcome.url,
+                    review_chars=len(markdown),
+                    verdict=verdict,
+                    round=cli_round,
+                )
+                if verdict != "LOOKS_GOOD":
+                    round_needs_revision = True
+                    all_required_changes.extend(_cli_reviewer.extract_required_changes(markdown))
+
+            last_round_verdicts = round_verdicts
+
+            if round_reviewer_failed:
+                self._last_cli_review_reason = (
+                    "post-publish CLI review failed or produced no parseable verdict"
+                )
+                self._post_cli_review_status(
+                    worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
+                )
+                return TerminalVerdict.PR_NEEDS_HUMAN
+
+            if not round_needs_revision:
+                self._emit(
+                    events.CLI_REVIEW_LOOP_DONE,
+                    round=cli_round,
+                    verdicts={t: v for t, v in round_verdicts},
+                )
+                self._last_cli_review_reason = None
+                self._post_cli_review_status(
+                    worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
+                )
+                return TerminalVerdict.READY_FOR_DRAFT_PR
+
+            if cli_round == max_rounds:
+                break
+
+            # Revision round: agent addresses required changes, then commits, gates,
+            # and pushes only if the revised HEAD is deterministic-safe.
+            self._emit(
+                events.CLI_REVIEW_LOOP_REVISION,
+                round=cli_round,
+                required_changes_count=len(all_required_changes),
+                verdicts={t: v for t, v in round_verdicts},
+            )
+            revision_ready = self._run_cli_review_revision(
+                actor=actor,
+                worktree_git=worktree_git,
+                branch=branch,
+                required_changes=all_required_changes,
+                cli_round=cli_round,
+                max_rounds=max_rounds,
+            )
+            if not revision_ready:
+                self._last_cli_review_reason = "post-publish CLI review revision was blocked"
+                self._post_cli_review_status(
+                    worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
+                )
+                return TerminalVerdict.PR_NEEDS_HUMAN
+
+        # Max rounds exhausted without reaching LOOKS_GOOD on all tools.
+        self._emit(
+            events.CLI_REVIEW_LOOP_EXHAUSTED,
+            rounds=max_rounds,
+            verdicts={t: v for t, v in last_round_verdicts},
         )
-        duration_s = time.monotonic() - start
-        if result.error or not result.markdown.strip():
+        self._post_cli_review_status(
+            worktree_git=worktree_git, outcome=outcome, verdicts=last_round_verdicts
+        )
+        return TerminalVerdict.PR_NEEDS_HUMAN
+
+    def _run_cli_review_revision(
+        self,
+        *,
+        actor,
+        worktree_git: GitRepo,
+        branch: str,
+        required_changes: list[str],
+        cli_round: int,
+        max_rounds: int,
+    ) -> bool:
+        """Apply one post-publish CLI-review revision and gate it before push."""
+
+        revision_prompt = prompts.cli_revision_followup(
+            required_changes, round_n=cli_round, round_of=max_rounds
+        )
+        self._clear_implementation_complete()
+        self._agent_turn(actor, revision_prompt)
+        if not self._implementation_complete():
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason="revision ended without IMPLEMENTATION_COMPLETE",
+            )
+            return False
+        if self._cap_tripped():
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason="cap tripped during CLI revision",
+            )
+            return False
+
+        self._commit_agent_changes(worktree_git)
+        revision_hash = diff_hash(worktree_git, self._diff_base)
+        try:
+            checks = run_checks(
+                config=self.config,
+                paths=self.paths,
+                emit_event=self._emit,
+            )
+        except Exception as exc:
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason=f"executable checks raised: {exc}",
+            )
+            return False
+        self._record_worktree_state(worktree_git, f"after-cli-revision-checks-round{cli_round}")
+        if not self._cli_revision_gates_passed(
+            worktree_git=worktree_git,
+            revision_hash=revision_hash,
+            checks=checks,
+            cli_round=cli_round,
+        ):
+            return False
+
+        push = worktree_git.run("push", "origin", f"HEAD:{branch}", check=False)
+        if push.returncode != 0:
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason="push failed",
+                stderr=push.stderr[-1000:],
+            )
+            return False
+        return True
+
+    def _cli_revision_gates_passed(
+        self,
+        *,
+        worktree_git: GitRepo,
+        revision_hash: str,
+        checks: list[CheckResult],
+        cli_round: int,
+    ) -> bool:
+        """Run deterministic L0/L1 gates for a post-publish revision."""
+
+        gate = evaluate_l0(
+            worktree_git=worktree_git,
+            diff_base=self._diff_base,
+            expected_hash=revision_hash,
+        )
+        diff_scan = gate.diff_scan
+        clean = gate.clean_worktree
+        hard_gates = gate.payload
+        # L1 stays caller-side: the revision path folds executable-check failure
+        # into its emitted `passed` and block reason (publish keeps them separate).
+        checks_failed = any(not check.passed for check in checks)
+        self._emit(
+            events.HARD_GATES_CHECKED,
+            context="cli_review_revision",
+            round=cli_round,
+            passed=gate.passed and not checks_failed,
+            diff_hash_matched=gate.diff_hash_matched,
+            diff_scan_passed=diff_scan.passed if diff_scan else False,
+            clean_worktree=clean,
+            changed_files=len(diff_scan.changed_files) if diff_scan else 0,
+            failed_checks=[check.cmd for check in checks if not check.passed],
+        )
+        if gate.passed and not checks_failed:
+            return True
+        self._emit(
+            events.CLI_REVIEW_LOOP_BLOCKED,
+            round=cli_round,
+            reason="hard gate failed" if not hard_gates["passed"] else "executable checks failed",
+            hard_gates=hard_gates,
+            failed_checks=[check.cmd for check in checks if not check.passed],
+        )
+        return False
+
+    def _run_one_cli_reviewer(
+        self,
+        *,
+        tool: str,
+        prompt: str,
+        sink: Path,
+        round_n: int,
+        review_dir: Path,
+    ) -> str:
+        """Run one CLI reviewer tool in Docker for one round. Returns markdown or "".
+
+        The reviewer sees only `/app:ro` plus the host-built `/review:ro`
+        bundle. GitHub credentials and PR side effects stay host-owned.
+        Failures are caught and emitted as CLI_REVIEW_FAILED events; the loop
+        continues without this tool's verdict.
+        """
+
+        from .cli_actor import CliActorRunner as _CliActorRunner
+
+        runner = _CliActorRunner(config=self.config, paths=self.paths, tool=tool)
+        try:
+            output = runner.cli_reviewer_turn(
+                prompt=prompt,
+                raw_export=sink,
+                round_n=round_n,
+                review_dir=review_dir,
+            )
+            return output.text
+        except Exception as exc:
             self._emit(
                 events.CLI_REVIEW_FAILED,
                 tool=tool,
-                exit_code=result.exit_code,
-                reason=result.error or "empty_output",
+                reason=f"docker_error: {exc}",
+                round=round_n,
             )
-            return
+            return ""
 
-        # Prepend a tool · model · duration H3 header so the human reading
-        # the PR comment sees what produced the review before the verdict
-        # line. H3 (not H1/H2) so it stays visually subordinate to the
-        # agent's verdict headline (`🔴 MUST_FIX — …` etc.).
-        model = _cli_reviewer.extract_model(tool=tool, jsonl_path=sink)
-        header = _cli_reviewer.format_header(tool=tool, model=model, duration_s=duration_s)
-        final_markdown = header + result.markdown.lstrip()
+    def _write_cli_review_context(
+        self,
+        *,
+        worktree_git: GitRepo,
+        outcome: PublishOutcome,
+        cli_round: int,
+        max_rounds: int,
+        extras_dir: Path,
+    ) -> Path:
+        """Write the host-owned PR context mounted into CLI reviewer Docker."""
 
-        review_md = self.paths.run_dir / f"{tool}_review.md"
-        try:
-            review_md.write_text(final_markdown, encoding="utf-8")
-        except OSError as exc:
-            self._emit(events.CLI_REVIEW_FAILED, tool=tool, reason=f"write_error: {exc}")
-            return
+        review_dir = extras_dir / "input"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        head_sha = worktree_git.output("rev-parse", "HEAD").strip()
+        current_hash = diff_hash(worktree_git, self._diff_base)
+        write_review_diff(worktree_git, self._diff_base, review_dir / "diff.patch")
+        changed = worktree_git.output("diff", "--name-only", f"{self._diff_base}...HEAD")
+        (review_dir / "changed_files.txt").write_text(changed, encoding="utf-8")
+        (review_dir / "head_sha.txt").write_text(f"{head_sha}\n", encoding="utf-8")
 
-        posted, message = _cli_reviewer.post_comment(
-            pr_url=outcome.url,
-            body_path=review_md,
-            git_log=self.paths.git_log,
+        settled = self.paths.worktree / SETTLED_RELPATH
+        if settled.is_file():
+            (review_dir / "SETTLED_DESIGN.md").write_text(
+                settled.read_text(encoding="utf-8", errors="replace"),
+                encoding="utf-8",
+            )
+        else:
+            (review_dir / "SETTLED_DESIGN.md").write_text("", encoding="utf-8")
+
+        pr_body = self.paths.run_dir / "pr_body.md"
+        if pr_body.is_file():
+            (review_dir / "pr_body.md").write_text(
+                pr_body.read_text(encoding="utf-8", errors="replace"),
+                encoding="utf-8",
+            )
+        else:
+            (review_dir / "pr_body.md").write_text("", encoding="utf-8")
+
+        payload = {
+            "url": outcome.url,
+            "title": outcome.title,
+            "base": outcome.base,
+            "branch": outcome.branch,
+            "round": cli_round,
+            "round_of": max_rounds,
+            "head_sha": head_sha,
+            "diff_base": self._diff_base,
+            "approved_diff_hash": outcome.approved_diff_hash,
+            "current_diff_hash": current_hash,
+        }
+        write_json(review_dir / "pr.json", payload)
+        (review_dir / "PR.md").write_text(
+            _render_cli_review_context_markdown(payload),
+            encoding="utf-8",
         )
-        if not posted:
-            self._emit(events.CLI_REVIEW_FAILED, tool=tool, reason=f"post_failed: {message}")
-            return
-        # Parse the agent's verdict key (MUST_FIX / NEEDS_ATTENTION /
-        # LOOKS_GOOD) from line 1 of the raw markdown per the prompt spec.
-        # Surfaced as a payload field on the completion event so the TUI's
-        # footer glyph reflects what the agent actually said, not just
-        # whether the subprocess exited 0.
-        verdict = _cli_reviewer.parse_verdict(result.markdown)
-        self._emit(
-            events.CLI_REVIEW_COMPLETED,
-            tool=tool,
-            url=outcome.url,
-            review_chars=len(result.markdown),
-            approved_hash=approved_hash,
-            verdict=verdict,
+        _write_previous_cli_reviews(
+            extras_root=self.paths.run_dir / "extras",
+            current_round=cli_round,
+            dst=review_dir / "previous_cli_reviews.md",
         )
-        return verdict
+        return review_dir
 
     def _post_cli_review_status(
         self,
@@ -724,28 +973,28 @@ class Orchestrator:
         checks: list[CheckResult],
         parsed: ParsedVerdict,
         approved_hash: str,
+        actor,
     ) -> RunResult:
         if self.config.simulate_drift_after_approval:
             self._commit_drift(worktree_git)
 
-        recomputed_hash = diff_hash(worktree_git, self._diff_base)
-        diff_hash_matched = recomputed_hash == approved_hash
-        diff_scan = scan_diff(worktree_git, self._diff_base)
         # `.contremaitre/*` is excluded from staging by design and stays
         # untracked in the worktree for the SIM to read across rounds —
-        # don't count it against clean-worktree.
-        clean = _only_contremaitre_changes(worktree_git.status_porcelain())
-        hard_gates = hard_gate_payload(
-            diff_scan=diff_scan,
-            clean_worktree=clean,
-            diff_hash_matched=diff_hash_matched,
+        # `evaluate_l0` does not count it against clean-worktree.
+        gate = evaluate_l0(
+            worktree_git=worktree_git,
+            diff_base=self._diff_base,
+            expected_hash=approved_hash,
         )
+        recomputed_hash = gate.recomputed_hash
+        diff_scan = gate.diff_scan
+        hard_gates = gate.payload
         self._emit(
             events.HARD_GATES_CHECKED,
-            passed=bool(hard_gates["passed"]),
-            diff_hash_matched=diff_hash_matched,
+            passed=gate.passed,
+            diff_hash_matched=gate.diff_hash_matched,
             diff_scan_passed=diff_scan.passed if diff_scan else False,
-            clean_worktree=clean,
+            clean_worktree=gate.clean_worktree,
             changed_files=len(diff_scan.changed_files) if diff_scan else 0,
         )
         # L1 executable-check gate: blocks only on a configured-and-failing
@@ -802,35 +1051,38 @@ class Orchestrator:
             url=outcome.url,
             dry_run=outcome.dry_run,
         )
-        # Post-publish CLI reviewer (claude/codex on the operator's subscription).
-        # Runs inside the run so the TUI's `done` phase only fires once the
-        # comment has been posted (or the step has explicitly failed). Never
-        # raises — the PR is already published; a missed review is observable
-        # via the CLI_REVIEW_FAILED event and recoverable by the human.
-        # `both` runs claude then codex sequentially; each posts its own
-        # PR comment via its own JSONL sink.
-        from . import cli_reviewer as _cli_reviewer
-
-        verdicts: list[tuple[str, str | None]] = []
-        for tool in _cli_reviewer.expand_choice(self.config.cli_reviewer):
-            if outcome.url:
-                verdict = self._run_cli_review(
-                    tool=tool, outcome=outcome, approved_hash=approved_hash
-                )
-                verdicts.append((tool, verdict))
-        if outcome.url and verdicts:
-            self._post_cli_review_status(
-                worktree_git=worktree_git, outcome=outcome, verdicts=verdicts
+        # Post-publish CLI review loop. Runs reviewer rounds in Docker;
+        # triggers agent revisions on the same branch on any non-LOOKS_GOOD
+        # verdict. Exits READY_FOR_DRAFT_PR (all LOOKS_GOOD) or PR_NEEDS_HUMAN
+        # (max rounds exhausted). Never raises — the PR is already published.
+        terminal_verdict = self._run_cli_review_loop(
+            worktree_git=worktree_git,
+            branch=branch,
+            outcome=outcome,
+            actor=actor,
+        )
+        final_reason = outcome.reason
+        if terminal_verdict != TerminalVerdict.READY_FOR_DRAFT_PR:
+            final_reason = (
+                self._last_cli_review_reason or "post-publish CLI review did not reach LOOKS_GOOD"
             )
-        self._write_final_stats(State.APPROVED, TerminalVerdict.READY_FOR_DRAFT_PR, outcome.reason)
+            self._write_eval(
+                verdict=terminal_verdict,
+                checks=checks,
+                hard_gates=hard_gates,
+                needs_human=[final_reason],
+                sim_verdict=parsed,
+                reason=final_reason,
+            )
+        self._write_final_stats(State.APPROVED, terminal_verdict, final_reason)
         return RunResult(
             run_id=self.run_id,
             terminal_state=State.APPROVED,
-            verdict=TerminalVerdict.READY_FOR_DRAFT_PR,
+            verdict=terminal_verdict,
             run_dir=self.paths.run_dir,
             worktree=self.paths.worktree,
             pr_created=True,
-            reason=outcome.reason,
+            reason=final_reason,
         )
 
     def _blocked_by_gates(
@@ -942,30 +1194,25 @@ class Orchestrator:
         sim_verdict: ParsedVerdict | None,
         reason: str,
     ) -> None:
-        # `sim_verdict` is the *merged* verdict that drove publication (or
-        # was the last seen before a terminal-no-pr). Per-reviewer breakdown
-        # comes from `_last_sim_parsed` / `_last_extra_parsed`, set by
-        # `_run_review` on each round.
-        extra_attempted = self.config.extra_reviewer_model is not None
+        # `sim_verdict` is the verdict that drove publication (or the last seen
+        # before a terminal-no-pr). `_last_sim_parsed` carries the per-round
+        # breakdown set by `_run_review`.
         sim_parsed = self._last_sim_parsed
-        extra_parsed = self._last_extra_parsed
         if sim_verdict is not None and sim_parsed is not None:
-            sim_review = combined_review_summary(
-                sim=sim_parsed,
-                extra=extra_parsed,
-                merged=sim_verdict,
-                extra_attempted=extra_attempted,
+            sim_review = sim_review_summary(
+                verdict=sim_parsed.verdict.value,
+                confidence=sim_parsed.confidence,
+                summary=sim_parsed.summary,
+                required_changes=sim_parsed.required_changes,
+                checks_performed=sim_parsed.checks_performed,
             )
         elif sim_verdict is not None:
-            # Defensive: sim_verdict present but per-reviewer state was not
-            # captured (e.g. test path that constructs verdicts without
-            # going through _run_review). Use the merged verdict as the SIM
-            # stand-in so the payload is consistent.
-            sim_review = combined_review_summary(
-                sim=sim_verdict,
-                extra=extra_parsed,
-                merged=sim_verdict,
-                extra_attempted=extra_attempted,
+            sim_review = sim_review_summary(
+                verdict=sim_verdict.verdict.value,
+                confidence=sim_verdict.confidence,
+                summary=sim_verdict.summary,
+                required_changes=sim_verdict.required_changes,
+                checks_performed=sim_verdict.checks_performed,
             )
         else:
             sim_review = sim_review_summary(
@@ -1052,7 +1299,7 @@ class Orchestrator:
         self._emit(events.SIMULATED_DIFF_DRIFT)
 
     def _commit_agent_changes(self, repo: GitRepo) -> None:
-        if _only_contremaitre_changes(repo.status_porcelain()):
+        if only_internal_changes(repo.status_porcelain()):
             self._emit(events.HOST_COMMIT_SKIPPED, reason="worktree clean")
             return
         title, body = derive_commit_message(self.paths.worktree, self.run_id)
@@ -1063,7 +1310,7 @@ class Orchestrator:
         # treats `:(exclude)X` as an explicit mention of X, and the add
         # aborts when X is also gitignored ("paths are ignored").
         excludes = [
-            f":(exclude){path}" for path in _HOST_COMMIT_EXCLUDES if not _is_gitignored(repo, path)
+            f":(exclude){path}" for path in INTERNAL_PATHS if not _is_gitignored(repo, path)
         ]
         repo.run("add", "--", ".", *excludes)
         repo.run("commit", "-m", title, "-m", body)
@@ -1168,6 +1415,16 @@ class Orchestrator:
         )
         return snapshot
 
+    def _role_spec(self, role: str, raw_export: Path) -> ModelSpec:
+        """The role's `ModelSpec`, with `resolved` back-filled from its raw
+        stream (claude echoes the model it actually ran in `system/init`;
+        codex/opencode are silent, so `resolved` stays None there)."""
+
+        spec = ModelSpec.for_role(self.config, role)
+        if raw_export.exists():
+            spec = spec.with_resolved(resolved_model_from_events(read_jsonl(raw_export)))
+        return spec
+
     def _write_final_stats(
         self, terminal_state: State, verdict: TerminalVerdict, reason: str
     ) -> None:
@@ -1180,25 +1437,8 @@ class Orchestrator:
                 "reason": reason,
                 "turns": self.turns,
                 "duration_seconds": round(time.monotonic() - self.started, 3),
-                "agent_model": role_model_label(
-                    actor_mode=self.config.actor_mode,
-                    opencode_model=self.config.agent_model,
-                    codex_model=self.config.codex_model,
-                    codex_effort=self.config.codex_effort,
-                    cli_tool=self.config.cli_tool,
-                    claude_model=self.config.claude_model,
-                    claude_effort=self.config.claude_effort,
-                ),
-                "sim_model": role_model_label(
-                    actor_mode=self.config.sim_actor_mode or self.config.actor_mode,
-                    opencode_model=self.config.sim_model,
-                    codex_model=self.config.codex_model,
-                    codex_effort=self.config.codex_effort,
-                    cli_tool=self.config.sim_cli_tool or self.config.cli_tool,
-                    claude_model=self.config.claude_model,
-                    claude_effort=self.config.claude_effort,
-                ),
-                "extra_reviewer_model": self.config.extra_reviewer_model,
+                "agent_model": self._role_spec("agent", self.paths.raw_export).to_dict(),
+                "sim_model": self._role_spec("sim", self.paths.sim_raw_export).to_dict(),
                 "actor_mode": self.config.actor_mode.value,
                 "publish_mode": self.config.publish_mode.value,
                 "recorded_cost_usd": estimate_recorded_cost_usd(
@@ -1357,103 +1597,74 @@ def _is_gitignored(repo: GitRepo, path: str) -> bool:
     return repo.run("check-ignore", "-q", "--", path, check=False).returncode == 0
 
 
-def _only_contremaitre_changes(porcelain: str) -> bool:
-    """True iff every `git status --porcelain` row is orchestration-internal.
+def _copy_file_slice(*, src: Path, dst: Path, start_offset: int) -> None:
+    """Copy bytes appended to `src` since `start_offset` into `dst`."""
 
-    Files excluded from commits by pathspec (`.contremaitre/*`,
-    `opencode.json`) are deliberately untracked in the worktree. The
-    host-commit step and the clean-worktree hard gate both need to treat
-    a worktree whose only changes are in these paths as "clean for our
-    purposes":
+    if not src.exists():
+        return
+    try:
+        with src.open("rb") as fh:
+            fh.seek(start_offset)
+            data = fh.read()
+    except OSError:
+        return
+    if not data:
+        return
+    try:
+        dst.write_bytes(data)
+    except OSError:
+        return
 
-    - host-commit: skip instead of producing an empty PR.
-    - clean-worktree gate: pass.
 
-    Empty porcelain (no changes at all) is also "clean".
-    """
+def _render_cli_review_context_markdown(payload: dict[str, object]) -> str:
+    """Small manifest telling the reviewer what the host mounted."""
 
-    _INTERNAL_PREFIXES = (
-        ".contremaitre/",
-        ".contremaitre",
-        "opencode.json",
-        "dist/",
-        "build/",
-        "out/",
-        ".next/",
-        "__pycache__/",
-    )
+    lines = [
+        "# Pull Request Context",
+        "",
+        "GitHub access is host-owned. The reviewer container must not fetch the PR,",
+        "call `gh`, or use GitHub credentials. Review only the mounted files below",
+        "and the read-only worktree at `/app`.",
+        "",
+        f"- PR URL: {payload.get('url') or '(unknown)'}",
+        f"- Title: {payload.get('title') or '(unknown)'}",
+        f"- Base: {payload.get('base') or '(unknown)'}",
+        f"- Branch: {payload.get('branch') or '(unknown)'}",
+        f"- Round: {payload.get('round')}/{payload.get('round_of')}",
+        f"- Head SHA: {payload.get('head_sha') or '(unknown)'}",
+        f"- Diff base: {payload.get('diff_base') or '(unknown)'}",
+        f"- Current diff hash: {payload.get('current_diff_hash') or '(unknown)'}",
+        "",
+        "## Mounted Files",
+        "",
+        "- `/review/diff.patch` — current PR diff against the run base",
+        "- `/review/changed_files.txt` — changed file list",
+        "- `/review/SETTLED_DESIGN.md` — design the agent claimed to implement",
+        "- `/review/pr_body.md` — PR body posted by the host",
+        "- `/review/pr.json` — structured PR metadata",
+        "- `/review/previous_cli_reviews.md` — previous CLI-review comments in this run",
+    ]
+    return "\n".join(lines) + "\n"
 
-    for line in porcelain.splitlines():
-        if not line.strip():
+
+def _write_previous_cli_reviews(*, extras_root: Path, current_round: int, dst: Path) -> None:
+    parts: list[str] = []
+    for round_n in range(1, current_round):
+        round_dir = extras_root / f"cli_review_{round_n:03d}"
+        if not round_dir.is_dir():
             continue
-        path = line[3:].strip().strip('"')
-        if not any(path == p or path.startswith(p) for p in _INTERNAL_PREFIXES):
-            return False
-    return True
-
-
-_VERDICT_SEVERITY = {
-    ReviewVerdict.APPROVED: 0,
-    ReviewVerdict.CHANGES_REQUESTED: 1,
-    ReviewVerdict.NEEDS_HUMAN: 2,
-}
-
-
-def _merge_verdicts(
-    sim: ParsedVerdict,
-    extra: ParsedVerdict | None,
-) -> ParsedVerdict:
-    """Combine SIM and extra-reviewer verdicts with strict severity priority.
-
-    NEEDS_HUMAN > CHANGES_REQUESTED > APPROVED. The worst verdict wins, so
-    one reviewer flagging NEEDS_HUMAN can't be overridden by the other's
-    APPROVED. When both flag CHANGES_REQUESTED, required_changes are merged
-    with [SIM]/[EXTRA] tags (overlapping items tagged [SIM+EXTRA]).
-    """
-
-    if extra is None:
-        return sim
-
-    if _VERDICT_SEVERITY[extra.verdict] > _VERDICT_SEVERITY[sim.verdict]:
-        merged_verdict = extra.verdict
+        for review_md in sorted(round_dir.glob("*_review.md")):
+            tool = review_md.name.removesuffix("_review.md")
+            try:
+                body = review_md.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if body:
+                parts.append(f"## Round {round_n} — {tool}\n\n{body}\n")
+    if parts:
+        dst.write_text("\n".join(parts), encoding="utf-8")
     else:
-        merged_verdict = sim.verdict
-
-    def _norm(s: str) -> str:
-        return s.strip().casefold()
-
-    sim_norms = {_norm(c) for c in sim.required_changes}
-    extra_norms = {_norm(c) for c in extra.required_changes}
-    overlap_norms = sim_norms & extra_norms
-
-    merged_required: list[str] = []
-    seen: set[str] = set()
-    for change in sim.required_changes:
-        norm = _norm(change)
-        if norm in seen:
-            continue
-        seen.add(norm)
-        tag = "[SIM+EXTRA]" if norm in overlap_norms else "[SIM]"
-        merged_required.append(f"{tag} {change}")
-    for change in extra.required_changes:
-        norm = _norm(change)
-        if norm in seen:
-            continue
-        seen.add(norm)
-        merged_required.append(f"[EXTRA] {change}")
-
-    merged_checks = list(dict.fromkeys(sim.checks_performed + extra.checks_performed))
-    merged_summary = f"{sim.summary}\n— EXTRA: {extra.summary}"
-    merged_confidence = min(sim.confidence, extra.confidence)
-
-    return ParsedVerdict(
-        verdict=merged_verdict,
-        confidence=merged_confidence,
-        required_changes=merged_required,
-        checks_performed=merged_checks,
-        summary=merged_summary,
-        raw=sim.raw,
-    )
+        dst.write_text("No previous CLI-review comments in this run.\n", encoding="utf-8")
 
 
 def run(config: RunConfig) -> RunResult:

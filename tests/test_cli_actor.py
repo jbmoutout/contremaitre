@@ -271,6 +271,20 @@ class BuildCommandTest(unittest.TestCase):
             self.assertIn(f"{runner.worktree}:/app:ro", joined)
             self.assertIn("/tmp/rev:/review:ro", joined)
 
+    def test_docker_env_scrubs_github_credentials(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_secret", "GH_TOKEN": "ghs_secret"}),
+        ):
+            runner, _ = _make_runner(
+                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
+            )
+
+            env = runner._docker_env()
+
+            self.assertNotIn("GITHUB_TOKEN", env)
+            self.assertNotIn("GH_TOKEN", env)
+
 
 class CodexModelArgTest(unittest.TestCase):
     def test_omits_namespaced_and_empty(self):
@@ -299,41 +313,45 @@ class CodexModelArgTest(unittest.TestCase):
         self.assertEqual(_codex_effort_arg(""), [])
 
 
-class RoleModelLabelTest(unittest.TestCase):
-    def test_codex_role_shows_model_and_effort(self):
-        from contremaitre.models import role_model_label
+class CodexModelSpecTest(unittest.TestCase):
+    def test_codex_role_records_model_and_effort(self):
+        from contremaitre.models import ModelSpec
 
-        label = role_model_label(
-            actor_mode=ActorMode.CLI,
+        spec = ModelSpec.build(
+            mode=ActorMode.CLI,
             opencode_model="opencode/deepseek-v4-flash-free",
             codex_model="gpt-5.5",
             codex_effort="high",
         )
-        self.assertEqual(label, "gpt-5.5 (codex, effort=high)")
+        self.assertEqual((spec.runtime, spec.requested, spec.effort), ("codex", "gpt-5.5", "high"))
+        self.assertEqual(spec.canonical(), ("gpt-5.5", "codex"))
+        self.assertEqual(spec.display(), "codex/gpt-5.5 high")
 
-    def test_opencode_role_shows_slug(self):
-        from contremaitre.models import role_model_label
+    def test_opencode_role_records_slug_and_provider(self):
+        from contremaitre.models import ModelSpec
 
         for mode in (ActorMode.OPENCODE, ActorMode.OPENCODE.value, "fake"):
-            self.assertEqual(
-                role_model_label(
-                    actor_mode=mode,
-                    opencode_model="opencode/big-pickle",
-                    codex_model="gpt-5.5",
-                    codex_effort="high",
-                ),
-                "opencode/big-pickle",
+            spec = ModelSpec.build(
+                mode=mode,
+                opencode_model="opencode/big-pickle",
+                codex_model="gpt-5.5",
+                codex_effort="high",
             )
+            self.assertEqual(spec.requested, "opencode/big-pickle")
+            self.assertEqual(spec.provider, "opencode")
+            self.assertIsNone(spec.effort)
+            self.assertEqual(spec.canonical(), ("big-pickle", spec.runtime))
 
 
 def _cli_config(root: Path, **over) -> RunConfig:
     over.setdefault("cli_tool", "codex")
+    actor_mode = over.pop("actor_mode", ActorMode.CLI)
     return RunConfig(
         repo=root,
         base="main",
         runs_root=root / "runs",
         run_slug="t",
-        actor_mode=ActorMode.CLI,
+        actor_mode=actor_mode,
         **over,
     )
 
@@ -512,9 +530,7 @@ class TuiRunForwardsRuntimeTest(unittest.TestCase):
         saved = MagicMock(
             agent_model=None,
             sim_model=None,
-            extra_reviewer_model=None,
             cli_reviewer=None,
-            extra_reviewer_skip=False,
             actor=None,
             sim_actor=None,
             cli_tool=None,
@@ -1125,12 +1141,12 @@ class ClaudeTokenUsageTest(unittest.TestCase):
             self.assertEqual(estimate_recorded_cost_usd(p), 0.0)
 
 
-class ClaudeRoleModelLabelTest(unittest.TestCase):
-    def test_claude_role_shows_model_and_effort(self):
-        from contremaitre.models import role_model_label
+class ClaudeModelSpecTest(unittest.TestCase):
+    def test_claude_role_records_model_and_effort(self):
+        from contremaitre.models import ModelSpec
 
-        label = role_model_label(
-            actor_mode=ActorMode.CLI,
+        spec = ModelSpec.build(
+            mode=ActorMode.CLI,
             opencode_model="opencode/x",
             codex_model="gpt-5.5",
             codex_effort="high",
@@ -1138,13 +1154,14 @@ class ClaudeRoleModelLabelTest(unittest.TestCase):
             claude_model="opus",
             claude_effort="high",
         )
-        self.assertEqual(label, "opus (claude, effort=high)")
+        self.assertEqual((spec.runtime, spec.requested, spec.effort), ("claude", "opus", "high"))
+        self.assertEqual(spec.display(), "claude/opus high")
 
-    def test_empty_claude_model_shows_account_default(self):
-        from contremaitre.models import role_model_label
+    def test_empty_claude_model_is_account_default(self):
+        from contremaitre.models import ModelSpec
 
-        label = role_model_label(
-            actor_mode=ActorMode.CLI,
+        spec = ModelSpec.build(
+            mode=ActorMode.CLI,
             opencode_model="opencode/x",
             codex_model="gpt-5.5",
             codex_effort="high",
@@ -1152,7 +1169,14 @@ class ClaudeRoleModelLabelTest(unittest.TestCase):
             claude_model="",
             claude_effort="max",
         )
-        self.assertEqual(label, "claude default (claude, effort=max)")
+        # Account default: requested is empty verbatim; display falls back to
+        # "default" until the stream resolves the real model.
+        self.assertEqual((spec.runtime, spec.requested, spec.effort), ("claude", "", "max"))
+        self.assertEqual(spec.display(), "claude/default max")
+        # Once resolved from system/init, identity sharpens to the real model.
+        resolved = spec.with_resolved("claude-sonnet-4-6")
+        self.assertEqual(resolved.canonical(), ("claude-sonnet-4-6", "claude"))
+        self.assertEqual(resolved.display(), "claude/claude-sonnet-4-6 max")
 
 
 class ClaudeMakeRunnerTest(unittest.TestCase):
@@ -1236,6 +1260,26 @@ class ActiveCliToolsTest(unittest.TestCase):
     def test_cli_agent_opencode_sim_reports_agent_tool_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _cli_config(Path(tmp), cli_tool="claude", sim_actor_mode=ActorMode.OPENCODE)
+            self.assertEqual(_active_cli_tools(cfg), {"claude"})
+
+    def test_opencode_agent_with_cli_reviewer_reports_reviewer_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(
+                Path(tmp),
+                actor_mode=ActorMode.OPENCODE,
+                sim_actor_mode=ActorMode.OPENCODE,
+                cli_reviewer="codex",
+            )
+            self.assertEqual(_active_cli_tools(cfg), {"codex"})
+
+    def test_opencode_agent_with_claude_reviewer_reports_claude_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _cli_config(
+                Path(tmp),
+                actor_mode=ActorMode.OPENCODE,
+                sim_actor_mode=ActorMode.OPENCODE,
+                cli_reviewer="claude",
+            )
             self.assertEqual(_active_cli_tools(cfg), {"claude"})
 
 
@@ -1333,8 +1377,12 @@ class CliActorStartEventTest(unittest.TestCase):
             self.assertIn("--permission-mode", actor_cmd)
             post_turn_meter = meter_calls[-1]
             self.assertNotIn("--permission-mode", post_turn_meter.kwargs["cmd"])
-            self.assertEqual(post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_MODEL"], "claude-opus-4-8")
-            self.assertEqual(post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_PROMPT"], "OK")
+            self.assertEqual(
+                post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_MODEL"], "claude-opus-4-8"
+            )
+            self.assertEqual(
+                post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_PROMPT"], "OK"
+            )
 
 
 if __name__ == "__main__":
