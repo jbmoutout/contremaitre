@@ -1,9 +1,25 @@
 ---
-status: proposed
+status: accepted
 date: 2026-06-07
 ---
 
 # Model identity is a stored structured record, not a display string
+
+> **Implemented 2026-06-08.** `ModelSpec` is live in `models.py`; identity is
+> persisted as the per-role dict in `stats.json` and `run_config.json`, and the
+> five normalizers are deleted. Two deviations from the proposal below, both
+> driven by `AGENTS.md` conventions:
+>
+> - **No dual-write (no-shim).** `AGENTS.md` forbids backwards-compat layers
+>   pre-1.0, so `agent_model`/`sim_model` *became* the `ModelSpec` dict and
+>   `role_model_label` was deleted outright — no legacy string kept alongside.
+>   `ModelSpec.from_record` still *reads* legacy on-disk strings (a reader-edge
+>   adapter only; the sole home of the old regex), so historical run dirs render.
+> - **`model_family.py` deleted, not re-expressed.** It had zero importers — the
+>   deletion test said delete it rather than rebuild it on `ModelSpec`.
+>
+> The digest change landed with a `DIGEST_VERSION` bump (`manifest.py`), which
+> resets promoted baselines as the Consequences section warns.
 
 ## Context
 

@@ -313,31 +313,34 @@ class CodexModelArgTest(unittest.TestCase):
         self.assertEqual(_codex_effort_arg(""), [])
 
 
-class RoleModelLabelTest(unittest.TestCase):
-    def test_codex_role_shows_model_and_effort(self):
-        from contremaitre.models import role_model_label
+class CodexModelSpecTest(unittest.TestCase):
+    def test_codex_role_records_model_and_effort(self):
+        from contremaitre.models import ModelSpec
 
-        label = role_model_label(
-            actor_mode=ActorMode.CLI,
+        spec = ModelSpec.build(
+            mode=ActorMode.CLI,
             opencode_model="opencode/deepseek-v4-flash-free",
             codex_model="gpt-5.5",
             codex_effort="high",
         )
-        self.assertEqual(label, "gpt-5.5 (codex, effort=high)")
+        self.assertEqual((spec.runtime, spec.requested, spec.effort), ("codex", "gpt-5.5", "high"))
+        self.assertEqual(spec.canonical(), ("gpt-5.5", "codex"))
+        self.assertEqual(spec.display(), "codex/gpt-5.5 high")
 
-    def test_opencode_role_shows_slug(self):
-        from contremaitre.models import role_model_label
+    def test_opencode_role_records_slug_and_provider(self):
+        from contremaitre.models import ModelSpec
 
         for mode in (ActorMode.OPENCODE, ActorMode.OPENCODE.value, "fake"):
-            self.assertEqual(
-                role_model_label(
-                    actor_mode=mode,
-                    opencode_model="opencode/big-pickle",
-                    codex_model="gpt-5.5",
-                    codex_effort="high",
-                ),
-                "opencode/big-pickle",
+            spec = ModelSpec.build(
+                mode=mode,
+                opencode_model="opencode/big-pickle",
+                codex_model="gpt-5.5",
+                codex_effort="high",
             )
+            self.assertEqual(spec.requested, "opencode/big-pickle")
+            self.assertEqual(spec.provider, "opencode")
+            self.assertIsNone(spec.effort)
+            self.assertEqual(spec.canonical(), ("big-pickle", spec.runtime))
 
 
 def _cli_config(root: Path, **over) -> RunConfig:
@@ -1138,12 +1141,12 @@ class ClaudeTokenUsageTest(unittest.TestCase):
             self.assertEqual(estimate_recorded_cost_usd(p), 0.0)
 
 
-class ClaudeRoleModelLabelTest(unittest.TestCase):
-    def test_claude_role_shows_model_and_effort(self):
-        from contremaitre.models import role_model_label
+class ClaudeModelSpecTest(unittest.TestCase):
+    def test_claude_role_records_model_and_effort(self):
+        from contremaitre.models import ModelSpec
 
-        label = role_model_label(
-            actor_mode=ActorMode.CLI,
+        spec = ModelSpec.build(
+            mode=ActorMode.CLI,
             opencode_model="opencode/x",
             codex_model="gpt-5.5",
             codex_effort="high",
@@ -1151,13 +1154,14 @@ class ClaudeRoleModelLabelTest(unittest.TestCase):
             claude_model="opus",
             claude_effort="high",
         )
-        self.assertEqual(label, "opus (claude, effort=high)")
+        self.assertEqual((spec.runtime, spec.requested, spec.effort), ("claude", "opus", "high"))
+        self.assertEqual(spec.display(), "claude/opus high")
 
-    def test_empty_claude_model_shows_account_default(self):
-        from contremaitre.models import role_model_label
+    def test_empty_claude_model_is_account_default(self):
+        from contremaitre.models import ModelSpec
 
-        label = role_model_label(
-            actor_mode=ActorMode.CLI,
+        spec = ModelSpec.build(
+            mode=ActorMode.CLI,
             opencode_model="opencode/x",
             codex_model="gpt-5.5",
             codex_effort="high",
@@ -1165,7 +1169,14 @@ class ClaudeRoleModelLabelTest(unittest.TestCase):
             claude_model="",
             claude_effort="max",
         )
-        self.assertEqual(label, "claude default (claude, effort=max)")
+        # Account default: requested is empty verbatim; display falls back to
+        # "default" until the stream resolves the real model.
+        self.assertEqual((spec.runtime, spec.requested, spec.effort), ("claude", "", "max"))
+        self.assertEqual(spec.display(), "claude/default max")
+        # Once resolved from system/init, identity sharpens to the real model.
+        resolved = spec.with_resolved("claude-sonnet-4-6")
+        self.assertEqual(resolved.canonical(), ("claude-sonnet-4-6", "claude"))
+        self.assertEqual(resolved.display(), "claude/claude-sonnet-4-6 max")
 
 
 class ClaudeMakeRunnerTest(unittest.TestCase):

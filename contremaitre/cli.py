@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from . import defaults as _defaults
 from .envfile import load_dotenv_defaults
 from .fixture import init_fixture
-from .models import ActorMode, Caps, PublishMode, RunConfig, role_model_label
+from .models import ActorMode, Caps, ModelSpec, PublishMode, RunConfig
 from .orchestrator import run
 from .paths import slugify
 from .preflight import run_preflight
@@ -1295,11 +1295,11 @@ def _launch_screen(
         print(f"  runtime         {_b(f'agent={agent_lbl}, sim={sim_lbl}')}")
     print(
         f"  agent           "
-        f"{_b(role_model_label(actor_mode=agent_mode, opencode_model=args.agent_model, cli_tool=cli_tool, **_label_kw))}"
+        f"{_b(ModelSpec.build(mode=agent_mode, opencode_model=args.agent_model, cli_tool=cli_tool, **_label_kw).display())}"
     )
     print(
         f"  sim             "
-        f"{_b(role_model_label(actor_mode=sim_mode, opencode_model=args.sim_model, cli_tool=sim_cli_tool, **_label_kw))}"
+        f"{_b(ModelSpec.build(mode=sim_mode, opencode_model=args.sim_model, cli_tool=sim_cli_tool, **_label_kw).display())}"
     )
     if cli_reviewer_choice in ("codex", "claude"):
         print(f"  code-review     {_b(cli_reviewer_choice)}  {_d('(post-publish, subscription)')}")
@@ -2205,14 +2205,14 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         run_cmd=run_cmd,
         refresh_hz=args.refresh_hz,
         discover_timeout_s=args.discover_timeout,
-        agent_model=role_model_label(
-            actor_mode=resolved_actor,
+        agent_model=ModelSpec.build(
+            mode=resolved_actor,
             opencode_model=agent_model,
             cli_tool=cli_tool,
             **_label_kw,
         ),
-        sim_model=role_model_label(
-            actor_mode=resolved_sim_mode,
+        sim_model=ModelSpec.build(
+            mode=resolved_sim_mode,
             opencode_model=sim_model,
             cli_tool=sim_cli_tool,
             **_label_kw,

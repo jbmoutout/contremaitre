@@ -38,7 +38,10 @@ from typing import Any
 from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
-from .models import role_model_label
+from .models import ModelSpec, resolved_model_from_events
+
+# Unknown identity placeholder for runs whose model dicts can't be read yet.
+_UNKNOWN_SPEC = ModelSpec(runtime="opencode", requested="?")
 
 try:
     from rich.table import Table
@@ -113,36 +116,6 @@ def _file_age(path: Path | None) -> float | None:
     return time.time() - path.stat().st_mtime
 
 
-def _short_model(model: str) -> str:
-    return model.split("/")[-1] if model else "?"
-
-
-def _model_effort_display(label: str | None) -> str:
-    """One display shape for an agent/SIM model label: `<runtime>/<short-model> <effort>`.
-
-    The runtime/provider prefix is always shown:
-    - CLI roles: the tool word from `role_model_label`'s annotation becomes the
-      prefix, plus the effort — `codex/gpt-5.5 high`, `claude/claude-opus-4-8 max`.
-    - opencode roles: the slug already carries its provider, kept as
-      `<provider>/<short-model>` (any middle org segment dropped) —
-      `opencode/deepseek-v4-flash-free`, `openrouter/deepseek-v4-flash`.
-    Empty/unknown → `"?"`.
-    """
-
-    if not label or label == "?":
-        return "?"
-    name, _, annot = label.partition(" (")
-    if annot:
-        # CLI role: `<name> (codex, effort=high)` → `codex/<name> high`.
-        tool = annot.split(",", 1)[0].strip()
-        m = re.search(r"effort=(\w+)", annot)
-        effort = m.group(1) if m else ""
-        return f"{tool}/{_short_model(name)} {effort}".strip()
-    # opencode/openrouter slug: keep the provider prefix + short model.
-    parts = name.split("/")
-    return f"{parts[0]}/{parts[-1]}" if len(parts) >= 2 else name
-
-
 def _short_repo(url_or_path: str | None) -> str:
     """Normalize a git URL or local path to `owner/repo` for display.
 
@@ -191,30 +164,16 @@ def _is_free_model(model: str) -> bool:
     return bare.endswith("-free") or bare == "big-pickle" or bare.endswith(":free")
 
 
-def _model_name_from_label(label: str | None) -> str:
-    """Strip the runtime annotation from `role_model_label` output."""
+def _claude_family(name: str | None) -> str | None:
+    """Claude footer label family (`opus`/`sonnet`/`haiku`) from a plain model
+    name or id, or None. Operates on a name, never a role label — identity
+    parsing lives in `ModelSpec`."""
 
-    if not label:
-        return ""
-    return label.partition(" (")[0].strip()
-
-
-def _cli_tool_from_model_label(label: str | None) -> str | None:
-    """Return `codex` / `claude` for CLI role labels, else None."""
-
-    if not label or " (" not in label:
+    if not name:
         return None
-    _name, _sep, annot = label.partition(" (")
-    tool = annot.rstrip(")").split(",", 1)[0].strip().lower()
-    return tool if tool in {"codex", "claude"} else None
-
-
-def _model_family(model: str | None) -> str | None:
-    """Claude footer label family from a model id or role label."""
-
-    name = _model_name_from_label(model).lower()
+    lowered = name.lower()
     for family in ("opus", "sonnet", "haiku"):
-        if family in name:
+        if family in lowered:
             return family
     return None
 
@@ -991,40 +950,6 @@ def _text_event_count(events: list[dict[str, Any]]) -> int:
     )
 
 
-def _model_from_init_events(events: list[dict[str, Any]]) -> str | None:
-    """The model a claude run reports in its `system/init` event, or None.
-
-    The pre-run header label can't know the model when `claude_model` is empty
-    (claude then uses the ~/.claude account default), so the TUI back-fills the
-    real model from the stream once it starts.
-    """
-
-    for e in events:
-        if e.get("type") == "system" and e.get("subtype") == "init":
-            model = e.get("model")
-            if isinstance(model, str) and model:
-                return model
-    return None
-
-
-def _relabel_with_real_model(label: str, real_model: str) -> str:
-    """Splice the stream-reported model into a role label, KEEPING its
-    ` (claude, effort=…)` annotation.
-
-    `role_model_label` builds `"<model> (claude, effort=high)"`; when
-    `claude_model` is empty the pre-run `<model>` is the placeholder
-    "claude default". Back-filling the real model must not drop the
-    parenthetical — otherwise the header loses the effort the moment the
-    run starts (the bug this guards against). Splits on the first " ("
-    so only the model name is replaced; a bare label (no annotation)
-    simply becomes the real model.
-    """
-
-    paren = label.find(" (")
-    suffix = label[paren:] if paren != -1 else ""
-    return f"{real_model}{suffix}"
-
-
 def _task_count(events: list[dict[str, Any]]) -> int:
     return sum(
         1
@@ -1552,7 +1477,7 @@ def _claude_usage_from_statusline(snapshot: dict[str, Any]) -> dict[str, Any] | 
         "primary": primary,
         "secondary": secondary,
         "model": model,
-        "family": _model_family(model),
+        "family": _claude_family(model),
         "recorded_at": snapshot.get("recorded_at"),
     }
 
@@ -1632,16 +1557,19 @@ def _read_claude_usage(run_dir: Path) -> dict[str, Any] | None:
 
 def _select_claude_usage(
     usages: list[dict[str, Any]],
-    model_label: str | None,
+    target: str | None,
 ) -> dict[str, Any] | None:
-    """Pick the statusLine snapshot matching a role's active Claude model."""
+    """Pick the statusLine snapshot matching a role's active Claude model.
+
+    `target` is the role's resolved model name (`ModelSpec.canonical()[0]`),
+    not a label — never a parse contract."""
 
     if not usages:
         return None
-    target = _model_name_from_label(model_label)
+    target = target or ""
     target_norm = target.lower()
-    family = _model_family(target)
-    if target_norm and target_norm not in {"?", "claude default"}:
+    family = _claude_family(target)
+    if target_norm and target_norm not in {"?", "claude-default", "default"}:
         for usage in usages:
             model = usage.get("model")
             if isinstance(model, str) and model.lower() == target_norm:
@@ -1692,8 +1620,8 @@ def _claude_usage_token(
 
 def _footer_meter_tokens(
     *,
-    agent_model: str,
-    sim_model: str,
+    agent_model: ModelSpec,
+    sim_model: ModelSpec,
     agent_events: list[dict[str, Any]],
     sim_events: list[dict[str, Any]],
     codex_usage: dict[str, Any] | None,
@@ -1729,16 +1657,16 @@ def _footer_meter_tokens(
         text.append(f"${cost:.4f}", style=_PAL_TEXT if cost > 0 else _PAL_DIM)
         return text
 
-    def _role(role: str, model: str, events: list[dict[str, Any]]) -> Text:
-        if _is_free_model(model):
+    def _role(role: str, spec: ModelSpec, events: list[dict[str, Any]]) -> Text:
+        if _is_free_model(spec.requested):
             return _free(role)
-        tool = _cli_tool_from_model_label(model)
-        if tool == "codex":
+        name = spec.canonical()[0]
+        if spec.runtime == "codex":
             token = _codex_usage_token(codex_usage, now=now)
             return _with_role(role, token) if token is not None else _unknown(role, "codex")
-        if tool == "claude":
-            usage = _select_claude_usage(claude_usages, model)
-            label = _model_family(model) or (usage.get("family") if usage else None)
+        if spec.runtime == "claude":
+            usage = _select_claude_usage(claude_usages, name)
+            label = _claude_family(name) or (usage.get("family") if usage else None)
             token = _claude_usage_token(usage, now=now, model_label=label)
             return _with_role(role, token) if token is not None else _unknown(role, "claude")
         return _paid(role, events)
@@ -2349,8 +2277,8 @@ if _TEXTUAL_AVAILABLE:
             self,
             run_dir: Path,
             *,
-            agent_model: str = "?",
-            sim_model: str = "?",
+            agent_model: ModelSpec | None = None,
+            sim_model: ModelSpec | None = None,
             cli_reviewer: str = "none",
             docker_image: str = "?",
             target_url: str | None = None,
@@ -2360,8 +2288,8 @@ if _TEXTUAL_AVAILABLE:
         ):
             super().__init__()
             self.run_dir = run_dir
-            self.agent_model = agent_model
-            self.sim_model = sim_model
+            self.agent_model = agent_model or _UNKNOWN_SPEC
+            self.sim_model = sim_model or _UNKNOWN_SPEC
             # `"codex"`, `"claude"`, `"auto"`, or `"none"`. When set
             # (other than `"none"`), the post-publish cli-review row
             # mounts and shows the subscription-bound CLI reviewer's
@@ -2544,9 +2472,9 @@ if _TEXTUAL_AVAILABLE:
             # Back-fill the header's agent model with the real one the CLI reports
             # (the pre-run label shows the account default when claude_model is empty).
             if not self._agent_model_resolved:
-                model = _model_from_init_events(events)
+                model = resolved_model_from_events(events)
                 if model:
-                    self.agent_model = _relabel_with_real_model(self.agent_model, model)
+                    self.agent_model = self.agent_model.with_resolved(model)
                     self._agent_model_resolved = True
             widget = self.query_one("#agent-log", RichLog)
             at_bottom = self._at_bottom(widget)
@@ -2622,9 +2550,9 @@ if _TEXTUAL_AVAILABLE:
         def _update_sim_log(self) -> None:
             events = _read_jsonl(self.paths["sim_raw_export"])
             if not self._sim_model_resolved:
-                model = _model_from_init_events(events)
+                model = resolved_model_from_events(events)
                 if model:
-                    self.sim_model = _relabel_with_real_model(self.sim_model, model)
+                    self.sim_model = self.sim_model.with_resolved(model)
                     self._sim_model_resolved = True
             widget = self.query_one("#sim-log", RichLog)
             at_bottom = self._at_bottom(widget)
@@ -2793,7 +2721,7 @@ if _TEXTUAL_AVAILABLE:
             header.append("contremaitre · ", style="#6B8AFF")
             header.append(self.run_dir.name)
             header.append(
-                f"  ·  agent={_model_effort_display(self.agent_model)}  sim={_model_effort_display(self.sim_model)}",
+                f"  ·  agent={self.agent_model.display()}  sim={self.sim_model.display()}",
                 style="dim",
             )
             if img:
@@ -2869,8 +2797,8 @@ if _TEXTUAL_AVAILABLE:
             # ----- Pane titles + active highlight -----
             agent_pane = self.query_one("#agent-pane")
             sim_pane = self.query_one("#sim-pane")
-            agent_pane.border_title = f"CODING AGENT ({_model_effort_display(self.agent_model)})"
-            sim_pane.border_title = f"SIM ({_model_effort_display(self.sim_model)})"
+            agent_pane.border_title = f"CODING AGENT ({self.agent_model.display()})"
+            sim_pane.border_title = f"SIM ({self.sim_model.display()})"
             active = None if terminal else self._determine_active()
             # During the cli_review phase, the post-publish reviewer owns
             # the highlight even before its first stdout chunk lands.
@@ -3254,8 +3182,8 @@ def spawn_and_attach(
     *,
     refresh_hz: float = 5.0,
     discover_timeout_s: float = 30.0,
-    agent_model: str = "?",
-    sim_model: str = "?",
+    agent_model: ModelSpec | None = None,
+    sim_model: ModelSpec | None = None,
     cli_reviewer: str = "none",
     docker_image: str = "?",
     target_url: str | None = None,
@@ -3320,43 +3248,24 @@ def spawn_and_attach(
 
 def _read_run_models(
     run_dir: Path,
-) -> tuple[str, str, str, str, str | None, str | None]:
+) -> tuple[ModelSpec, ModelSpec, str, str, str | None, str | None]:
     """Return (agent_model, sim_model, cli_reviewer, docker_image, target_url, base).
 
     Prefers `run_config.json` (written at orchestrator start — available
     immediately, even for attach against an in-flight run). Falls back to
     `stats.json` (terminal only) for older runs that pre-date the snapshot.
+    Model identity routes through `ModelSpec.from_record`, which absorbs both
+    the canonical dict and any legacy on-disk string — this reader never sees
+    the old shape.
     """
 
     config = run_dir / "run_config.json"
     if config.exists():
         try:
             d = json.loads(config.read_text(encoding="utf-8"))
-            if d.get("actor_mode"):
-                label_kw = dict(
-                    codex_model=d.get("codex_model", ""),
-                    codex_effort=d.get("codex_effort", ""),
-                    claude_model=d.get("claude_model", ""),
-                    claude_effort=d.get("claude_effort", "high"),
-                )
-                agent_model = role_model_label(
-                    actor_mode=d.get("actor_mode"),
-                    opencode_model=d.get("agent_model", "?"),
-                    cli_tool=d.get("cli_tool", "codex"),
-                    **label_kw,
-                )
-                sim_model = role_model_label(
-                    actor_mode=d.get("sim_actor_mode") or d.get("actor_mode"),
-                    opencode_model=d.get("sim_model", "?"),
-                    cli_tool=d.get("sim_cli_tool") or d.get("cli_tool", "codex"),
-                    **label_kw,
-                )
-            else:
-                agent_model = d.get("agent_model", "?")
-                sim_model = d.get("sim_model", "?")
             return (
-                agent_model,
-                sim_model,
+                ModelSpec.from_record(d.get("agent_model")),
+                ModelSpec.from_record(d.get("sim_model")),
                 d.get("cli_reviewer", "none"),
                 d.get("docker_image", "?"),
                 d.get("target_url"),
@@ -3369,8 +3278,8 @@ def _read_run_models(
         try:
             d = json.loads(stats.read_text(encoding="utf-8"))
             return (
-                d.get("agent_model", "?"),
-                d.get("sim_model", "?"),
+                ModelSpec.from_record(d.get("agent_model")),
+                ModelSpec.from_record(d.get("sim_model")),
                 d.get("cli_reviewer", "none"),
                 "?",
                 None,
@@ -3378,4 +3287,4 @@ def _read_run_models(
             )
         except (OSError, json.JSONDecodeError):
             pass
-    return ("?", "?", "none", "?", None, None)
+    return (_UNKNOWN_SPEC, _UNKNOWN_SPEC, "none", "?", None, None)

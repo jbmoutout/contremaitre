@@ -6,9 +6,11 @@ CLI, the orchestrator, and the actor adapters (fake and opencode).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 
 class State(str, Enum):
@@ -70,32 +72,169 @@ def is_zen_model(model: str) -> bool:
     return bool(model) and model.startswith("opencode/")
 
 
-def role_model_label(
-    *,
-    actor_mode,
-    opencode_model: str,
-    codex_model: str,
-    codex_effort: str,
-    cli_tool: str = "codex",
-    claude_model: str = "",
-    claude_effort: str = "high",
-) -> str:
-    """Human label for a role's model. A CLI role shows its CLI-native model
-    + effort (codex or claude, per `cli_tool`); any other runtime shows the
-    opencode/OpenRouter slug.
+# The fixed shape the *legacy* `role_model_label` emitted for a CLI role —
+# `<model> (codex|claude, effort=<e>)`. Kept ONLY so `ModelSpec.from_record`
+# can read run dirs written before model identity became a structured record.
+# This is the one and only place that parse contract survives; no other module
+# may decode it. (Removing it would make pre-migration run dirs unreadable.)
+_CLI_LABEL_RE = re.compile(
+    r"^(?P<model>.+?)\s*\((?P<runtime>codex|claude),\s*effort=(?P<effort>[^)]*)\)\s*$"
+)
 
-    Used by the launch recap, the TUI header, and `stats.json` so a CLI role
-    never displays the (ignored) opencode slug. Accepts `actor_mode` as either an
-    `ActorMode` or its string value. `cli_tool` defaults to "codex" so existing
-    callers (and the codex path) are unchanged.
+
+def resolved_model_from_events(events: list[dict[str, Any]]) -> str | None:
+    """The model a claude run reports in its `system/init` stream event, or None.
+
+    claude echoes the model it *actually* ran (even when the requested model was
+    the ~/.claude account default) in `system/init`. codex carries no model in
+    its stream and opencode's requested slug already *is* the resolved model, so
+    this returns None for them and the spec falls back to `requested`.
     """
 
-    mode = actor_mode.value if isinstance(actor_mode, ActorMode) else actor_mode
-    if mode == ActorMode.CLI.value:
-        if cli_tool == "claude":
-            return f"{claude_model or 'claude default'} (claude, effort={claude_effort})"
-        return f"{codex_model} (codex, effort={codex_effort})"
-    return opencode_model
+    for e in events:
+        if e.get("type") == "system" and e.get("subtype") == "init":
+            model = e.get("model")
+            if isinstance(model, str) and model:
+                return model
+    return None
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Canonical model identity for one role (agent / SIM).
+
+    Stored fields are atomic and are never re-parsed; the human display string
+    (`display`) and the grouping key (`canonical`) are *derived* and never read
+    back as a source of truth. One factory (`build` / `for_role`) constructs it
+    from config; one classmethod (`from_record`) reads it back and is the only
+    place that tolerates a legacy on-disk label string.
+    """
+
+    runtime: str  # "opencode" | "codex" | "claude" | "fake" — how the role was driven
+    requested: str  # exactly what config asked, verbatim (slug, codex model, or "")
+    effort: str | None = None  # CLI roles only; None for opencode/fake
+    resolved: str | None = None  # what the stream said it ran; None when unknown
+    provider: str | None = None  # "opencode" | "openrouter" for a slug; None for CLI
+
+    def canonical(self) -> tuple[str, str]:
+        """Stable `(name, runtime)` grouping key. Prefers `resolved` so two
+        account-default claude runs that ran different models don't collide."""
+
+        base = self.resolved or self.requested or "?"
+        name = base.rsplit("/", 1)[-1].replace(" ", "-") or "?"
+        return name, self.runtime
+
+    def display(self) -> str:
+        """The one human string. No consumer ever parses it back."""
+
+        base = self.resolved or self.requested or ""
+        name = base.rsplit("/", 1)[-1] if base else ""
+        if not name:
+            if self.runtime in ("codex", "claude"):
+                name = "default"  # claude ~/.claude account default, pre-resolution
+            else:
+                return "?"
+        if name == "?":
+            return "?"
+        prefix = self.provider or self.runtime
+        if self.effort:
+            return f"{prefix}/{name} {self.effort}"
+        return f"{prefix}/{name}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "runtime": self.runtime,
+            "requested": self.requested,
+            "effort": self.effort,
+            "resolved": self.resolved,
+            "provider": self.provider,
+        }
+
+    def with_resolved(self, resolved: str | None) -> "ModelSpec":
+        """A copy with `resolved` filled from the stream, or self when there is
+        nothing new to record."""
+
+        if not resolved or resolved == self.resolved:
+            return self
+        return replace(self, resolved=resolved)
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        mode,
+        opencode_model: str,
+        codex_model: str = "gpt-5.5",
+        codex_effort: str = "high",
+        cli_tool: str = "codex",
+        claude_model: str = "",
+        claude_effort: str = "high",
+    ) -> "ModelSpec":
+        """The single atomic factory. A CLI role records its CLI-native model +
+        effort; any other runtime records the opencode/OpenRouter slug + its
+        provider. Accepts `mode` as an `ActorMode` or its string value."""
+
+        m = mode.value if isinstance(mode, ActorMode) else mode
+        if m == ActorMode.CLI.value:
+            if cli_tool == "claude":
+                return cls(runtime="claude", requested=claude_model, effort=claude_effort or None)
+            return cls(runtime="codex", requested=codex_model, effort=codex_effort or None)
+        runtime = "fake" if m == ActorMode.FAKE.value else "opencode"
+        provider = "opencode" if is_zen_model(opencode_model) else "openrouter"
+        return cls(runtime=runtime, requested=opencode_model, provider=provider)
+
+    @classmethod
+    def for_role(cls, config, role: str) -> "ModelSpec":
+        """Build the spec for `role` ∈ {"agent","sim"} from a `RunConfig`,
+        applying the SIM's per-role actor/tool overrides."""
+
+        if role == "agent":
+            return cls.build(
+                mode=config.actor_mode,
+                opencode_model=config.agent_model,
+                codex_model=config.codex_model,
+                codex_effort=config.codex_effort,
+                cli_tool=config.cli_tool,
+                claude_model=config.claude_model,
+                claude_effort=config.claude_effort,
+            )
+        if role == "sim":
+            return cls.build(
+                mode=config.sim_actor_mode or config.actor_mode,
+                opencode_model=config.sim_model,
+                codex_model=config.codex_model,
+                codex_effort=config.codex_effort,
+                cli_tool=config.sim_cli_tool or config.cli_tool,
+                claude_model=config.claude_model,
+                claude_effort=config.claude_effort,
+            )
+        raise ValueError(f"unknown role: {role!r}")
+
+    @classmethod
+    def from_record(cls, obj) -> "ModelSpec":
+        """Read identity back from disk. Accepts the canonical dict OR a legacy
+        label/slug string — the only reader that tolerates the old shape, so no
+        other module ever has to know it existed."""
+
+        if isinstance(obj, dict):
+            return cls(
+                runtime=obj.get("runtime") or "opencode",
+                requested=obj.get("requested") or "?",
+                effort=obj.get("effort"),
+                resolved=obj.get("resolved"),
+                provider=obj.get("provider"),
+            )
+        if isinstance(obj, str) and obj and obj != "?":
+            m = _CLI_LABEL_RE.match(obj)
+            if m:
+                return cls(
+                    runtime=m.group("runtime"),
+                    requested=m.group("model").strip(),
+                    effort=m.group("effort") or None,
+                )
+            provider = "opencode" if is_zen_model(obj) else "openrouter"
+            return cls(runtime="opencode", requested=obj, provider=provider)
+        return cls(runtime="opencode", requested="?")
 
 
 class PublishMode(str, Enum):

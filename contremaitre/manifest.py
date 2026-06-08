@@ -24,7 +24,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .models import RunConfig
+from .models import ModelSpec, RunConfig
+
+# Bump when the SHAPE of `manifest_digest` changes (field set, hashing, or the
+# model-identity contract) so every prior baseline is treated as a different
+# system rather than silently compared against the new digest.
+DIGEST_VERSION = "2"
 
 
 DOCKERFILE_HASH_LABEL = "contremaitre.dockerfile-sha256"
@@ -141,16 +146,16 @@ def build_manifest(config: RunConfig) -> dict[str, Any]:
     """
 
     return {
-        # Models / image / base — existing fields, kept stable.
-        "agent_model": config.agent_model,
-        "sim_model": config.sim_model,
+        # Canonical model identity per role (see models.ModelSpec). Atomic
+        # fields only; readers route through ModelSpec.from_record.
+        "agent_model": ModelSpec.for_role(config, "agent").to_dict(),
+        "sim_model": ModelSpec.for_role(config, "sim").to_dict(),
         "cli_reviewer": config.cli_reviewer,
         "docker_image": config.docker_image,
         "target_url": config.upstream or config.fork or str(config.repo),
         "base": config.base,
-        # Runtime labels are reconstructable from these additive fields.
-        # Keep agent_model/sim_model as the original SUT slugs so canary
-        # digests and older readers remain stable.
+        # The raw per-runtime fields stay for provenance / debugging; identity
+        # is owned by the *_model spec dicts above.
         "actor_mode": config.actor_mode.value,
         "sim_actor_mode": config.sim_actor_mode.value if config.sim_actor_mode else None,
         "cli_tool": config.cli_tool,
@@ -193,13 +198,21 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
     per case, not per system.
     """
 
+    agent = ModelSpec.from_record(manifest.get("agent_model"))
+    sim = ModelSpec.from_record(manifest.get("sim_model"))
     parts = [
+        DIGEST_VERSION,
         manifest.get("contremaitre_git_sha") or "",
         manifest.get("contremaitre_git_dirty"),
         manifest.get("dockerfile_sha256") or "",
         manifest.get("skills_lock_sha256") or "",
-        manifest.get("agent_model") or "",
-        manifest.get("sim_model") or "",
+        # canonical()+effort: CLI model swaps and effort changes now register as
+        # a different system (the raw opencode slug a CLI role ignores no longer
+        # hides them).
+        *agent.canonical(),
+        agent.effort or "",
+        *sim.canonical(),
+        sim.effort or "",
     ]
     for name, digest in sorted((manifest.get("prompt_hashes") or {}).items()):
         parts.append(f"{name}:{digest}")
