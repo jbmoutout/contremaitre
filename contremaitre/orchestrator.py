@@ -629,14 +629,6 @@ class Orchestrator:
                     )
 
                 verdict = _cli_reviewer.parse_verdict(markdown)
-                self._emit(
-                    events.CLI_REVIEW_COMPLETED,
-                    tool=tool,
-                    url=outcome.url,
-                    review_chars=len(markdown),
-                    verdict=verdict,
-                    round=cli_round,
-                )
                 round_verdicts.append((tool, verdict))
 
                 if verdict is None:
@@ -648,6 +640,15 @@ class Orchestrator:
                         round=cli_round,
                     )
                     continue
+
+                self._emit(
+                    events.CLI_REVIEW_COMPLETED,
+                    tool=tool,
+                    url=outcome.url,
+                    review_chars=len(markdown),
+                    verdict=verdict,
+                    round=cli_round,
+                )
                 if verdict != "LOOKS_GOOD":
                     round_needs_revision = True
                     all_required_changes.extend(_cli_reviewer.extract_required_changes(markdown))
