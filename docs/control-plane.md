@@ -98,7 +98,7 @@ The proxy container carries a `contremaitre.squid-sha256` label, so an edited al
 
 ### Model + reasoning effort
 
-A CLI tool ignores opencode-namespaced model names (`openrouter/…`, `opencode/…`), so a CLI role takes its model from the tool's config field — **`config.codex_model`** (default `gpt-5.5`) or **`config.claude_model`** (empty → the `~/.claude` account default): a bare per-role `--agent-model`/`--sim-model` that is itself tool-native wins, anything namespaced (or empty) falls back. Effort is pinned on every turn — codex via an exec-level `-c model_reasoning_effort=<config.codex_effort>` (default `high`, `minimal|low|medium|high|xhigh`), claude via the `--effort <config.claude_effort>` flag (default `high`, `low|medium|high|max`). Set by `--codex-model`/`--codex-effort` / `--claude-model`/`--claude-effort` or the matching `defaults.toml` keys.
+A CLI tool ignores opencode-namespaced model names (`openrouter/…`, `opencode/…`), so a CLI role takes its model from the tool's config field — **`config.codex_model`** (default `gpt-5.5`) or **`config.claude_model`** (empty → the `~/.claude` account default): a bare per-role `--agent-model`/`--sim-model` that is itself tool-native wins, anything namespaced (or empty) falls back. Effort is pinned on every turn — codex via an exec-level `-c model_reasoning_effort=<config.codex_effort>` (default `high`, `minimal|low|medium|high|xhigh`), claude via the `--effort <config.claude_effort>` flag (default `high`, `low|medium|high|max`). Set by `--codex-model`/`--codex-effort` or `--claude-model`/`--claude-effort`, with the Makefile variables carrying the common operator setup.
 
 ### Multi-turn
 
@@ -321,7 +321,7 @@ Codex containers hold no OpenRouter key at all — only a neutered copy of the s
 
 ## Preflight
 
-Live opencode and codex runs run preflight before worktree creation; the report is persisted to `eval/preflight_report.json`. `contremaitre doctor` runs the same checks without starting a run. Checks are the **union** of the active runtimes (per-role), so a mixed run validates both opencode and codex prerequisites.
+Live opencode and CLI runs run preflight before worktree creation; the report is persisted to `eval/preflight_report.json`. `contremaitre doctor` runs the same checks without starting a run. Checks are the **union** of the active runtimes (per-role), so a mixed run validates both opencode and CLI prerequisites.
 
 **Blocks the run:**
 
@@ -339,7 +339,6 @@ Live opencode and codex runs run preflight before worktree creation; the report 
 
 **Bypass flags** (loud on purpose):
 
-- `--skip-preflight` — skip everything.
 - `--skip-openrouter-key-check` — don't query the key endpoint.
 - `--allow-unlimited-openrouter-key` — accept a key without a credit limit.
 - `--allow-open-egress` — accept unrestricted container egress.
@@ -361,14 +360,14 @@ All modes still emit `[info]` log lines so the run log explains what was assumed
 
 ## Model selection
 
-For an **opencode** role, two model sources are picked at launch from a single TTY picker ([cli.py:684](../contremaitre/cli.py#L684)):
+For an **opencode** role, two model sources are picked at launch from a single TTY picker ([cli.py](../contremaitre/cli.py)):
 
 - **OpenCode Zen** — free models served by OpenCode itself. Catalog is fetched live at launch via `_fetch_free_models()` from `https://models.dev/api.json` (the same source the opencode binary uses, so the picker never offers a slug the binary will reject). Filtered to entries with `-free`-suffixed IDs plus a small allow-list (e.g. `big-pickle`). Slugs are `opencode/<id>`. No auth — the opencode binary has built-in routing to Zen. Quota probe hits `https://opencode.ai/zen/v1/chat/completions` to surface `FreeUsageLimitError` before the run starts. Why not OpenRouter `:free` slugs: those route through third-party providers whose daily quota is shared across all OpenRouter users, producing `"Out of credits"` mid-run.
 - **OpenRouter** — paid models. Requires `OPENROUTER_API_KEY` (`.env`, cwd or repo root; never inherited from ambient host env). Any `openrouter/<provider>/<model>` slug can be pasted at the picker prompt. Preflight does `GET https://openrouter.ai/api/v1/key` and blocks the run if the key has no credit limit (unless `--allow-unlimited-openrouter-key`).
 
 For a **codex** role there is no picker: the model is `config.codex_model` (default `gpt-5.5`, settable via `--codex-model` or `CODEX_MODEL` in the Makefile) and reasoning effort is `config.codex_effort` (default `high`, `minimal|low|medium|high|xhigh`). codex rejects opencode-namespaced names on a ChatGPT account, so a namespaced `--agent-model`/`--sim-model` is ignored for that role and the codex default is used; only a bare codex-native name passes through. No API key — codex runs on the operator's subscription. See [CLI actor → Model + reasoning effort](#model--reasoning-effort).
 
-Non-interactive opencode runs: pass `--agent-model` explicitly (or set `AGENT_MODEL` in the Makefile) to skip the picker. On TTY without a model, the picker appears.
+Non-interactive opencode runs: pass `--agent-model` explicitly (or set `AGENT_MODEL` in the Makefile) to skip the picker. When an opencode agent uses an explicit model and the SIM also uses opencode, an omitted `--sim-model` mirrors the agent model; a CLI agent with an opencode SIM must pass `--sim-model`. On TTY without a model, the picker appears.
 
 Containers see `OPENROUTER_API_KEY` only when set on the host. The opencode binary reads the key when invoking an OpenRouter model; for Zen models the key is unused. Provider-side spend caps remain the real guardrail — the `--max-cost-usd` flag is a *recorded-cost* watcher, not a hard budget enforcer.
 
@@ -601,7 +600,7 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--agent fake\|opencode\|claude\|codex` | `fake` | Per-run **agent** runtime. `fake` = smoke fixture; `opencode` = live model; `claude` / `codex` = subscription CLI headless. |
 | `--sim opencode\|claude\|codex` | (same as `--agent`) | Override the **SIM** runtime, enabling mixed runs (e.g. `--agent codex --sim opencode`). |
 | `--agent-model SLUG` | — | OpenRouter / OpenCode model slug for an opencode agent role. Omit to pick interactively on TTY. |
-| `--sim-model SLUG` | — | Model for an opencode SIM role. Omit to pick interactively (picker proposes `--agent-model` as default). |
+| `--sim-model SLUG` | — | Model for an opencode SIM role. Omit to pick interactively (picker proposes `--agent-model` as default); in non-interactive opencode-agent runs it mirrors `--agent-model`. |
 | `--codex-model NAME` | `gpt-5.5` | codex-native model for a codex role (namespaced `--agent/sim-model` are rejected by codex and fall back to this). |
 | `--codex-effort minimal\|low\|medium\|high\|xhigh` | `high` | codex reasoning effort, pinned via `-c model_reasoning_effort` on every codex turn. |
 | `--claude-model NAME` | _(empty)_ | claude model for a claude role (e.g. `opus`); empty uses the `~/.claude` account default. |

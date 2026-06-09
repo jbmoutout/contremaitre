@@ -285,8 +285,8 @@ class RunConfig:
     branch_prefix: str = "refactor"
     fork: str | None = None
     upstream: str | None = None
-    agent_model: str = "openrouter/deepseek/deepseek-v4-flash"
-    sim_model: str = "openrouter/deepseek/deepseek-v4-flash"
+    agent_model: str = ""
+    sim_model: str = ""
     # CLI reviewer drives a post-PR revision loop: reviews the PR, posts a
     # comment, and if MUST_FIX re-enters the agent (fresh Docker session) until
     # LOOKS_GOOD or max_cli_review_rounds exhausted. `"none"` skips entirely.

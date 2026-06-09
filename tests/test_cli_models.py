@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from contremaitre.cli import (
+    _DEFAULT_ZEN_MODEL,
     _fetch_free_models,
     _fetch_openrouter_catalog,
     _normalize_openrouter_slug,
+    _pick_zen_model_interactive,
+    _run_cmd,
+    build_parser,
 )
 
 
@@ -128,3 +133,82 @@ def test_fetch_openrouter_catalog_returns_none_on_malformed_response():
         side_effect=lambda req, timeout: _Response({"not-data": "wrong shape"}),
     ):
         assert _fetch_openrouter_catalog() is None
+
+
+def test_run_parser_leaves_opencode_models_unset_for_picker():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        ["run", "--base", "main", "--fork", "git@github.com:o/r.git", "--agent", "opencode"]
+    )
+
+    assert args.agent_model == ""
+    assert args.sim_model == ""
+
+
+def test_run_cmd_headless_reuses_agent_model_for_opencode_sim():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "--base",
+            "main",
+            "--fork",
+            "git@github.com:o/r.git",
+            "--agent",
+            "opencode",
+            "--agent-model",
+            "opencode/big-pickle",
+        ]
+    )
+    captured = {}
+
+    def fake_run(config):
+        captured["config"] = config
+        return SimpleNamespace(
+            verdict=SimpleNamespace(value="READY_FOR_DRAFT_PR"),
+            reason="ok",
+            run_dir="/tmp/run",
+            pr_created=True,
+        )
+
+    with (
+        patch("contremaitre.cli._ensure_local_clone"),
+        patch("sys.stdin.isatty", return_value=False),
+        patch("contremaitre.cli._preflight_presence_check", return_value=0),
+        patch("contremaitre.cli._maybe_provision_cli_egress"),
+        patch("contremaitre.cli._ensure_default_image_built", return_value=0),
+        patch("contremaitre.cli.run", side_effect=fake_run),
+    ):
+        assert _run_cmd(args) == 0
+
+    assert captured["config"].agent_model == "opencode/big-pickle"
+    assert captured["config"].sim_model == "opencode/big-pickle"
+
+
+def test_pick_zen_model_accepts_raw_openrouter_slug():
+    with (
+        patch("contremaitre.cli._fetch_free_models", return_value=[{"id": "big-pickle"}]),
+        patch("contremaitre.cli._fetch_openrouter_catalog", return_value={"qwen/qwen3.7-max"}),
+        patch("builtins.input", return_value="qwen/qwen3.7-max"),
+    ):
+        assert _pick_zen_model_interactive("agent") == "openrouter/qwen/qwen3.7-max"
+
+
+def test_pick_zen_model_accepts_openrouter_slug_when_catalog_unavailable():
+    with (
+        patch("contremaitre.cli._fetch_free_models", return_value=[{"id": "big-pickle"}]),
+        patch("contremaitre.cli._fetch_openrouter_catalog", return_value=None),
+        patch("builtins.input", return_value="openrouter/anthropic/claude-sonnet-4.6"),
+    ):
+        assert _pick_zen_model_interactive("agent") == "openrouter/anthropic/claude-sonnet-4.6"
+
+
+def test_pick_zen_model_catalog_unavailable_uses_zen_fallback():
+    with patch("contremaitre.cli._fetch_free_models", return_value=None):
+        assert _pick_zen_model_interactive("agent") == _DEFAULT_ZEN_MODEL
+
+
+def test_pick_zen_model_empty_catalog_uses_zen_fallback():
+    with patch("contremaitre.cli._fetch_free_models", return_value=[]):
+        assert _pick_zen_model_interactive("agent") == _DEFAULT_ZEN_MODEL

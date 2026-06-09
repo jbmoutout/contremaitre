@@ -460,28 +460,28 @@ class ForwardedFlagHelpersTest(unittest.TestCase):
         from contremaitre.cli import _set_flag_value
 
         args = ["--base", "main"]
-        _set_flag_value(args, "--actor", "cli")
-        self.assertEqual(args, ["--base", "main", "--actor", "cli"])
+        _set_flag_value(args, "--agent", "codex")
+        self.assertEqual(args, ["--base", "main", "--agent", "codex"])
 
     def test_set_flag_replaces_space_form(self):
         from contremaitre.cli import _set_flag_value
 
-        args = ["--actor", "opencode", "--base", "main"]
-        _set_flag_value(args, "--actor", "cli")
-        self.assertEqual(args, ["--base", "main", "--actor", "cli"])
+        args = ["--agent", "opencode", "--base", "main"]
+        _set_flag_value(args, "--agent", "codex")
+        self.assertEqual(args, ["--base", "main", "--agent", "codex"])
 
     def test_set_flag_replaces_equals_form(self):
         from contremaitre.cli import _set_flag_value
 
-        args = ["--actor=opencode", "--base", "main"]
-        _set_flag_value(args, "--actor", "cli")
-        self.assertEqual(args, ["--base", "main", "--actor", "cli"])
+        args = ["--agent=opencode", "--base", "main"]
+        _set_flag_value(args, "--agent", "codex")
+        self.assertEqual(args, ["--base", "main", "--agent", "codex"])
 
     def test_remove_flag_drops_all_forms(self):
         from contremaitre.cli import _remove_flag
 
-        args = ["--sim-actor", "opencode", "--x", "1", "--sim-actor=cli"]
-        _remove_flag(args, "--sim-actor")
+        args = ["--sim", "opencode", "--x", "1", "--sim=codex"]
+        _remove_flag(args, "--sim")
         self.assertEqual(args, ["--x", "1"])
 
 

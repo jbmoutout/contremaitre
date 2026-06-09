@@ -24,8 +24,8 @@ date: 2026-06-07
 ## Context
 
 A run's model identity — for the agent and the SIM — has to survive four very
-different surfaces: the `default.toml`/`defaults.toml` operator config, the
-live TUI, the orchestrator's internal logic, and the post-hoc `viewer/`.
+different surfaces: the now-deleted operator defaults layer, the live TUI, the
+orchestrator's internal logic, and the post-hoc `viewer/`.
 Today identity is smuggled inside a **display string** and re-parsed
 downstream, which has produced five distinct, compounding defects.
 

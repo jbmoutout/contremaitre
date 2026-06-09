@@ -29,6 +29,7 @@ _DEFAULT_DOCKERFILE = _PACKAGE_DIR / "Dockerfile"
 _DEFAULT_IMAGE = "contremaitre-agent:latest"
 _RUST_IMAGE = "contremaitre-agent-rust:latest"
 _GO_IMAGE = "contremaitre-agent-go:latest"
+_DEFAULT_ZEN_MODEL = "opencode/deepseek-v4-flash-free"
 _VARIANT_DOCKERFILES: dict[str, Path] = {
     "base": _PACKAGE_DIR / "Dockerfile",
     "rust": _PACKAGE_DIR / "Dockerfile.rust",
@@ -147,13 +148,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--branch-prefix", default="refactor")
     run_p.add_argument(
         "--agent-model",
-        default="openrouter/deepseek/deepseek-v4-flash",
-        help="OpenRouter model string for the agent (ignored when --agent fake)",
+        default="",
+        help="OpenRouter/OpenCode model slug for an opencode agent. Omit to pick on TTY.",
     )
     run_p.add_argument(
         "--sim-model",
-        default="openrouter/deepseek/deepseek-v4-flash",
-        help="OpenRouter model string for the SIM (ignored when --agent fake)",
+        default="",
+        help="OpenRouter/OpenCode model slug for an opencode SIM. Omit to pick on TTY.",
     )
     run_p.add_argument(
         "--cli-reviewer",
@@ -527,21 +528,24 @@ def _run_cmd(args: argparse.Namespace) -> int:
 
     sim_is_opencode = (sim_name or agent_name) == "opencode"
     if sim_is_opencode and not getattr(args, "sim_model", ""):
-        if not sys.stdin.isatty():
-            print(
-                "contremaitre: --sim-model required in non-interactive mode "
-                "(set SIM_MODEL in Makefile)",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            picked_sim = _pick_zen_model_interactive(
-                "sim", default=getattr(args, "agent_model", None)
-            )
-        except KeyboardInterrupt:
-            print("aborted", file=sys.stderr)
-            return 130
-        args.sim_model = picked_sim
+        if agent_name == "opencode" and getattr(args, "agent_model", "") and not sys.stdin.isatty():
+            args.sim_model = args.agent_model
+        else:
+            if not sys.stdin.isatty():
+                print(
+                    "contremaitre: --sim-model required in non-interactive mode "
+                    "(set SIM_MODEL in Makefile)",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                picked_sim = _pick_zen_model_interactive(
+                    "sim", default=getattr(args, "agent_model", None)
+                )
+            except KeyboardInterrupt:
+                print("aborted", file=sys.stderr)
+                return 130
+            args.sim_model = picked_sim
 
     # Pre-flight presence check (before Y/n; full auth validation runs inside run())
     rc = _preflight_presence_check(args)
@@ -755,8 +759,12 @@ def _pick_zen_model_interactive(role: str, *, default: str | None = None) -> str
     """Interactive Zen model picker for one role. Returns the chosen model string."""
     free = _fetch_free_models()
     if free is None:
-        fallback = default or "opencode/deepseek-v4-flash-free"
+        fallback = default or _DEFAULT_ZEN_MODEL
         print(f"  {_d('(model catalog unavailable — using')} {fallback}{_d(')')}")
+        return fallback
+    if not free:
+        fallback = default or _DEFAULT_ZEN_MODEL
+        print(f"  {_d('(model catalog empty — using')} {fallback}{_d(')')}")
         return fallback
 
     print()
@@ -774,9 +782,12 @@ def _pick_zen_model_interactive(role: str, *, default: str | None = None) -> str
         marker = f"  {_d('← default')}" if i == default_idx else ""
         print(f"    {i:>{width}}  {m['id']}{marker}")
     print()
-    opts = f"0–{len(free) - 1}"
+    opts = f"0–{len(free) - 1}, paste OpenRouter slug"
     default_id = free[default_idx]["id"]
     prompt = f"  {role:<6}[{default_idx} - {default_id}] (Enter=accept, {opts}, q): "
+    free_ids = {m["id"] for m in free}
+    catalog_unfetched = object()
+    openrouter_catalog: set[str] | None | object = catalog_unfetched
     while True:
         try:
             reply = input(prompt).strip()
@@ -788,6 +799,23 @@ def _pick_zen_model_interactive(role: str, *, default: str | None = None) -> str
             raise KeyboardInterrupt
         if reply.isdigit() and 0 <= int(reply) < len(free):
             return f"opencode/{free[int(reply)]['id']}"
+        if reply in free_ids:
+            return f"opencode/{reply}"
+        slug = _normalize_openrouter_slug(reply)
+        if slug.startswith("opencode/"):
+            model_id = slug.removeprefix("opencode/")
+            if model_id in free_ids:
+                return slug
+            print(f"  unknown OpenCode Zen model in current catalog: {model_id}")
+            continue
+        if slug.startswith("openrouter/"):
+            model_id = slug.removeprefix("openrouter/")
+            if openrouter_catalog is catalog_unfetched:
+                openrouter_catalog = _fetch_openrouter_catalog()
+            if openrouter_catalog is None or model_id in openrouter_catalog:
+                return slug
+            print(f"  OpenRouter model not found in live catalog: {model_id}")
+            continue
         print(f"  enter a number {opts}, Enter, or q")
 
 
@@ -1316,8 +1344,8 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         branch_prefix=getattr(args, "branch_prefix", "refactor"),
         fork=getattr(args, "fork", None),
         upstream=getattr(args, "upstream", None),
-        agent_model=getattr(args, "agent_model", "openrouter/deepseek/deepseek-v4-flash"),
-        sim_model=getattr(args, "sim_model", "openrouter/deepseek/deepseek-v4-flash"),
+        agent_model=getattr(args, "agent_model", ""),
+        sim_model=getattr(args, "sim_model", ""),
         cli_reviewer=getattr(args, "cli_reviewer", "none"),
         max_cli_review_rounds=getattr(args, "max_cli_review_rounds", 3),
         **_resolve_actor_fields(args),
@@ -1332,7 +1360,7 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
             args.opencode_config.resolve()
             if args.opencode_config
             else _synthesize_opencode_config(
-                agent_model=getattr(args, "agent_model", "openrouter/deepseek/deepseek-v4-flash"),
+                agent_model=getattr(args, "agent_model", ""),
                 openrouter_env_var=args.openrouter_env_var,
             )
         ),
