@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import events, prompts
-from .actors import ActorError, ActorRunner, make_actor_runner
+from ._container import ActorError
+from .actors import ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
 from .costs import estimate_recorded_cost_usd, sum_token_usage

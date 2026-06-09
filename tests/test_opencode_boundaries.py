@@ -505,7 +505,7 @@ class ZenKeyClassificationTest(unittest.TestCase):
         self.assertEqual(cmd[:3], ["docker", "run", "-d"])
 
     def test_non_zen_model_requires_key(self):
-        from contremaitre.actors import ActorError
+        from contremaitre._container import ActorError
 
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ActorError):
