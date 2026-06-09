@@ -10,28 +10,24 @@
 
 # Any Makefile variable can be overridden here. Common ones:
 
-# AGENT: claude | codex | opencode | fake
-AGENT        := opencode
-
-# SIM:   claude | codex | opencode   (empty = same as AGENT)
-SIM           := claude
-
-# CLI_REVIEWER: claude | codex | auto | none
-CLI_REVIEWER  := codex
+# ── roles settings ─────────────────────────────────
+AGENT         := opencode   # claude | codex | opencode | fake
+SIM           := claude     # claude | codex | opencode (empty = same as AGENT)
+CLI_REVIEWER  := claude     # claude | codex | auto | none (cross-familly == better)
 
 # ── claude settings (when any role = claude) ─────────────────────────────────
-CLAUDE_MODEL  := opus        # empty = account default; e.g. opus | claude-opus-4-8 | sonnet
-CLAUDE_EFFORT := high    # low | medium | high | max
+CLAUDE_MODEL  := opus       # empty = account default; e.g. opus | claude-opus-4-8 | sonnet
+CLAUDE_EFFORT := high       # low | medium | high | max
 
 # ── codex settings (when any role = codex) ───────────────────────────────────
 CODEX_MODEL   := gpt-5.5
-CODEX_EFFORT  := high    # minimal | low | medium | high | xhigh
+CODEX_EFFORT  := high       # minimal | low | medium | high | xhigh
 
 # ── opencode model (when any role = opencode) ───────────
 # Leave empty → interactive picker shows live OpenCode free ◕‿◕ models at launch.
 # Set to an OpenRouter slug to skip the picker, e.g. qwen/qwen3.7-max
-AGENT_MODEL  :=
-SIM_MODEL    :=          # empty = same as AGENT_MODEL (picker proposes it as default)
+AGENT_MODEL   :=
+SIM_MODEL     :=            # empty = same as AGENT_MODEL (picker proposes it as default)
 
 # ── Reviews loop ───────────────────────────────────────────────────────
 MAX_CLI_REVIEW_ROUNDS := 3
