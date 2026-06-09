@@ -16,6 +16,7 @@ dist/
 
 AGENTS.local.md
 LEARNINGS.md
+Makefile.local
 
 # mattpocock/skills installed locally by opencode when invoked with cwd=here
 .agents/

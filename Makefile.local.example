@@ -1,0 +1,13 @@
+# Copy to `Makefile.local` (gitignored) and edit. Overrides the defaults in
+# Makefile; a `make run VAR=…` command-line value still wins over both.
+# Flip these freely for tests/runs without dirtying the tree.
+#
+# Any Makefile variable can be overridden here. Common ones:
+
+# SIM           := claude
+# CLI_REVIEWER  := codex
+# CLAUDE_MODEL  := opus
+# CLAUDE_EFFORT := medium
+# AGENT         := opencode
+# AGENT_MODEL   := qwen/qwen3.7-max
+# MAX_COST_USD  := 10

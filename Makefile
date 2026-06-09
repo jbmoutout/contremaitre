@@ -12,9 +12,12 @@
 # AGENT: claude | codex | opencode | fake
 AGENT        := claude
 # SIM:   claude | codex | opencode   (empty = same as AGENT)
+# hint: SIM has a hard floor at frontier capability (cheap models fabricate);
+#       optimise cost on the AGENT, keep a frontier SIM.
 SIM          :=
 # CLI_REVIEWER: claude | codex | auto | none
-CLI_REVIEWER := claude
+# hint: a cross-family reviewer (different vendor than AGENT) curbs self-bias.
+CLI_REVIEWER := codex
 
 # ── claude settings (when any role = claude) ─────────────────────────────────
 CLAUDE_MODEL  :=         # empty = account default; e.g. opus | claude-opus-4-8
@@ -34,6 +37,8 @@ SIM_MODEL    :=          # empty = same as AGENT_MODEL (picker proposes it as de
 
 # ── Post-PR review loop ───────────────────────────────────────────────────────
 MAX_CLI_REVIEW_ROUNDS := 3
+# hint: thin-first-turn (cheap) agents gain most from grilling; strong agents
+#       that already frame densely gain little — scale rounds to AGENT strength.
 MAX_REVIEW_ROUNDS     := 3
 
 # ── Run limits ────────────────────────────────────────────────────────────────
@@ -59,6 +64,13 @@ ALLOW_OPEN_EGRESS :=
 # ── Cross-fork (uncomment + set when fork ≠ upstream) ────────────────────────
 # UPSTREAM :=          # canonical read-only remote
 # GH_REPO  :=          # owner/repo for gh pr create --repo
+
+# ── Local overrides (gitignored) ─────────────────────────────────────────────
+# Put your volatile per-run / per-test values in `Makefile.local` (copy from
+# Makefile.local.example). It's gitignored, so flipping config never dirties
+# the tree. It overrides the defaults above; a `make run VAR=…` command-line
+# value still wins over both. The leading `-` means "skip if absent".
+-include Makefile.local
 
 # ── Internal flag assembly ────────────────────────────────────────────────────
 _image_flag    := $(if $(DOCKER_IMAGE),--docker-image $(DOCKER_IMAGE))
