@@ -112,8 +112,8 @@ class EnsureEgressProxyTest(unittest.TestCase):
 class CliEgressIsAutoTest(unittest.TestCase):
     def _args(self, **kw):
         ns = argparse.Namespace(
-            actor="cli",
-            sim_actor=None,
+            agent="codex",
+            sim=None,
             cli_reviewer="none",
             allow_open_egress=False,
             docker_network=None,
@@ -127,15 +127,15 @@ class CliEgressIsAutoTest(unittest.TestCase):
         self.assertTrue(_cli_egress_is_auto(self._args()))
 
     def test_not_auto_for_pure_opencode(self):
-        self.assertFalse(_cli_egress_is_auto(self._args(actor="opencode")))
+        self.assertFalse(_cli_egress_is_auto(self._args(agent="opencode")))
 
     def test_auto_for_cli_reviewer_with_opencode_roles(self):
-        self.assertTrue(_cli_egress_is_auto(self._args(actor="opencode", cli_reviewer="codex")))
+        self.assertTrue(_cli_egress_is_auto(self._args(agent="opencode", cli_reviewer="codex")))
 
     def test_auto_for_codex_sim_with_opencode_agent(self):
         # Reverse mix: opencode agent + codex SIM still needs the lock (the codex
         # token rides in the SIM container).
-        self.assertTrue(_cli_egress_is_auto(self._args(actor="opencode", sim_actor="cli")))
+        self.assertTrue(_cli_egress_is_auto(self._args(agent="opencode", sim="codex")))
 
     def test_not_auto_when_open_egress(self):
         # --allow-open-egress is the explicit override: no auto-lock, runs open.

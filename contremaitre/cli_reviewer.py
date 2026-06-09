@@ -61,7 +61,6 @@ def resolve_choice(
     flag_value: str,
     available: dict[str, str],
     tty: bool,
-    saved_default: str | None = None,
     input_fn=input,
     print_fn=print,
 ) -> str:
@@ -74,12 +73,6 @@ def resolve_choice(
       - both installed + TTY → numbered picker
       - no TTY → "none" (we can't ask)
     Returns one of `"codex"`, `"claude"`, `"none"`.
-
-    `saved_default` is the operator's saved preference from
-    defaults.toml (not a CLI flag). When set, the interactive picker's
-    Enter behavior is "accept saved_default" instead of "skip". The
-    operator can still override numerically. Ignored when `flag_value`
-    is anything but `"auto"` (explicit always wins).
     """
 
     import sys
@@ -101,46 +94,24 @@ def resolve_choice(
         return "none"
     if len(available) == 1:
         tool = next(iter(available))
-        # `saved_default == "none"` flips Enter from Y to N. Any other
-        # saved value (the tool itself, or unset) keeps the
-        # historical Y default — the saved-value semantics is "we WANT
-        # cli-review," and Enter accepting that is the right behavior.
-        if saved_default == "none":
-            try:
-                reply = input_fn(f"  cli-review with {tool} after publish? [y/N] ").strip().lower()
-            except EOFError:
-                return "none"
-            return tool if reply in ("y", "yes") else "none"
         try:
             reply = input_fn(f"  cli-review with {tool} after publish? [Y/n] ").strip().lower()
         except EOFError:
             return "none"
         return tool if reply in ("", "y", "yes") else "none"
-    # Both installed — numbered picker.
-    # `saved_default` (when one of codex/claude) becomes the Enter
-    # default. "auto" or the old "both" mean "I want CLI review, pick
-    # whatever's available" — default to the first available tool so
-    # Enter doesn't silently skip. Only explicit "none" or unset (None)
-    # keeps the historical Enter=skip behaviour.
-    enter_default: str | None = None
-    if saved_default in VALID_TOOLS and saved_default in available:
-        enter_default = saved_default
-    elif saved_default in ("auto", "both"):
-        enter_default = next((t for t in VALID_TOOLS if t in available), None)
+    # Both installed — numbered picker; Enter = skip.
     print_fn("  cli-review:")
     for i, tool in enumerate(VALID_TOOLS, start=1):
         if tool in available:
-            marker = "  ← saved" if tool == enter_default else ""
-            print_fn(f"    [{i}] {tool}{marker}")
+            print_fn(f"    [{i}] {tool}")
     print_fn("    [s] skip")
-    enter_label = enter_default if enter_default else "skip"
     while True:
         try:
-            reply = input_fn(f"  pick (Enter={enter_label}): ").strip().lower()
+            reply = input_fn("  pick (Enter=skip): ").strip().lower()
         except EOFError:
             return "none"
         if reply == "":
-            return enter_default if enter_default else "none"
+            return "none"
         if reply in ("s", "skip"):
             return "none"
         if reply.isdigit():

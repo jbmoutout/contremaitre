@@ -221,7 +221,7 @@ def run_case(case: CaseDef, config: ConfigDef, *, runs_root: Path, rep_index: in
         "-m",
         "contremaitre",
         "run",
-        "--actor",
+        "--agent",
         "opencode",
         "--base",
         case.base,
@@ -237,7 +237,6 @@ def run_case(case: CaseDef, config: ConfigDef, *, runs_root: Path, rep_index: in
         config.cli_reviewer,
         "--publish-mode",
         config.publish_mode,
-        "--yes",
         "--allow-open-egress",
     ]
     env = dict(os.environ)

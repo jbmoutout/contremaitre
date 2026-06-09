@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import base64
 import json
 import os
@@ -8,7 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
@@ -453,29 +452,6 @@ class _StubRunner:
         self.calls.append("review")
 
 
-class RuntimeSelectorTest(unittest.TestCase):
-    def _pick(self, actor, sim_actor, inputs):
-        from contremaitre.cli import _pick_runtimes_interactive
-
-        ns = argparse.Namespace(actor=actor, sim_actor=sim_actor)
-        with patch("builtins.input", side_effect=inputs):
-            _pick_runtimes_interactive(ns)
-        return ns
-
-    def test_picks_mixed_codex_agent_opencode_sim(self):
-        ns = self._pick("opencode", None, ["2", "1"])  # agent=codex, SIM=opencode
-        self.assertEqual(ns.actor, "cli")
-        self.assertEqual(ns.sim_actor, "opencode")
-
-    def test_same_runtime_records_no_sim_override(self):
-        ns = self._pick("opencode", None, ["", ""])  # keep opencode for both
-        self.assertEqual(ns.actor, "opencode")
-        self.assertIsNone(ns.sim_actor)
-
-    def test_fake_default_skips_picker(self):
-        ns = self._pick("fake", None, [])  # no prompts consumed
-        self.assertEqual(ns.actor, "fake")
-
 
 class ForwardedFlagHelpersTest(unittest.TestCase):
     """`_set_flag_value` / `_remove_flag` fold an interactive choice back into
@@ -509,83 +485,6 @@ class ForwardedFlagHelpersTest(unittest.TestCase):
         _remove_flag(args, "--sim-actor")
         self.assertEqual(args, ["--x", "1"])
 
-
-class TuiRunForwardsRuntimeTest(unittest.TestCase):
-    """`tui run` must forward the resolved per-role runtime to the subprocess.
-
-    The TUI builds a throwaway `confirm_args` namespace and the real run
-    happens in a `contremaitre run` subprocess, so the picker's choice only
-    takes effect if it is written back into the forwarded flags.
-    """
-
-    def _spawn_cmd(self, run_args, launch_side_effect=None):
-        import contremaitre.cli as cli_mod
-
-        captured = {}
-
-        def fake_spawn(**kwargs):
-            captured["run_cmd"] = kwargs["run_cmd"]
-            return 0
-
-        saved = MagicMock(
-            agent_model=None,
-            sim_model=None,
-            cli_reviewer=None,
-            actor=None,
-            sim_actor=None,
-            cli_tool=None,
-            sim_cli_tool=None,
-            codex_model=None,
-            codex_effort=None,
-            claude_model=None,
-            claude_effort=None,
-        )
-        ns = argparse.Namespace(run_args=run_args, refresh_hz=4, discover_timeout=10)
-        with (
-            patch.object(cli_mod, "_ensure_local_clone"),
-            patch.object(cli_mod._defaults, "load", return_value=saved),
-            patch.object(
-                cli_mod,
-                "_launch_screen",
-                side_effect=launch_side_effect or (lambda **k: True),
-            ),
-            patch("contremaitre.tui.spawn_and_attach", side_effect=fake_spawn),
-        ):
-            rc = cli_mod._tui_run_cmd(ns)
-        self.assertEqual(rc, 0)
-        return captured["run_cmd"]
-
-    def test_bare_tui_run_forwards_opencode_default(self):
-        # No --actor: the TUI defaults the agent runtime to a real actor so the
-        # subprocess runs opencode (and the image auto-builds), not `fake`.
-        cmd = self._spawn_cmd(["--fork", "git@github.com:o/r.git", "--base", "main"])
-        self.assertIn("--actor", cmd)
-        self.assertEqual(cmd[cmd.index("--actor") + 1], "opencode")
-        self.assertNotIn("--sim-actor", cmd)
-
-    def test_picker_change_propagates_mixed_runtimes(self):
-        def picked(**kwargs):
-            args = kwargs["args"]
-            args.actor = "cli"  # codex agent
-            args.sim_actor = "opencode"  # opencode SIM
-            return True
-
-        cmd = self._spawn_cmd(["--fork", "git@github.com:o/r.git", "--base", "main"], picked)
-        self.assertEqual(cmd[cmd.index("--actor") + 1], "cli")
-        self.assertEqual(cmd[cmd.index("--sim-actor") + 1], "opencode")
-
-    def test_picker_claude_propagates_cli_tool(self):
-        # Regression: picking claude must fold --cli-tool back into the
-        # subprocess flags, else the run silently defaults to codex.
-        def picked(**kwargs):
-            args = kwargs["args"]
-            args.actor = "cli"
-            args.cli_tool = "claude"
-            return True
-
-        cmd = self._spawn_cmd(["--fork", "git@github.com:o/r.git", "--base", "main"], picked)
-        self.assertEqual(cmd[cmd.index("--actor") + 1], "cli")
-        self.assertEqual(cmd[cmd.index("--cli-tool") + 1], "claude")
 
 
 class CompositeRunnerTest(unittest.TestCase):

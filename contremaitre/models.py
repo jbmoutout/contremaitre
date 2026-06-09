@@ -337,7 +337,6 @@ class RunConfig:
     http_proxy: str | None = None
     https_proxy: str | None = None
     no_proxy: str | None = None
-    skip_preflight: bool = False
     allow_open_egress: bool = False
     skip_openrouter_key_check: bool = False
     allow_unlimited_openrouter_key: bool = False

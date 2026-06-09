@@ -13,7 +13,6 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import defaults as _defaults
 from .envfile import load_dotenv_defaults
 from .fixture import init_fixture
 from .models import ActorMode, Caps, ModelSpec, PublishMode, RunConfig
@@ -149,12 +148,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--agent-model",
         default="openrouter/deepseek/deepseek-v4-flash",
-        help="OpenRouter model string for the agent (ignored in --actor fake)",
+        help="OpenRouter model string for the agent (ignored when --agent fake)",
     )
     run_p.add_argument(
         "--sim-model",
         default="openrouter/deepseek/deepseek-v4-flash",
-        help="OpenRouter model string for the SIM (ignored in --actor fake)",
+        help="OpenRouter model string for the SIM (ignored when --agent fake)",
     )
     run_p.add_argument(
         "--cli-reviewer",
@@ -175,19 +174,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum post-PR CLI review + agent revision rounds (default 3).",
     )
     run_p.add_argument(
-        "--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.FAKE.value
+        "--agent",
+        choices=["fake", "opencode", "claude", "codex"],
+        default="fake",
+        help="Runtime for the agent role: opencode (OpenRouter/Zen model), "
+        "claude (subscription CLI), codex (subscription CLI), or fake (smoke tests)",
     )
     run_p.add_argument(
-        "--cli-tool",
-        choices=["codex", "claude"],
-        default="codex",
-        help="Frontier CLI to drive as agent/SIM when --actor cli (codex or claude)",
+        "--sim",
+        choices=["opencode", "claude", "codex"],
+        default=None,
+        help="Runtime for the SIM role (default: same as --agent). "
+        "Allows mixed runs, e.g. --agent claude --sim opencode.",
     )
     run_p.add_argument(
         "--codex-model",
         default="gpt-5.5",
-        help="codex-native model for a codex role (opencode-namespaced --agent/sim-model "
-        "are rejected by codex and fall back to this)",
+        help="codex-native model for a codex role",
     )
     run_p.add_argument(
         "--codex-effort",
@@ -207,20 +210,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="high",
         help="claude effort (--effort) for a claude role",
     )
-    run_p.add_argument(
-        "--sim-actor",
-        choices=[mode.value for mode in ActorMode],
-        default=None,
-        help="Override the SIM's runtime (default: same as --actor); lets a codex "
-        "agent pair with an opencode SIM, or the reverse",
-    )
-    run_p.add_argument(
-        "--sim-cli-tool",
-        choices=["codex", "claude"],
-        default=None,
-        help="Override the SIM's CLI tool when the SIM runs --actor cli (default: "
-        "same as --cli-tool); lets a codex agent pair with a claude SIM, or the reverse",
-    )
     run_p.add_argument("--run-slug", default="run")
     run_p.add_argument(
         "--check-cmd", action="append", default=[], help="Executable check command; repeatable"
@@ -235,34 +224,18 @@ def build_parser() -> argparse.ArgumentParser:
             "malformed_then_approved",
         ],
         default="approved",
-        help="Fake SIM behavior (ignored in --actor opencode)",
+        help="Fake SIM behavior (ignored when --agent opencode)",
     )
     run_p.add_argument(
         "--agent-scenario",
         choices=["normal", "forbidden_path", "no_impl_complete"],
         default="normal",
-        help="Fake agent behavior (ignored in --actor opencode)",
+        help="Fake agent behavior (ignored when --agent opencode)",
     )
     run_p.add_argument(
         "--publish-mode",
         choices=[mode.value for mode in PublishMode],
         default=PublishMode.STUB.value,
-    )
-    run_p.add_argument(
-        "-y",
-        "--yes",
-        action="store_true",
-        help="Skip the pre-launch Y/n prompt. Useful for scripts / CI.",
-    )
-    run_p.add_argument(
-        "--no-prompt",
-        action="store_true",
-        help=(
-            "Skip the model + cli-reviewer pickers entirely and use the "
-            "saved defaults from `contremaitre init` (or hardcoded fallbacks "
-            "when no defaults file exists). Implies --yes. The pre-flight "
-            "ping and recap still run."
-        ),
     )
     run_p.add_argument("--keep-worktree", action="store_true")
     run_p.add_argument("--simulate-drift-after-approval", action="store_true")
@@ -270,9 +243,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--container-user",
         default=None,
         help="Optional docker --user value, e.g. $(id -u):$(id -g)",
-    )
-    run_p.add_argument(
-        "--skip-preflight", action="store_true", help="Bypass operational preflight checks"
     )
     run_p.add_argument("--agent-timeout-seconds", type=int, default=1800)
     run_p.add_argument("--sim-timeout-seconds", type=int, default=1500)
@@ -310,7 +280,16 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor", parents=[shared], help="Validate live-run operational prerequisites"
     )
     doctor_p.add_argument(
-        "--actor", choices=[mode.value for mode in ActorMode], default=ActorMode.OPENCODE.value
+        "--agent",
+        choices=["fake", "opencode", "claude", "codex"],
+        default="opencode",
+        help="Runtime for the agent role (same choices as `run --agent`)",
+    )
+    doctor_p.add_argument(
+        "--sim",
+        choices=["opencode", "claude", "codex"],
+        default=None,
+        help="Runtime for the SIM role (default: same as --agent)",
     )
     doctor_p.add_argument("--run-slug", default="doctor")
     doctor_p.set_defaults(func=_doctor_cmd)
@@ -381,6 +360,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cleanup_p.set_defaults(func=_cleanup_cmd)
 
+    models_p = sub.add_parser(
+        "models",
+        help="List available OpenCode Zen free models with live quota status",
+    )
+    models_p.set_defaults(func=_models_cmd)
+
     tui_p = sub.add_parser("tui", help="Live Textual TUI (requires `textual`)")
     tui_sub = tui_p.add_subparsers(dest="tui_command", required=True)
     tui_run = tui_sub.add_parser(
@@ -389,7 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
     tui_run.add_argument(
         "run_args",
         nargs=argparse.REMAINDER,
-        help="Flags forwarded to `contremaitre run` (e.g. --actor opencode --repo /path …)",
+        help="Flags forwarded to `contremaitre run` (e.g. --agent opencode --repo /path …)",
     )
     tui_run.add_argument("--refresh-hz", type=float, default=5.0)
     tui_run.add_argument(
@@ -520,26 +505,60 @@ def _run_cmd(args: argparse.Namespace) -> int:
     except subprocess.CalledProcessError as exc:
         print(f"contremaitre: git clone failed: {exc.stderr or exc}", file=sys.stderr)
         return 1
-    # Apply saved defaults (~/.config/contremaitre/defaults.toml) — only
-    # for fields the operator did not pass explicitly. Per-run CLI flags
-    # always win; the file is a convenience layer for picker prefills.
-    _apply_saved_defaults(args, argv=sys.argv)
-    try:
-        if not _launch_screen(args=args, source_url=source_url, argv_for_explicit_check=sys.argv):
+
+    agent_name = getattr(args, "agent", "fake")
+    sim_name = getattr(args, "sim", None)
+
+    # Zen picker: only when opencode + no model + TTY
+    if agent_name == "opencode" and not getattr(args, "agent_model", ""):
+        if not sys.stdin.isatty():
+            print(
+                "contremaitre: --agent-model required in non-interactive mode "
+                "(set AGENT_MODEL in Makefile)",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            picked = _pick_zen_model_interactive("agent")
+        except KeyboardInterrupt:
             print("aborted", file=sys.stderr)
             return 130
-    except KeyboardInterrupt:
-        print("aborted", file=sys.stderr)
-        return 130
+        args.agent_model = picked
+
+    sim_is_opencode = (sim_name or agent_name) == "opencode"
+    if sim_is_opencode and not getattr(args, "sim_model", ""):
+        if not sys.stdin.isatty():
+            print(
+                "contremaitre: --sim-model required in non-interactive mode "
+                "(set SIM_MODEL in Makefile)",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            picked_sim = _pick_zen_model_interactive(
+                "sim", default=getattr(args, "agent_model", None)
+            )
+        except KeyboardInterrupt:
+            print("aborted", file=sys.stderr)
+            return 130
+        args.sim_model = picked_sim
+
+    # Pre-flight presence check (before Y/n; full auth validation runs inside run())
+    rc = _preflight_presence_check(args)
+    if rc != 0:
+        return rc
+
+    # Recap + Y/n
+    if sys.stdin.isatty():
+        if not _recap_and_confirm(args, source_url=source_url):
+            print("aborted", file=sys.stderr)
+            return 130
+
     _maybe_provision_cli_egress(args)
     config = _config_from_args(args, repo=cache_path)
     rc = _ensure_default_image_built(config)
     if rc != 0:
         return rc
-    # Deps volume is now provisioned inside the orchestrator, AFTER the
-    # per-run worktree is checked out from `origin/<base>`, so the
-    # lockfile hash reflects the exact state the agent will see (not
-    # whatever the cache clone happened to have at first-clone time).
     result = run(config)
     print(f"{result.verdict.value}: {result.reason}")
     print(f"run_dir={result.run_dir}")
@@ -641,241 +660,12 @@ def _ensure_local_clone(*, cache_path: Path, source_url: str, base: str | None =
     )
 
 
-_RULE = "─" * 52
-
-
 def _b(s: str) -> str:
     return f"\033[1m{s}\033[0m" if sys.stdout.isatty() else s
 
 
 def _d(s: str) -> str:
     return f"\033[2m{s}\033[0m" if sys.stdout.isatty() else s
-
-
-def _y(s: str) -> str:
-    return f"\033[33m{s}\033[0m" if sys.stdout.isatty() else s
-
-
-def _openrouter_key_state(env_var: str, key_url: str, *, timeout: float = 5.0) -> dict:
-    """Best-effort probe of the OpenRouter key for the pre-launch banner.
-
-    Always returns a dict — never raises — so a network blip can't block
-    the launch screen. Caller renders presence, limit, and error fields
-    into either a banner (TTY) or a one-line info string (non-TTY).
-    """
-
-    import urllib.error
-    import urllib.request
-
-    key = os.environ.get(env_var)
-    if not key:
-        return {"present": False, "limit": None, "remaining": None, "error": None}
-    try:
-        req = urllib.request.Request(key_url, headers={"Authorization": f"Bearer {key}"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
-        return {"present": True, "limit": None, "remaining": None, "error": str(exc)[:80]}
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, dict):
-        return {"present": True, "limit": None, "remaining": None, "error": "malformed response"}
-    return {
-        "present": True,
-        "limit": data.get("limit"),
-        "remaining": data.get("limit_remaining"),
-        "error": None,
-    }
-
-
-def _print_key_banner(env_var: str, state: dict) -> None:
-    """Decision-driving banner shown BEFORE the model picker."""
-
-    print()
-    print(_RULE)
-    if not state["present"]:
-        print(f"  {_b(f'{env_var} not found in .env')}")
-        print()
-        print(f"  {_d('Only free OpenCode Zen models available below.')}")
-        print(f"  {_d('Add a key to .env to unlock paid OpenRouter models')}")
-        print(f"  {_d('(set a credit limit in your OpenRouter dashboard first).')}")
-    elif state["error"]:
-        print(f"  {_b(f'{env_var} detected')}  {_d('(key info unavailable)')}")
-    elif state["limit"] is None:
-        print(f"  {_b(f'{env_var} detected')}  {_y('limit: unlimited ⚠')}")
-        print()
-        print(f"  {_d('Set a credit limit in your OpenRouter dashboard for safety.')}")
-    else:
-        try:
-            limit = float(state["limit"])
-            remaining = float(state["remaining"] or 0)
-            details = f"limit ${limit:.2f}  ·  remaining ${remaining:.2f}"
-        except (TypeError, ValueError):
-            details = "limited"
-        print(f"  {_b(f'{env_var} detected')}  {_d(details)}")
-    print(_RULE)
-
-
-def _key_state_info_line(env_var: str, state: dict) -> str:
-    """Single-line equivalent of `_print_key_banner` for non-TTY logs."""
-
-    if not state["present"]:
-        return f"[info] {env_var} not set — free OpenCode Zen models only."
-    if state["error"]:
-        return f"[info] {env_var} detected (limit info unavailable)."
-    if state["limit"] is None:
-        return f"[info] {env_var} detected with no credit limit set."
-    try:
-        limit = float(state["limit"])
-        remaining = float(state["remaining"] or 0)
-        return f"[info] {env_var} detected — limit ${limit:.2f}, remaining ${remaining:.2f}."
-    except (TypeError, ValueError):
-        return f"[info] {env_var} detected."
-
-
-def _normalize_openrouter_slug(pasted: str) -> str:
-    """Prepend `openrouter/` to a pasted OpenRouter model id if missing.
-
-    Bound to the picker's `c` option, which advertises itself as taking
-    an OpenRouter slug — operators copy `<vendor>/<model>` straight from
-    openrouter.ai/models. The opencode binary needs the `openrouter/`
-    provider prefix to dispatch; without it the run dies on turn one
-    with `Model not found: <slug>`. Already-prefixed inputs pass
-    through so a returning operator who pastes the full id doesn't get
-    double-prefixed. Other providers, if added later, get their own
-    normalizer + picker branch.
-    """
-
-    slug = pasted.strip()
-    if not slug:
-        return slug
-    if slug.startswith("openrouter/") or slug.startswith("opencode/"):
-        return slug
-    return f"openrouter/{slug}"
-
-
-def _print_no_cli_reviewer_banner() -> None:
-    print()
-    print(_RULE)
-    print(f"  {_b('No claude/codex CLI on PATH')}")
-    print()
-    print(f"  {_d('Install either to enable a free post-publish code review on')}")
-    print(f"  {_d('your subscription (no API spend). Continuing without it.')}")
-    print(_RULE)
-
-
-def _pick_models_interactive(
-    *,
-    current_agent: str,
-    current_sim: str,
-    pick_agent: bool,
-    pick_sim: bool,
-    allow_custom: bool,
-) -> tuple[str, str, list[tuple[str, str]]]:
-    """Run the agent / sim picker; return chosen values.
-
-    Returns `(agent, sim, picker_args)`. `picker_args` is a list of
-    `(flag, value)` tuples for callers that pass-through flags to a
-    spawned subprocess (the `tui run` path); the run-screen caller
-    instead reassigns directly onto its `argparse.Namespace`. Either
-    way, the result tuple is authoritative for what was picked.
-
-    `pick_*` flags toggle each role's prompt — `False` means the value
-    was explicitly set on the command line (or `init` left it unset)
-    and the picker should leave that field alone.
-
-    When the free-model catalog is unreachable, returns inputs unchanged
-    and prints a soft warning — never blocks a run that would otherwise
-    launch with hardcoded defaults.
-    """
-
-    if not (pick_agent or pick_sim):
-        return current_agent, current_sim, []
-
-    free = _fetch_free_models()
-    picker_args: list[tuple[str, str]] = []
-    if free is None:
-        print()
-        print(_d("  (model catalog unavailable — using CLI defaults)"))
-        return current_agent, current_sim, picker_args
-
-    print()
-    print(f"  {_b('Pick models')}  {_d('(free OpenCode Zen — no key needed)')}")
-    print()
-
-    def _index_of(model: str | None) -> int | None:
-        if not model:
-            return None
-        bare = model.rsplit("/", 1)[-1]
-        candidates = {bare, f"{bare}-free"}
-        for i, m in enumerate(free):
-            if m["id"] in candidates:
-                return i
-        return None
-
-    # Per-role default indices read from the saved values. None when the
-    # saved slug isn't in the free catalog (custom OpenRouter paste, or
-    # no saved value); the picker falls back to a sensible neighbor in
-    # that case.
-    agent_default = _index_of(current_agent)
-    sim_default = _index_of(current_sim)
-    width = len(str(len(free) - 1))
-    for i, m in enumerate(free):
-        roles = []
-        if agent_default == i:
-            roles.append("agent")
-        if sim_default == i:
-            roles.append("sim")
-        marker = f"  {_d('← ' + ', '.join(roles))}" if roles else ""
-        print(f"    {i:>{width}}  {m['id']}{marker}")
-    if allow_custom:
-        print(f"    {'c':>{width}}  {_d('paste any OpenRouter model name (openrouter.ai/models)')}")
-    print()
-
-    def _pick_inline(role: str, current_idx: int) -> tuple[str, int]:
-        default_id = free[current_idx]["id"]
-        opts = f"0–{len(free) - 1}" + (", c" if allow_custom else "")
-        prompt = f"  {role:<6}[{current_idx} - {default_id}] (Enter=accept, {opts}, q): "
-        while True:
-            try:
-                reply = input(prompt).strip()
-            except EOFError:
-                return f"opencode/{free[current_idx]['id']}", current_idx
-            low = reply.lower()
-            if low == "":
-                return f"opencode/{free[current_idx]['id']}", current_idx
-            if low == "q":
-                raise KeyboardInterrupt
-            if low.isdigit() and 0 <= int(low) < len(free):
-                idx = int(low)
-                return f"opencode/{free[idx]['id']}", idx
-            if allow_custom and low == "c":
-                try:
-                    slug = input(f"  paste OpenRouter model for {role}: ").strip()
-                except EOFError:
-                    continue
-                if slug:
-                    return _normalize_openrouter_slug(slug), current_idx
-                continue
-            suffix = ", c" if allow_custom else ""
-            print(f"  enter a number 0–{len(free) - 1}{suffix}, Enter, or q")
-
-    agent = current_agent
-    agent_idx = agent_default if agent_default is not None else 0
-    if pick_agent:
-        agent, agent_idx = _pick_inline("agent", agent_idx)
-        picker_args.append(("--agent-model", agent))
-
-    sim = current_sim
-    # Sim defaults to its OWN saved value, only falling back to agent's
-    # index when sim has no saved value. Before this fix, sim always
-    # mirrored whatever the operator just picked for agent, which made
-    # saved sim_model in defaults.toml a no-op.
-    sim_idx = sim_default if sim_default is not None else agent_idx
-    if pick_sim:
-        sim, sim_idx = _pick_inline("sim", sim_idx)
-        picker_args.append(("--sim-model", sim))
-
-    return agent, sim, picker_args
 
 
 def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
@@ -890,10 +680,12 @@ def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
     `--docker-network`/`--https-proxy` also win (operator's own policy).
     """
 
-    modes = {getattr(args, "actor", None), getattr(args, "sim_actor", None)}
+    agent_name = getattr(args, "agent", "fake")
+    sim_name = getattr(args, "sim", None) or agent_name
+    cli_names = {agent_name, sim_name}
     reviewer = getattr(args, "cli_reviewer", "none")
     reviewer_cli_active = reviewer in {"codex", "claude", "auto"}
-    if ActorMode.CLI.value not in modes and not reviewer_cli_active:
+    if not cli_names.intersection({"claude", "codex"}) and not reviewer_cli_active:
         return False
     if getattr(args, "allow_open_egress", False):
         return False
@@ -925,32 +717,6 @@ def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
     print(f"[info] CLI egress: {network} + allowlist proxy ({proxy})")
 
 
-def _cli_status_lines(args: argparse.Namespace) -> tuple[str, str]:
-    """(token_line, egress_line) describing the CLI run's posture, per cli_tool."""
-
-    tool = getattr(args, "cli_tool", "codex")
-    if tool == "claude":
-        token_line = _claude_token_line()
-    else:
-        token_line = _codex_token_line()
-
-    if getattr(args, "allow_open_egress", False):
-        # The blast radius differs: codex's refresh token is neutered (bounded to
-        # ~10-day quota abuse), claude's OAuth token is long-lived and unneutered.
-        bound = (
-            "long-lived OAuth token, exfiltratable"
-            if tool == "claude"
-            else "bounded to ~10-day quota abuse: refresh token is neutered"
-        )
-        egress_line = f"egress: OPEN (--allow-open-egress) — token is exfiltratable ({bound})"
-    elif getattr(args, "docker_network", None) or getattr(args, "https_proxy", None):
-        net = getattr(args, "docker_network", None) or "(none)"
-        proxy = "yes" if getattr(args, "https_proxy", None) else "no"
-        egress_line = f"egress: locked (network={net}, proxy={proxy})"
-    else:
-        egress_line = "egress: auto-provision allowlist proxy on launch (provider domains only)"
-    return token_line, egress_line
-
 
 def _codex_token_line() -> str:
     import time as _time
@@ -974,430 +740,157 @@ def _claude_token_line() -> str:
     return f"claude token: MISSING — run `claude setup-token` and export {_CLAUDE_OAUTH_ENV}"
 
 
-def _pick_runtimes_interactive(args: argparse.Namespace) -> None:
-    """Prompt for the agent and SIM runtimes; set args.actor / args.sim_actor / args.cli_tool.
+def _agent_name_to_runtime(name: str) -> tuple[ActorMode, str | None]:
+    """Translate operator-facing agent name to (ActorMode, cli_tool | None)."""
+    if name == "claude":
+        return ActorMode.CLI, "claude"
+    elif name == "codex":
+        return ActorMode.CLI, "codex"
+    elif name == "opencode":
+        return ActorMode.OPENCODE, None
+    else:  # "fake"
+        return ActorMode.FAKE, None
 
-    Runtime is per role: `opencode` (OpenRouter models) or the `cli` runtime with
-    a tool (`codex` / `claude`, both subscription CLIs). They can differ — a CLI
-    agent can pair with an opencode SIM, or the reverse. Enter keeps the current
-    choice. Skipped for a `fake` default (fixture runs) so the picker only shows
-    for real runs.
 
-    v1 limitation: a single `cli_tool` is shared by any CLI role, so codex-agent +
-    claude-SIM (two different CLI tools in one run) is not representable — the
-    agent's CLI tool wins.
-    """
+def _pick_zen_model_interactive(role: str, *, default: str | None = None) -> str:
+    """Interactive Zen model picker for one role. Returns the chosen model string."""
+    free = _fetch_free_models()
+    if free is None:
+        fallback = default or "opencode/deepseek-v4-flash-free"
+        print(f"  {_d('(model catalog unavailable — using')} {fallback}{_d(')')}")
+        return fallback
 
-    current_agent = getattr(args, "actor", ActorMode.FAKE.value)
-    if current_agent == ActorMode.FAKE.value:
-        return  # fixture/smoke run — don't surface the runtime picker
-
-    current_tool = getattr(args, "cli_tool", "codex")
-    # (mode, tool, label). codex and claude both map to the `cli` runtime, carrying
-    # their tool so the picker can set args.cli_tool.
-    choices = [
-        (ActorMode.OPENCODE.value, None, "opencode  (OpenRouter models)"),
-        (ActorMode.CLI.value, "codex", "codex     (subscription CLI)"),
-        (ActorMode.CLI.value, "claude", "claude    (subscription CLI)"),
-    ]
-
-    def _pick(role: str, cur_mode: str, cur_tool: str) -> tuple[str, str | None]:
-        print()
-        print(f"  {role} runtime:")
-        for i, (val, tool, label) in enumerate(choices, start=1):
-            is_current = val == cur_mode and (val != ActorMode.CLI.value or tool == cur_tool)
-            marker = "  ← current" if is_current else ""
-            print(f"    {i}  {label}{marker}")
-        keep = cur_tool if cur_mode == ActorMode.CLI.value else cur_mode
+    print()
+    print(f"  {_b('Pick model')} {_d(f'for {role}')}")
+    print()
+    width = len(str(len(free) - 1))
+    default_idx = 0
+    if default:
+        bare = default.rsplit("/", 1)[-1]
+        for i, m in enumerate(free):
+            if m["id"] == bare or m["id"] == f"{bare}-free":
+                default_idx = i
+                break
+    for i, m in enumerate(free):
+        marker = f"  {_d('← default')}" if i == default_idx else ""
+        print(f"    {i:>{width}}  {m['id']}{marker}")
+    print()
+    opts = f"0–{len(free) - 1}"
+    default_id = free[default_idx]["id"]
+    prompt = f"  {role:<6}[{default_idx} - {default_id}] (Enter=accept, {opts}, q): "
+    while True:
         try:
-            reply = input(f"  pick (Enter={keep}): ").strip().lower()
+            reply = input(prompt).strip()
         except EOFError:
-            reply = ""
-        if reply.isdigit():
-            idx = int(reply) - 1
-            if 0 <= idx < len(choices):
-                val, tool, _ = choices[idx]
-                return val, tool
-        # Keep current: preserve the tool only when the current runtime is CLI.
-        return cur_mode, (cur_tool if cur_mode == ActorMode.CLI.value else None)
-
-    agent_mode, agent_tool = _pick("agent", current_agent, current_tool)
-    current_sim_tool = getattr(args, "sim_cli_tool", None) or agent_tool or current_tool
-    sim_mode, sim_tool = _pick(
-        "SIM", getattr(args, "sim_actor", None) or agent_mode, current_sim_tool
-    )
-    args.actor = agent_mode
-    # Only record a SIM override when it actually differs from the agent.
-    args.sim_actor = None if sim_mode == agent_mode else sim_mode
-    # cli_tool is per-role: the agent's CLI tool, and the SIM's only when it runs
-    # CLI and differs (codex agent + claude SIM, or the reverse). When the agent
-    # isn't CLI but the SIM is, the SIM's tool rides on `cli_tool`.
-    if agent_mode == ActorMode.CLI.value:
-        args.cli_tool = agent_tool
-        args.sim_cli_tool = (
-            sim_tool if (sim_mode == ActorMode.CLI.value and sim_tool != agent_tool) else None
-        )
-    elif sim_mode == ActorMode.CLI.value:
-        args.cli_tool = sim_tool
-        args.sim_cli_tool = None
-    else:
-        args.sim_cli_tool = None
+            return f"opencode/{default_id}"
+        if reply == "":
+            return f"opencode/{default_id}"
+        if reply.lower() == "q":
+            raise KeyboardInterrupt
+        if reply.isdigit() and 0 <= int(reply) < len(free):
+            return f"opencode/{free[int(reply)]['id']}"
+        print(f"  enter a number {opts}, Enter, or q")
 
 
-def _cli_launch_screen(*, args: argparse.Namespace) -> bool:
-    """Launch screen for `--actor cli` (codex/claude on the operator's plan).
+def _preflight_presence_check(args: argparse.Namespace) -> int:
+    """Quick pre-Y/n token presence check. Returns 0 on pass, 1 on any failure."""
+    agent_name = getattr(args, "agent", "fake")
+    sim_name = getattr(args, "sim", None) or agent_name
+    reviewer = getattr(args, "cli_reviewer", "none")
+    cli_names = [n for n in (agent_name, sim_name) if n in ("claude", "codex")]
+    if reviewer in ("claude", "codex"):
+        cli_names.append(reviewer)
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique_cli_names = [n for n in cli_names if not (n in seen or seen.add(n))]
 
-    Subscription-driven, so there's no OpenRouter key probe or model picker —
-    instead a concise status: which tool, whether the codex token is valid, and
-    whether egress is locked (the CLI actor refuses to run on open egress unless
-    --allow-open-egress). yes/non-TTY mode collapses to one info line.
-    """
-
-    tool = getattr(args, "cli_tool", "codex")
-    yes_mode = (
-        getattr(args, "yes", False) or getattr(args, "no_prompt", False) or not sys.stdin.isatty()
-    )
-    token_line, egress_line = _cli_status_lines(args)
-
-    if yes_mode:
-        print(f"[info] actor=cli tool={tool}; {token_line}; {egress_line}")
-        return True
+    if not unique_cli_names:
+        return 0  # opencode/fake only — no token to check here
 
     print()
-    print(_RULE)
-    print(f"  {_b('contremaitre')} · CLI actor ({tool})")
-    print(f"  {token_line}")
-    print(f"  {egress_line}")
-    print(_RULE)
-    try:
-        reply = input("  launch? [Y/n] ").strip().lower()
-    except EOFError:
-        return True
-    return reply in ("", "y", "yes")
-
-
-def _launch_screen(
-    *,
-    args: argparse.Namespace,
-    source_url: str,
-    argv_for_explicit_check: list[str],
-    forwarded_to_subprocess: list[str] | None = None,
-) -> bool:
-    """Pre-launch screen: status banners → pickers → recap → Y/n.
-
-    Order matters. Decision-driving info (key status, cli-reviewer
-    availability) lives in banners BEFORE the picker it affects, so the
-    operator sees the constraints at the moment they pick. The recap at
-    the bottom is purely a confirmation of the resolved config — no
-    warnings, no decisions left to make.
-
-    In --yes / non-TTY mode the banners collapse to one-line `[info]`
-    log lines (so CI output explains what was auto-assumed) and the
-    function returns True without prompting.
-    """
-
-    from . import cli_reviewer
-
-    env_var = getattr(args, "openrouter_env_var", "OPENROUTER_API_KEY")
-    key_url = getattr(args, "openrouter_key_url", "https://openrouter.ai/api/v1/key")
-    cli_reviewer_explicit = _has_flag_in(argv_for_explicit_check, "--cli-reviewer")
-    available_clis = cli_reviewer.detect_available()
-
-    # `--no-prompt` forces non-interactive even on a TTY. The recap still
-    # prints but the pickers are skipped — saved defaults (from
-    # `contremaitre init`) or hardcoded values flow through unchanged.
-    no_prompt = getattr(args, "no_prompt", False)
-    yes_mode = getattr(args, "yes", False) or no_prompt or not sys.stdin.isatty()
-
-    # Per-role runtime selection (interactive only): agent and SIM can each run
-    # opencode or codex. Sets args.actor / args.sim_actor; flags are the
-    # non-interactive defaults.
-    if not yes_mode:
-        _pick_runtimes_interactive(args)
-    agent_mode = getattr(args, "actor", ActorMode.FAKE.value)
-    sim_mode = getattr(args, "sim_actor", None) or agent_mode
-
-    # No opencode role → a pure CLI run (codex/claude): the smaller CLI status
-    # screen, no OpenRouter probe or model picker.
-    if ActorMode.OPENCODE.value not in (agent_mode, sim_mode):
-        return _cli_launch_screen(args=args)
-    any_cli = ActorMode.CLI.value in (agent_mode, sim_mode)
-
-    if yes_mode:
-        # Skip the network probe in non-TTY mode — we only need presence
-        # in the log line, and probing on every CI invocation is wasted
-        # latency.
-        key_state = {
-            "present": bool(os.environ.get(env_var)),
-            "limit": None,
-            "remaining": None,
-            "error": None,
-        }
-        print(_key_state_info_line(env_var, key_state))
-        if not available_clis and not cli_reviewer_explicit:
-            print("[info] No claude/codex CLI on PATH — post-publish code review disabled.")
-        return True
-
-    # ----- interactive path -----
-    key_state = _openrouter_key_state(env_var, key_url)
-    allow_custom = key_state["present"]
-
-    print()
-    print(_RULE)
-    print(f"  {_b('contremaitre')}")
-
-    # Banner before the picker: tells the operator whether paid models
-    # are reachable at all, so the `c` paste option makes sense in
-    # context.
-    _print_key_banner(env_var, key_state)
-
-    # When one role is a CLI tool (mixed run), surface its token + egress posture
-    # alongside the OpenRouter banner so the operator sees both constraints.
-    if any_cli:
-        token_line, egress_line = _cli_status_lines(args)
-        cli_tool = getattr(args, "cli_tool", "codex")
-        cli_role = "agent" if agent_mode == ActorMode.CLI.value else "SIM"
-        print(f"  {cli_tool} {cli_role}: {token_line}; {egress_line}")
-
-    agent_explicit = _has_flag_in(argv_for_explicit_check, "--agent-model")
-    sim_explicit = _has_flag_in(argv_for_explicit_check, "--sim-model")
-
-    # ----- model picker (single list, agent then SIM) -----
-    agent, sim, picker_args = _pick_models_interactive(
-        current_agent=getattr(args, "agent_model", ""),
-        current_sim=getattr(args, "sim_model", ""),
-        # Only pick an OpenRouter model for a role that actually runs opencode;
-        # a codex role ignores it.
-        pick_agent=(agent_mode == ActorMode.OPENCODE.value) and not agent_explicit,
-        pick_sim=(sim_mode == ActorMode.OPENCODE.value) and not sim_explicit,
-        allow_custom=allow_custom,
-    )
-    args.agent_model = agent
-    args.sim_model = sim
-    if forwarded_to_subprocess is not None:
-        for flag, value in picker_args:
-            forwarded_to_subprocess.extend([flag, value])
-
-    # ----- CLI reviewer (post-publish, subscription-bound) -----
-    # Banner-then-picker mirrors the OpenRouter-key flow above: when no
-    # CLI is on PATH, the hint banner explains the missing capability;
-    # otherwise we fall through to the normal picker.
-    if not cli_reviewer_explicit:
-        if available_clis:
-            print()
-            # When the value came from defaults.toml (not an explicit CLI
-            # flag), force the picker to run with the saved value as the
-            # Enter prefill. Otherwise an explicit flag value would
-            # short-circuit and the operator would never see the prompt.
-            prefill = getattr(args, "_defaults_cli_reviewer_prefill", None)
-            picker_flag_value = "auto" if prefill else getattr(args, "cli_reviewer", "auto")
-            chosen = cli_reviewer.resolve_choice(
-                flag_value=picker_flag_value,
-                available=available_clis,
-                tty=True,
-                saved_default=prefill,
-            )
-        else:
-            _print_no_cli_reviewer_banner()
-            chosen = "none"
-        args.cli_reviewer = chosen
-        if forwarded_to_subprocess is not None and chosen != "auto":
-            forwarded_to_subprocess.extend(["--cli-reviewer", chosen])
-
-    # ----- pre-flight ping (per-provider liveness probe) -----
-    # Zen: free-tier models occasionally land in the catalog while the
-    # operator's per-model quota is already spent. One tiny chat
-    # completion catches it now and lets the operator pick another
-    # model rather than burn the full 1800s timeout on turn one.
-    # OpenRouter: pasted slugs are easy to typo or to copy without the
-    # `openrouter/` provider prefix; cross-referencing OR's public
-    # catalog catches `Model not found` before launch.
-    probe_targets: list[tuple[str, str, str]] = []  # (role, model, kind)
-    seen_models: set[str] = set()
-    for role, model in (
-        ("agent", args.agent_model),
-        ("sim", args.sim_model),
+    print(f"  {_d('pre-flight …')}")
+    failed = False
+    roles_by_name: dict[str, list[str]] = {}
+    for role_name, name in (
+        ("agent", agent_name),
+        ("sim", sim_name),
+        (f"reviewer ({reviewer})", reviewer if reviewer in ("claude", "codex") else None),
     ):
-        if not model:
-            continue
-        if model.startswith("opencode/"):
-            kind = "zen"
-        elif model.startswith("openrouter/"):
-            kind = "openrouter"
+        if name in ("claude", "codex"):
+            roles_by_name.setdefault(name, []).append(role_name)
+
+    for tool_name, roles in roles_by_name.items():
+        role_label = " + ".join(roles)
+        if tool_name == "claude":
+            line = _claude_token_line()
+            ok = "MISSING" not in line
         else:
-            continue
-        if model in seen_models:
-            continue
-        seen_models.add(model)
-        probe_targets.append((role, model, kind))
-    quota_blockers: list[tuple[str, str]] = []
-    unknown_or_models: list[tuple[str, str]] = []
-    or_catalog: set[str] | None = None
-    or_catalog_fetched = False
-    if probe_targets:
-        print()
-        print(f"  {_d('pre-flight ping …')}")
-        for role, model, kind in probe_targets:
-            if kind == "zen":
-                short = model.rsplit("/", 1)[-1]
-                status, detail = _probe_zen_model(model)
-                if status == "ok":
-                    print(f"    {role:<6}  {_d(short)}  ✓")
-                elif status == "quota_exhausted":
-                    print(f"    {role:<6}  {_b(short)}  ✗  free-tier quota exhausted")
-                    quota_blockers.append((role, model))
-                else:
-                    print(f"    {role:<6}  {_d(short)}  ?  {_d(detail or 'probe failed')}")
-            else:  # openrouter
-                short = model[len("openrouter/") :]
-                if not or_catalog_fetched:
-                    or_catalog = _fetch_openrouter_catalog()
-                    or_catalog_fetched = True
-                if or_catalog is None:
-                    print(f"    {role:<6}  {_d(short)}  ?  {_d('OpenRouter catalog unavailable')}")
-                elif short in or_catalog:
-                    print(f"    {role:<6}  {_d(short)}  ✓")
-                else:
-                    print(f"    {role:<6}  {_b(short)}  ✗  not found on OpenRouter")
-                    unknown_or_models.append((role, model))
+            line = _codex_token_line()
+            ok = "MISSING" not in line
+        mark = "✓" if ok else "✗"
+        print(f"    {role_label:<16}  {tool_name:<8}  {mark}  {_d(line)}")
+        if not ok:
+            failed = True
 
-    # ----- recap (decision-free) -----
-    publish = getattr(args, "publish_mode", "stub")
-    cost = getattr(args, "max_cost_usd", None)
-    wall = getattr(args, "max_wall_minutes", None)
+    if failed:
+        print()
+        return 1
+    return 0
+
+
+def _recap_and_confirm(args: argparse.Namespace, *, source_url: str) -> bool:
+    """Print one-line recap and prompt Y/n. Returns True to proceed."""
+    agent_name = getattr(args, "agent", "fake")
+    sim_name = getattr(args, "sim", None) or agent_name
+    reviewer = getattr(args, "cli_reviewer", "none")
     base = getattr(args, "base", "?")
-    cli_reviewer_choice = getattr(args, "cli_reviewer", "none")
+    publish_mode = getattr(args, "publish_mode", "stub")
+
+    # Short repo slug
+    repo_slug = source_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    parts = [f"{agent_name} (agent)", f"{sim_name} (sim)", f"{reviewer} (reviewer)"]
+    combo = " + ".join(parts)
 
     print()
-    print(_RULE)
-    print(f"  {_b('Run summary')}")
-    print()
-    print(f"  target          {source_url}")
-    print(f"  branch          {base}  {_d(f'({publish})')}")
-    print()
-    agent_mode = getattr(args, "actor", ActorMode.OPENCODE.value)
-    sim_mode = getattr(args, "sim_actor", None) or agent_mode
-    codex_model = getattr(args, "codex_model", "gpt-5.5")
-    codex_effort = getattr(args, "codex_effort", "high")
-    cli_tool = getattr(args, "cli_tool", "codex")
-    sim_cli_tool = getattr(args, "sim_cli_tool", None) or cli_tool
-    claude_model = getattr(args, "claude_model", "")
-    claude_effort = getattr(args, "claude_effort", "high")
-    _label_kw = dict(
-        codex_model=codex_model,
-        codex_effort=codex_effort,
-        claude_model=claude_model,
-        claude_effort=claude_effort,
-    )
-    if agent_mode != sim_mode or cli_tool != sim_cli_tool:
-        agent_lbl = agent_mode if agent_mode != ActorMode.CLI.value else cli_tool
-        sim_lbl = sim_mode if sim_mode != ActorMode.CLI.value else sim_cli_tool
-        print(f"  runtime         {_b(f'agent={agent_lbl}, sim={sim_lbl}')}")
-    print(
-        f"  agent           "
-        f"{_b(ModelSpec.build(mode=agent_mode, opencode_model=args.agent_model, cli_tool=cli_tool, **_label_kw).display())}"
-    )
-    print(
-        f"  sim             "
-        f"{_b(ModelSpec.build(mode=sim_mode, opencode_model=args.sim_model, cli_tool=sim_cli_tool, **_label_kw).display())}"
-    )
-    if cli_reviewer_choice in ("codex", "claude"):
-        print(f"  code-review     {_b(cli_reviewer_choice)}  {_d('(post-publish, subscription)')}")
-    elif cli_reviewer_choice == "none":
-        print(f"  code-review     {_d('skipped')}")
-    caps_parts: list[str] = []
-    if cost is not None:
-        caps_parts.append(f"${cost}")
-    if wall is not None:
-        caps_parts.append(f"{wall}m wall")
-    if caps_parts:
-        print(f"  caps            {_d('  ·  '.join(caps_parts))}")
-
-    # Network posture mirrors preflight._check_network_policy: an explicit
-    # proxy or docker-network wins over the --allow-open-egress fallback.
-    http_proxy = getattr(args, "http_proxy", None)
-    https_proxy = getattr(args, "https_proxy", None)
-    docker_network = getattr(args, "docker_network", None)
-    allow_open_egress = getattr(args, "allow_open_egress", False)
-    if http_proxy or https_proxy:
-        network_label = "proxy"
-    elif docker_network:
-        network_label = f"network: {docker_network}"
-    elif allow_open_egress:
-        network_label = "open egress"
+    print(f"  contremaitre: {_b(combo)} → {_d(repo_slug)}  [branch: {base}]")
+    if publish_mode == "gh":
+        action = "run autonomously and open a draft PR"
     else:
-        network_label = "not configured"
-    print(f"  network         {_d(network_label)}")
-    print(_RULE)
-    print()
-
-    if quota_blockers or unknown_or_models:
-        if quota_blockers:
-            print(f"  {_b('free-tier quota exhausted for:')}")
-            for role, model in quota_blockers:
-                print(f"    {role}  {model}")
-            print(
-                f"  {_d('try again later, or pick a different model with --' + 'agent-model/--sim-model.')}"
-            )
-            print()
-        if unknown_or_models:
-            print(f"  {_b('unknown OpenRouter model:')}")
-            for role, model in unknown_or_models:
-                print(f"    {role}  {model}")
-            print(f"  {_d('check the slug at openrouter.ai/models, or pick a different model.')}")
-            print()
-        try:
-            reply = input("  proceed anyway? [y/N] ").strip().lower()
-        except EOFError:
-            return False
-        print()
-        return reply in ("y", "yes")
-
-    print(f"  {_d('Contremaitre will run autonomously and create a Draft PR on')} {source_url}")
-    print(f"  {_d('Ctrl-C to abort')}")
-    print()
+        action = "run autonomously (dry run — no PR will be published)"
+    print(f"  Will {action}. Continue? [Y/n] ", end="", flush=True)
     try:
-        reply = input("  proceed? [Y/n] ").strip().lower()
+        reply = input().strip().lower()
     except EOFError:
+        print()
         return True
     print()
     return reply in ("", "y", "yes")
 
 
-def _fetch_openrouter_catalog(timeout: float = 8.0) -> set[str] | None:
-    """Set of available OpenRouter model ids, or None on failure.
+def _models_cmd(_args) -> int:
+    """List available OpenCode Zen free models with live quota status."""
+    free = _fetch_free_models()
+    if free is None:
+        print("contremaitre models: catalog unavailable (network error)", file=sys.stderr)
+        return 1
+    if not free:
+        print("contremaitre models: no free models in catalog")
+        return 0
 
-    The `/api/v1/models` endpoint is unauthenticated and returns the
-    full public catalog. Used to validate pasted OpenRouter slugs in
-    pre-flight — catches typos and the missing-prefix shape (e.g. a
-    raw `qwen/qwen3.7-max` paste that opencode would later reject as
-    `Model not found`) without burning a real completion. Returns None
-    on network or parse failure so the picker degrades to a soft `?`
-    rather than blocking a run that would otherwise launch fine.
-    """
-
-    import urllib.error
-    import urllib.request
-
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/models",
-        headers={"User-Agent": "contremaitre"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError):
-        return None
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        return None
-    ids: set[str] = set()
-    for entry in data:
-        if isinstance(entry, dict):
-            mid = entry.get("id")
-            if isinstance(mid, str) and mid:
-                ids.add(mid)
-    return ids
+    print()
+    print(f"  {_b('OpenCode Zen free models')}")
+    print()
+    width = len(str(len(free) - 1))
+    for i, m in enumerate(free):
+        model_id = m["id"]
+        full = f"opencode/{model_id}"
+        status, _ = _probe_zen_model(full)
+        mark = "✓" if status == "ok" else ("✗ quota" if status == "quota_exhausted" else "?")
+        print(f"  {i:>{width}}  {model_id:<40}  {mark}")
+    print()
+    print(f"  {_d('Use: --agent-model opencode/<id>  or set AGENT_MODEL in Makefile')}")
+    print()
+    return 0
 
 
 def _probe_zen_model(model: str, *, timeout: float = 10.0) -> tuple[str, str | None]:
@@ -1452,8 +945,8 @@ def _probe_zen_model(model: str, *, timeout: float = 10.0) -> tuple[str, str | N
 def _ensure_default_image_built(config: RunConfig) -> int:
     """Auto-build a known contremaitre image before any real (non-fake) run.
 
-    Fires whenever the agent OR the SIM needs a container — `--actor opencode`,
-    `--actor cli` (codex), or a mixed/composite pair — and the image name
+    Fires whenever the agent OR the SIM needs a container — `--agent opencode`,
+    `--agent claude|codex`, or a mixed/composite pair — and the image name
     matches a shipped variant. The image is shared by both roles, so a single
     build covers the mix. Rebuilds when:
     - The image doesn't exist, OR
@@ -1786,6 +1279,27 @@ def _doctor_cmd(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def _resolve_actor_fields(args: argparse.Namespace) -> dict:
+    """Translate --agent / --sim into RunConfig actor_mode / cli_tool fields."""
+    agent_name = getattr(args, "agent", "fake")
+    sim_name = getattr(args, "sim", None) or agent_name
+    actor_mode, cli_tool = _agent_name_to_runtime(agent_name)
+    sim_actor_mode_val, sim_cli_tool_val = _agent_name_to_runtime(sim_name)
+    # Only record a SIM override when it differs from the agent.
+    resolved_sim = sim_actor_mode_val if sim_actor_mode_val != actor_mode else None
+    resolved_sim_cli = sim_cli_tool_val if sim_cli_tool_val != cli_tool else None
+    return {
+        "actor_mode": actor_mode,
+        "cli_tool": cli_tool or "codex",
+        "sim_actor_mode": resolved_sim,
+        "sim_cli_tool": resolved_sim_cli,
+        "codex_model": getattr(args, "codex_model", "gpt-5.5"),
+        "codex_effort": getattr(args, "codex_effort", "high"),
+        "claude_model": getattr(args, "claude_model", ""),
+        "claude_effort": getattr(args, "claude_effort", "high"),
+    }
+
+
 def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
     caps = Caps(
         max_turns=getattr(args, "max_turns", 30),
@@ -1807,14 +1321,7 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         sim_model=getattr(args, "sim_model", "openrouter/deepseek/deepseek-v4-flash"),
         cli_reviewer=getattr(args, "cli_reviewer", "none"),
         max_cli_review_rounds=getattr(args, "max_cli_review_rounds", 3),
-        actor_mode=ActorMode(args.actor),
-        cli_tool=getattr(args, "cli_tool", "codex"),
-        codex_model=getattr(args, "codex_model", "gpt-5.5"),
-        codex_effort=getattr(args, "codex_effort", "high"),
-        claude_model=getattr(args, "claude_model", ""),
-        claude_effort=getattr(args, "claude_effort", "high"),
-        sim_actor_mode=(ActorMode(args.sim_actor) if getattr(args, "sim_actor", None) else None),
-        sim_cli_tool=getattr(args, "sim_cli_tool", None),
+        **_resolve_actor_fields(args),
         check_cmds=tuple(getattr(args, "check_cmd", [])),
         sim_scenario=getattr(args, "sim_scenario", "approved"),
         agent_scenario=getattr(args, "agent_scenario", "normal"),
@@ -1836,7 +1343,6 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         http_proxy=args.http_proxy,
         https_proxy=args.https_proxy,
         no_proxy=args.no_proxy,
-        skip_preflight=getattr(args, "skip_preflight", False),
         allow_open_egress=args.allow_open_egress,
         skip_openrouter_key_check=args.skip_openrouter_key_check,
         allow_unlimited_openrouter_key=args.allow_unlimited_openrouter_key,
@@ -1861,84 +1367,6 @@ def _fixture_init_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
-def _apply_saved_defaults(args: argparse.Namespace, *, argv: list[str]) -> None:
-    """Overlay `defaults.toml` onto `args` for any field the operator left blank.
-
-    Loaded BEFORE the launch screen runs, so the picker prefills already
-    show the saved values. We never override an explicit CLI flag —
-    presence is checked against `argv`, not against `args.X != default`
-    (the argparse default is itself a fallback we want to be supersedable
-    by the saved file).
-    """
-
-    saved = _defaults.load()
-    if (
-        saved.agent_model
-        and not _has_flag_in(argv, "--agent-model")
-        and hasattr(args, "agent_model")
-    ):
-        args.agent_model = saved.agent_model
-    if saved.sim_model and not _has_flag_in(argv, "--sim-model") and hasattr(args, "sim_model"):
-        args.sim_model = saved.sim_model
-    if (
-        saved.cli_reviewer
-        and not _has_flag_in(argv, "--cli-reviewer")
-        and hasattr(args, "cli_reviewer")
-    ):
-        # Two attributes for two paths: `cli_reviewer` carries the
-        # value through `--no-prompt` / yes_mode (no picker), while
-        # `_defaults_cli_reviewer_prefill` tells the interactive picker
-        # to still PROMPT but make Enter accept the saved value
-        # instead of skipping. Without the prefill, the interactive
-        # branch would short-circuit on "codex" / "claude"
-        # (treated as explicit) and never ask the operator.
-        args.cli_reviewer = saved.cli_reviewer
-        args._defaults_cli_reviewer_prefill = saved.cli_reviewer
-    # Runtime selection: a saved `actor`/`sim_actor` seeds the launch-screen
-    # runtime picker (and the non-interactive default). Already normalized to
-    # runtime values by `_defaults.load` ("codex" → "cli").
-    if saved.actor and not _has_flag_in(argv, "--actor") and hasattr(args, "actor"):
-        args.actor = saved.actor
-    if saved.sim_actor and not _has_flag_in(argv, "--sim-actor") and hasattr(args, "sim_actor"):
-        args.sim_actor = saved.sim_actor
-    # The operator-facing actor name ("codex"/"claude") carries the CLI tool; a
-    # saved `actor = "claude"` thus seeds args.cli_tool, since both normalize to
-    # the "cli" runtime above.
-    if saved.cli_tool and not _has_flag_in(argv, "--cli-tool") and hasattr(args, "cli_tool"):
-        args.cli_tool = saved.cli_tool
-    # `sim_actor = "claude"` (or "codex") in defaults.toml carries the SIM's CLI
-    # tool, enabling a saved cross-CLI mix.
-    if (
-        saved.sim_cli_tool
-        and not _has_flag_in(argv, "--sim-cli-tool")
-        and hasattr(args, "sim_cli_tool")
-    ):
-        args.sim_cli_tool = saved.sim_cli_tool
-    if (
-        saved.codex_model
-        and not _has_flag_in(argv, "--codex-model")
-        and hasattr(args, "codex_model")
-    ):
-        args.codex_model = saved.codex_model
-    if (
-        saved.codex_effort
-        and not _has_flag_in(argv, "--codex-effort")
-        and hasattr(args, "codex_effort")
-    ):
-        args.codex_effort = saved.codex_effort
-    if (
-        saved.claude_model
-        and not _has_flag_in(argv, "--claude-model")
-        and hasattr(args, "claude_model")
-    ):
-        args.claude_model = saved.claude_model
-    if (
-        saved.claude_effort
-        and not _has_flag_in(argv, "--claude-effort")
-        and hasattr(args, "claude_effort")
-    ):
-        args.claude_effort = saved.claude_effort
-
 
 def _extract_flag_value(args: list[str], flag: str, default: str) -> str:
     """Find a `--flag value` or `--flag=value` pair in a passthrough arg list."""
@@ -1950,13 +1378,6 @@ def _extract_flag_value(args: list[str], flag: str, default: str) -> str:
         if item.startswith(prefix):
             return item[len(prefix) :]
     return default
-
-
-def _has_flag_in(argv: list[str], flag: str) -> bool:
-    """True iff `--flag value` or `--flag=value` is present in argv."""
-
-    prefix = f"{flag}="
-    return any(item == flag or item.startswith(prefix) for item in argv)
 
 
 def _remove_flag(args: list[str], flag: str) -> None:
@@ -1984,6 +1405,53 @@ def _set_flag_value(args: list[str], flag: str, value: str) -> None:
 
     _remove_flag(args, flag)
     args.extend([flag, value])
+
+
+def _normalize_openrouter_slug(raw: str) -> str:
+    """Normalize a user-typed model slug for opencode dispatch.
+
+    Copy-paste from openrouter.ai/models gives `<vendor>/<model>` — prepend
+    `openrouter/` so opencode can dispatch. Already-prefixed slugs
+    (`openrouter/…`, `opencode/…`) are passed through unchanged.
+    """
+    slug = raw.strip()
+    if not slug:
+        return ""
+    if "/" in slug and not slug.startswith(("openrouter/", "opencode/")):
+        return f"openrouter/{slug}"
+    return slug
+
+
+def _fetch_openrouter_catalog() -> set[str] | None:
+    """Return the set of model IDs from the OpenRouter catalog.
+
+    Used to validate a user-typed slug against the live catalog before
+    committing it as the run model. Returns None on any network or parse
+    error — callers treat that as "catalog unavailable, skip validation".
+    """
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/models",
+        headers={"User-Agent": "contremaitre"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return None
+    ids: set[str] = set()
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        mid = entry.get("id")
+        if isinstance(mid, str) and mid:
+            ids.add(mid)
+    return ids
 
 
 def _fetch_free_models() -> list[dict] | None:
@@ -2055,35 +1523,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         forwarded = forwarded[1:]
     run_slug = _extract_flag_value(forwarded, "--run-slug", "run")
     runs_root = Path(_extract_flag_value(forwarded, "--runs-root", ".contremaitre/runs"))
-    # Saved defaults seed the prefills before any flag scan — explicit
-    # forwarded flags (--agent-model, etc.) still win because
-    # `_extract_flag_value` finds them first.
-    _saved = _defaults.load()
-    agent_model = _extract_flag_value(
-        forwarded,
-        "--agent-model",
-        _saved.agent_model or "openrouter/deepseek/deepseek-v4-flash",
-    )
-    sim_model = _extract_flag_value(
-        forwarded,
-        "--sim-model",
-        _saved.sim_model or "openrouter/deepseek/deepseek-v4-flash",
-    )
-    cli_reviewer_choice = _extract_flag_value(
-        forwarded, "--cli-reviewer", _saved.cli_reviewer or "auto"
-    )
-    docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
-    # The TUI is a real-run surface: default the agent runtime to a real actor
-    # (opencode) rather than `contremaitre run`'s `fake` fixture default, so the
-    # per-role runtime picker actually appears on a bare `tui run` (the picker
-    # early-returns on a `fake` default). An explicit `--actor fake` still
-    # forces a fixture run.
-    actor = _extract_flag_value(forwarded, "--actor", _saved.actor or ActorMode.OPENCODE.value)
-    sim_actor = _extract_flag_value(forwarded, "--sim-actor", _saved.sim_actor or "") or None
-    # Confirmation has to happen BEFORE the subprocess spawn, because once
-    # Textual attaches, stdin is owned by the TUI and an `input()` in the
-    # subprocess would block invisibly. Pass --yes downstream so the
-    # subprocess doesn't re-prompt.
+
     fork = _extract_flag_value(forwarded, "--fork", "")
     upstream = _extract_flag_value(forwarded, "--upstream", "")
     base = _extract_flag_value(forwarded, "--base", "")
@@ -2094,6 +1534,11 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     if not base:
         print("contremaitre tui run: --base is required", file=sys.stderr)
         return 1
+
+    # TUI defaults agent to opencode for real runs (not fake)
+    agent_name = _extract_flag_value(forwarded, "--agent", "opencode")
+    sim_name = _extract_flag_value(forwarded, "--sim", "") or None
+
     repo_cache_raw = _extract_flag_value(forwarded, "--repo-cache", "")
     cache_path = (
         Path(repo_cache_raw).resolve() if repo_cache_raw else _default_cache_path(source_url)
@@ -2103,96 +1548,76 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"contremaitre: {exc}", file=sys.stderr)
         return 1
+
+    # Confirmation BEFORE subprocess spawn: once Textual attaches, stdin is owned
+    # by the TUI and interactive prompts in the subprocess would block invisibly.
+    agent_model = _extract_flag_value(forwarded, "--agent-model", "")
+    sim_model = _extract_flag_value(forwarded, "--sim-model", "")
+
+    if agent_name == "opencode" and not agent_model:
+        try:
+            agent_model = _pick_zen_model_interactive("agent")
+        except KeyboardInterrupt:
+            print("aborted", file=sys.stderr)
+            return 130
+        _set_flag_value(forwarded, "--agent-model", agent_model)
+
+    sim_is_opencode = (sim_name or agent_name) == "opencode"
+    if sim_is_opencode and not sim_model:
+        try:
+            sim_model = _pick_zen_model_interactive("sim", default=agent_model or None)
+        except KeyboardInterrupt:
+            print("aborted", file=sys.stderr)
+            return 130
+        _set_flag_value(forwarded, "--sim-model", sim_model)
+
     confirm_args = argparse.Namespace(
-        yes=("--yes" in forwarded or "-y" in forwarded),
-        no_prompt=("--no-prompt" in forwarded),
+        agent=agent_name,
+        sim=sim_name,
+        cli_reviewer=_extract_flag_value(forwarded, "--cli-reviewer", "auto"),
         base=base,
-        fork=fork or None,
-        upstream=upstream or None,
-        gh_repo=_extract_flag_value(forwarded, "--gh-repo", "") or None,
         publish_mode=_extract_flag_value(forwarded, "--publish-mode", PublishMode.STUB.value),
-        max_cost_usd=_extract_flag_value(forwarded, "--max-cost-usd", "?"),
-        max_wall_minutes=_extract_flag_value(forwarded, "--max-wall-minutes", "?"),
-        agent_model=agent_model,
-        sim_model=sim_model,
-        cli_reviewer=cli_reviewer_choice,
-        actor=actor,
-        sim_actor=sim_actor,
-        cli_tool=_extract_flag_value(forwarded, "--cli-tool", _saved.cli_tool or "codex"),
-        sim_cli_tool=_extract_flag_value(forwarded, "--sim-cli-tool", "")
-        or (_saved.sim_cli_tool or None),
         allow_open_egress=("--allow-open-egress" in forwarded),
         docker_network=_extract_flag_value(forwarded, "--docker-network", "") or None,
-        http_proxy=_extract_flag_value(forwarded, "--http-proxy", "") or None,
         https_proxy=_extract_flag_value(forwarded, "--https-proxy", "") or None,
     )
-    # Same story for cli_reviewer: a saved value should prefill the
-    # picker (Enter accepts it), not short-circuit it. Without this the
-    # TUI path would silently apply a saved `cli_reviewer` from the
-    # file without ever asking.
-    if _saved.cli_reviewer and not _has_flag_in(forwarded, "--cli-reviewer"):
-        confirm_args._defaults_cli_reviewer_prefill = _saved.cli_reviewer
+    rc = _preflight_presence_check(confirm_args)
+    if rc != 0:
+        return rc
+
     try:
-        if not _launch_screen(
-            args=confirm_args,
-            source_url=source_url,
-            argv_for_explicit_check=forwarded,
-            forwarded_to_subprocess=forwarded,
-        ):
+        if not _recap_and_confirm(confirm_args, source_url=source_url):
             print("aborted", file=sys.stderr)
             return 130
     except KeyboardInterrupt:
         print("aborted", file=sys.stderr)
         return 130
-    # Picker may have appended --agent-model / --sim-model to `forwarded`;
-    # refresh the locals so the TUI header displays the chosen models.
-    agent_model = _extract_flag_value(forwarded, "--agent-model", agent_model)
-    sim_model = _extract_flag_value(forwarded, "--sim-model", sim_model)
-    cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", cli_reviewer_choice)
-    # Fold the per-role runtime choice (the picker may have changed it) back
-    # into the subprocess flags. The picker writes confirm_args.actor /
-    # .sim_actor; `contremaitre run` reads --actor / --sim-actor.
-    _set_flag_value(forwarded, "--actor", getattr(confirm_args, "actor", actor))
-    resolved_sim = getattr(confirm_args, "sim_actor", sim_actor)
-    if resolved_sim:
-        _set_flag_value(forwarded, "--sim-actor", resolved_sim)
-    else:
-        _remove_flag(forwarded, "--sim-actor")
-    # The picker also sets confirm_args.cli_tool (codex vs claude) when a CLI
-    # runtime is chosen; fold it back too. `contremaitre run` reads --cli-tool,
-    # and without this the subprocess silently defaults to codex even when the
-    # operator picked claude (and the TUI header would mislabel the role).
-    resolved_actor_value = getattr(confirm_args, "actor", actor)
-    if ActorMode.CLI.value in (resolved_actor_value, resolved_sim or resolved_actor_value):
-        _set_flag_value(forwarded, "--cli-tool", getattr(confirm_args, "cli_tool", "codex"))
-    # The SIM may run a DIFFERENT CLI tool (codex agent + claude SIM, or reverse);
-    # fold that back too, or clear it when the SIM shares the agent's tool.
-    resolved_sim_cli_tool = getattr(confirm_args, "sim_cli_tool", None)
-    if resolved_sim_cli_tool:
-        _set_flag_value(forwarded, "--sim-cli-tool", resolved_sim_cli_tool)
-    else:
-        # Same tool as agent — pass it explicitly so _apply_saved_defaults in
-        # the non-TTY subprocess can't reload a stale sim_cli_tool from
-        # defaults.toml (e.g. saved "codex" blowing back in when user picked
-        # "claude" for both roles).
-        _set_flag_value(forwarded, "--sim-cli-tool", getattr(confirm_args, "cli_tool", "codex"))
-    if "--yes" not in forwarded and "-y" not in forwarded:
-        forwarded.append("--yes")
+
+    _maybe_provision_cli_egress(confirm_args)
+    if confirm_args.docker_network:
+        _set_flag_value(forwarded, "--docker-network", confirm_args.docker_network)
+    if confirm_args.https_proxy:
+        _set_flag_value(forwarded, "--https-proxy", confirm_args.https_proxy)
+
     if "--repo-cache" not in " ".join(forwarded):
         forwarded.extend(["--repo-cache", str(cache_path)])
+
+    # Ensure --agent is explicit in forwarded so the subprocess sees it
+    _set_flag_value(forwarded, "--agent", agent_name)
+
     run_cmd = [sys.executable, "-m", "contremaitre", "run", *forwarded]
-    # TUI header labels: a codex role shows its model + effort, not the (ignored)
-    # opencode slug carried in agent_model/sim_model.
-    resolved_actor = getattr(confirm_args, "actor", actor)
-    resolved_sim_mode = resolved_sim or resolved_actor
-    codex_model = _extract_flag_value(forwarded, "--codex-model", _saved.codex_model or "gpt-5.5")
-    codex_effort = _extract_flag_value(forwarded, "--codex-effort", _saved.codex_effort or "high")
-    cli_tool = _extract_flag_value(forwarded, "--cli-tool", _saved.cli_tool or "codex")
-    sim_cli_tool = _extract_flag_value(forwarded, "--sim-cli-tool", "") or cli_tool
-    claude_model = _extract_flag_value(forwarded, "--claude-model", _saved.claude_model or "")
-    claude_effort = _extract_flag_value(
-        forwarded, "--claude-effort", _saved.claude_effort or "high"
-    )
+
+    # TUI header labels
+    agent_model = _extract_flag_value(forwarded, "--agent-model", "")
+    sim_model = _extract_flag_value(forwarded, "--sim-model", "")
+    cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", "auto")
+    docker_image = _extract_flag_value(forwarded, "--docker-image", _DEFAULT_IMAGE)
+    codex_model = _extract_flag_value(forwarded, "--codex-model", "gpt-5.5")
+    codex_effort = _extract_flag_value(forwarded, "--codex-effort", "high")
+    claude_model = _extract_flag_value(forwarded, "--claude-model", "")
+    claude_effort = _extract_flag_value(forwarded, "--claude-effort", "high")
+    agent_mode, agent_cli_tool = _agent_name_to_runtime(agent_name)
+    sim_mode, sim_cli_tool = _agent_name_to_runtime(sim_name or agent_name)
     _label_kw = dict(
         codex_model=codex_model,
         codex_effort=codex_effort,
@@ -2206,15 +1631,15 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
         refresh_hz=args.refresh_hz,
         discover_timeout_s=args.discover_timeout,
         agent_model=ModelSpec.build(
-            mode=resolved_actor,
+            mode=agent_mode.value,
             opencode_model=agent_model,
-            cli_tool=cli_tool,
+            cli_tool=agent_cli_tool or "codex",
             **_label_kw,
         ),
         sim_model=ModelSpec.build(
-            mode=resolved_sim_mode,
+            mode=sim_mode.value,
             opencode_model=sim_model,
-            cli_tool=sim_cli_tool,
+            cli_tool=sim_cli_tool or "codex",
             **_label_kw,
         ),
         cli_reviewer=cli_reviewer_choice,

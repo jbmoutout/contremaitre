@@ -57,7 +57,7 @@ The orchestrator is runtime-agnostic: it owns the WORK/REVIEW loop, gates, and c
 
 **Per-role mixing.** The agent uses `config.actor_mode` + `config.cli_tool`; the SIM uses `config.sim_actor_mode` / `config.sim_cli_tool` when set, else the agent's. When the resolved (runtime, tool) pair differs between roles, `make_actor_runner` returns a [`CompositeActorRunner`](../contremaitre/actors.py) that routes `agent_turn` to one runner and `sim_turn` / `sim_review` to the other. This covers both axes of mixing: a CLI agent + a cheap opencode SIM (or the reverse), **and cross-CLI** — codex agent + claude SIM, or the reverse (two `CliActorRunner`s whose per-run homes are tool-namespaced, `codex-*-home` vs `claude-*-home`, so they never collide). Preflight validates the **union** of requirements: an OpenRouter key only if opencode is in play, and an auth check per *active* CLI tool (`_active_cli_tools`) — so a cross-CLI run validates both the codex token and the claude OAuth token; the egress lock applies if any CLI tool is active.
 
-**Selection.** `--actor {fake,opencode,cli}` + `--cli-tool {codex,claude}` + `--sim-actor …` on the CLI, the per-role launch-screen picker on a TTY (codex and claude are distinct entries that both set `cli` + the tool), or `actor` / `sim_actor` in `defaults.toml` (where `"codex"` / `"claude"` alias the `cli` runtime and carry the tool). A bare per-role model flag still feeds whichever runtime that role uses; a CLI tool ignores opencode-namespaced model names (see below).
+**Selection.** `--agent {fake,opencode,claude,codex}` + `--sim {opencode,claude,codex}` on the CLI (or `AGENT=` / `SIM=` in the Makefile). `claude` and `codex` map to `ActorMode.CLI` with the corresponding `cli_tool`; `opencode` maps to `ActorMode.OPENCODE`. A bare per-role model flag still feeds whichever runtime that role uses; a CLI tool ignores opencode-namespaced model names (see below).
 
 ## CLI actor (codex / claude): auth + egress lock
 
@@ -346,17 +346,18 @@ Live opencode and codex runs run preflight before worktree creation; the report 
 
 ## Launch sequence
 
-On TTY runs the launcher walks through (`cli.py:_launch_screen`):
+On TTY runs `_run_cmd` walks through:
 
-0. **Per-role runtime picker** (`_pick_runtimes_interactive`) — when `--actor` (or the saved default) is not `fake`, the screen opens by picking the agent then the SIM runtime: `opencode`, `codex`, or `claude` (codex/claude both map to the `cli` runtime and set `cli_tool`; Enter keeps the current choice). This is what makes a mixed run selectable interactively. A `fake` default skips the picker (fixture runs only).
-1. **OpenRouter key banner** — *opencode roles only.* Probes `$OPENROUTER_API_KEY` (or `--openrouter-env-var`), reports presence / limit / remaining via `GET /api/v1/key`. A pure-CLI run replaces steps 1–2 with a one-line **CLI status** (`_cli_status_lines`, dispatched on `cli_tool`): codex token validity (hours left) or claude `CLAUDE_CODE_OAUTH_TOKEN` presence, plus egress posture.
-2. **Model picker** — *opencode roles only.* Numbered list of OpenCode Zen free models, plus a paste box for OpenRouter slugs when a key is set. Picks agent → SIM in sequence. (codex roles take their model from `codex_model`, not this picker.)
-3. **CLI-reviewer availability banner** — detects `claude` / `codex` on PATH; prompts when `--cli-reviewer auto`.
-4. **Pre-flight ping** — probes the chosen Zen models via `_probe_zen_model()` so `FreeUsageLimitError` surfaces *before* the run starts; OpenRouter slugs are verified against the catalog fetch.
-5. **Run summary recap** — target URL, branch, per-role runtime, agent / SIM models (or codex model + effort), cli-reviewer choice, cost + wall caps, network posture (codex shows the auto-lock).
-6. **Confirmation prompt** — `Continue? [Y/n]`.
+1. **Clone** — `_ensure_local_clone` fetches `origin/<base>` into the repo cache (lazy, auto-created).
+2. **Zen model picker** — *opencode roles only, when `--agent-model` / `--sim-model` are absent and stdin is a TTY.* Numbered list of OpenCode Zen free models; a paste box for OpenRouter slugs. Non-TTY + opencode + no model → abort with an explicit error. CLI roles (claude/codex) skip this step entirely.
+3. **Pre-flight presence check** — one line per active role (agent, SIM, cli-reviewer):
+   - opencode role: liveness probe via `_probe_zen_model()` — surfaces `FreeUsageLimitError` before the run starts.
+   - CLI role: token presence check (codex: `~/.codex/auth.json` exists / not about to expire; claude: `CLAUDE_CODE_OAUTH_TOKEN` set). Full auth validation (expiry, key limits, network) runs inside `run()` after confirmation.
+4. **Recap + Y/n** — one-line summary: roles, models, target, branch, network posture. `Continue? [Y/n]` on TTY; non-TTY proceeds automatically.
+5. **Egress provision** — `_maybe_provision_cli_egress` if a CLI role is active with no explicit egress override.
+6. **Run** — `run(config)` — full preflight, worktree, orchestrator.
 
-Non-TTY runs and `-y` / `--yes` auto-confirm. `--no-prompt` skips the pickers even on TTY and uses `.contremaitre/defaults.toml` (or the hardcoded fallback below). All three modes still emit `[info]` log lines so the run log explains what was auto-assumed.
+All modes still emit `[info]` log lines so the run log explains what was assumed.
 
 ## Model selection
 
@@ -365,9 +366,9 @@ For an **opencode** role, two model sources are picked at launch from a single T
 - **OpenCode Zen** — free models served by OpenCode itself. Catalog is fetched live at launch via `_fetch_free_models()` from `https://models.dev/api.json` (the same source the opencode binary uses, so the picker never offers a slug the binary will reject). Filtered to entries with `-free`-suffixed IDs plus a small allow-list (e.g. `big-pickle`). Slugs are `opencode/<id>`. No auth — the opencode binary has built-in routing to Zen. Quota probe hits `https://opencode.ai/zen/v1/chat/completions` to surface `FreeUsageLimitError` before the run starts. Why not OpenRouter `:free` slugs: those route through third-party providers whose daily quota is shared across all OpenRouter users, producing `"Out of credits"` mid-run.
 - **OpenRouter** — paid models. Requires `OPENROUTER_API_KEY` (`.env`, cwd or repo root; never inherited from ambient host env). Any `openrouter/<provider>/<model>` slug can be pasted at the picker prompt. Preflight does `GET https://openrouter.ai/api/v1/key` and blocks the run if the key has no credit limit (unless `--allow-unlimited-openrouter-key`).
 
-For a **codex** role there is no picker: the model is `config.codex_model` (default `gpt-5.5`, settable via `--codex-model` or `codex_model` in `defaults.toml`) and reasoning effort is `config.codex_effort` (default `high`, `minimal|low|medium|high|xhigh`). codex rejects opencode-namespaced names on a ChatGPT account, so a namespaced `--agent-model`/`--sim-model` is ignored for that role and the codex default is used; only a bare codex-native name passes through. No API key — codex runs on the operator's subscription. See [CLI actor → Model + reasoning effort](#model--reasoning-effort).
+For a **codex** role there is no picker: the model is `config.codex_model` (default `gpt-5.5`, settable via `--codex-model` or `CODEX_MODEL` in the Makefile) and reasoning effort is `config.codex_effort` (default `high`, `minimal|low|medium|high|xhigh`). codex rejects opencode-namespaced names on a ChatGPT account, so a namespaced `--agent-model`/`--sim-model` is ignored for that role and the codex default is used; only a bare codex-native name passes through. No API key — codex runs on the operator's subscription. See [CLI actor → Model + reasoning effort](#model--reasoning-effort).
 
-Hardcoded fallback when the picker is skipped (`--no-prompt` + no `defaults.toml`): `openrouter/deepseek/deepseek-v4-flash` ([models.py](../contremaitre/models.py#L99-L100)) for opencode, `gpt-5.5` for codex. The opencode default requires an OpenRouter key; non-interactive operators on free tier should set `.contremaitre/defaults.toml` to a Zen slug (or `actor = "codex"`).
+Non-interactive opencode runs: pass `--agent-model` explicitly (or set `AGENT_MODEL` in the Makefile) to skip the picker. On TTY without a model, the picker appears.
 
 Containers see `OPENROUTER_API_KEY` only when set on the host. The opencode binary reads the key when invoking an OpenRouter model; for Zen models the key is unused. Provider-side spend caps remain the real guardrail — the `--max-cost-usd` flag is a *recorded-cost* watcher, not a hard budget enforcer.
 
@@ -377,15 +378,14 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 
 - [`actors.py`](../contremaitre/actors.py) — `ActorRunner` protocol, `FakeActorRunner` + `OpencodeActorRunner`, the `make_actor_runner` factory, and `CompositeActorRunner` (routes the agent turn to one runtime and SIM/review turns to another for a mixed run). Opencode containers run detached with role labels; output streamed via `docker logs -f`, exit awaited via `docker wait`.
 - [`checks.py`](../contremaitre/checks.py) — `--check-cmd` runner. OPENCODE mode: sidecar container with the run's worktree + deps volume, 600s timeout. FAKE mode: runs on the host.
-- [`cli.py`](../contremaitre/cli.py) — argparse, subcommand dispatch, auto-derived clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/`, launch-screen banners + per-role runtime picker + codex token/egress status, codex egress auto-provision (`_maybe_provision_cli_egress`), image staleness rebuild (compares `contremaitre.dockerfile-sha256` label).
+- [`cli.py`](../contremaitre/cli.py) — argparse, subcommand dispatch (`run`, `doctor`, `models`, `fixture`, `image`, `tui`, `cleanup`, `eval`), auto-derived clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/`, slim launch sequence (Zen picker → pre-flight presence check → recap+Y/n → egress provision), codex egress auto-provision (`_maybe_provision_cli_egress`), image staleness rebuild (compares `contremaitre.dockerfile-sha256` label).
 - [`cli_actor.py`](../contremaitre/cli_actor.py) — `CliActorRunner` + the `CliDriver` abstraction (`CodexDriver` / `ClaudeDriver`): drives `codex` or `claude` headless in the per-run container as agent / SIM / reviewer. The runner owns shared orchestration (egress lock, per-run home, detached run + stdout→raw_export, timestamp back-fill, session-attr, transcript, docker wrapper); each driver owns its auth (codex: neutered refresh token, per-turn re-seed, host-side expiry refresh / claude: env OAuth token forwarded by name, empty home), in-container argv, and event parsing. See [CLI actor (codex / claude)](#cli-actor-codex--claude-auth--egress-lock).
 - [`cli_egress.py`](../contremaitre/cli_egress.py) (+ [`cli_egress_squid.conf`](../contremaitre/cli_egress_squid.conf)) — turnkey two-layer egress lock for codex: an `--internal` docker network + an allowlist squid proxy (`ensure_egress_proxy`). Idempotent + shared across runs; recreates the proxy on squid-conf hash drift (`contremaitre.squid-sha256` label).
 - [`cli_reviewer.py`](../contremaitre/cli_reviewer.py) — post-publish CLI review loop helpers: prompt assembly (`build_prompt` with round context), verdict parsing (`parse_verdict`, `extract_required_changes`), model extraction, H3 metadata header (`format_header`), `gh pr comment` posting, worst-of-N verdict → `gh api` commit-status projection (context `contremaitre/cli-review`). The reviewer itself runs via `CliActorRunner.cli_reviewer_turn()` in Docker; this module owns only the stateless helpers + host-side `gh` calls.
 - [`costs.py`](../contremaitre/costs.py) — recorded-cost extraction from JSONL streams; provider-side limits remain the real guardrail.
-- [`defaults.py`](../contremaitre/defaults.py) — operator picker prefills from `.contremaitre/defaults.toml` (cwd-local) or XDG fallback. Keys: `actor` / `sim_actor` (with `codex`/`claude` → `cli` aliases that also derive `cli_tool`), `codex_model`, `codex_effort`, `claude_model`, `claude_effort`, `agent_model`, `sim_model`, `cli_reviewer`. Hand-edited TOML; missing / malformed / unknown-enum values degrade to empty (never raise).
 - [`diffscan.py`](../contremaitre/diffscan.py) — deterministic forbidden-path scanner against the working diff.
 - [`envfile.py`](../contremaitre/envfile.py) — dependency-free `.env` loader; shell env wins, never overwritten.
-- [`eval.py`](../contremaitre/eval.py) — v0 regression canary against `golden_cases/<id>/`. Subprocess-invokes `contremaitre run --actor opencode` so the production launch path is canaried as-is. Extracts a two-layer scorecard (headline + diagnostic) from artifacts the orchestrator already writes, aggregates n samples into a cell, compares against the (case, config) baseline. Generalizable methodology principles: [golden_cases/README.md](../golden_cases/README.md#methodology-notes).
+- [`eval.py`](../contremaitre/eval.py) — v0 regression canary against `golden_cases/<id>/`. Subprocess-invokes `contremaitre run --agent opencode` so the production launch path is canaried as-is. Extracts a two-layer scorecard (headline + diagnostic) from artifacts the orchestrator already writes, aggregates n samples into a cell, compares against the (case, config) baseline. Generalizable methodology principles: [golden_cases/README.md](../golden_cases/README.md#methodology-notes).
 - [`evaluator.py`](../contremaitre/evaluator.py) — gate-first PR-eval writer + non-blocking flow-use observability. `executable_confidence` is `null` (not `0.0`) when no `--check-cmd` is configured.
 - [`events.py`](../contremaitre/events.py) — guardrail-event name constants. Single source of truth so writer + reader stay aligned at import time.
 - [`extract.py`](../contremaitre/extract.py) — post-run artifact extraction: subagent markdown files (one per `task` tool-use), files written via `write` / `edit` / `apply_patch`, edit-accumulation `.edits.md` files, scaffold salvage.
@@ -598,27 +598,22 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--upstream URL` | — | Canonical (read-only) remote, mounted as `upstream`. Preferred over `--fork` for cloning when set. |
 | `--gh-repo OWNER/REPO` | — | Override the `gh pr create --repo` target (cross-fork PRs). |
 | `--branch-prefix STR` | `refactor` | Prefix for generated branch names. |
-| `--agent-model SLUG` | `openrouter/deepseek/deepseek-v4-flash` | OpenRouter / OpenCode model slug for the agent (ignored in `--actor fake`; a codex agent ignores namespaced slugs and uses `--codex-model`). |
-| `--sim-model SLUG` | `openrouter/deepseek/deepseek-v4-flash` | Model for the SIM. Independent default; pickable separately from `--agent-model`. |
-| `--cli-reviewer auto\|codex\|claude\|none` | `auto` | Post-publish CLI review loop tool. `auto` detects + prompts on TTY; `none` skips. |
-| `--max-cli-review-rounds INT` | `3` | Max post-publish review + revision rounds before `PR_NEEDS_HUMAN`. |
-| `--actor fake\|opencode\|cli` | `fake` | Per-run **agent** runtime: `fake` (smoke), `opencode` (live model), `cli` (codex on your subscription). |
-| `--sim-actor fake\|opencode\|cli` | (same as `--actor`) | Override the **SIM** runtime, enabling a mixed run (e.g. codex agent + opencode SIM, or the reverse). |
-| `--sim-cli-tool codex\|claude` | (same as `--cli-tool`) | Override the **SIM's** CLI tool when it runs `cli`, enabling a cross-CLI run (codex agent + claude SIM, or the reverse). |
-| `--cli-tool codex\|claude` | `codex` | Which frontier CLI a `cli` role drives: `codex` (ChatGPT plan) or `claude` (Claude plan, needs `CLAUDE_CODE_OAUTH_TOKEN`). |
+| `--agent fake\|opencode\|claude\|codex` | `fake` | Per-run **agent** runtime. `fake` = smoke fixture; `opencode` = live model; `claude` / `codex` = subscription CLI headless. |
+| `--sim opencode\|claude\|codex` | (same as `--agent`) | Override the **SIM** runtime, enabling mixed runs (e.g. `--agent codex --sim opencode`). |
+| `--agent-model SLUG` | — | OpenRouter / OpenCode model slug for an opencode agent role. Omit to pick interactively on TTY. |
+| `--sim-model SLUG` | — | Model for an opencode SIM role. Omit to pick interactively (picker proposes `--agent-model` as default). |
 | `--codex-model NAME` | `gpt-5.5` | codex-native model for a codex role (namespaced `--agent/sim-model` are rejected by codex and fall back to this). |
 | `--codex-effort minimal\|low\|medium\|high\|xhigh` | `high` | codex reasoning effort, pinned via `-c model_reasoning_effort` on every codex turn. |
 | `--claude-model NAME` | _(empty)_ | claude model for a claude role (e.g. `opus`); empty uses the `~/.claude` account default. |
 | `--claude-effort low\|medium\|high\|max` | `high` | claude effort, pinned via `--effort` on every claude turn. |
+| `--cli-reviewer auto\|codex\|claude\|none` | `auto` | Post-publish CLI review loop tool. `auto` detects + prompts on TTY; `none` skips. |
+| `--max-cli-review-rounds INT` | `3` | Max post-publish review + revision rounds before `PR_NEEDS_HUMAN`. |
 | `--run-slug STR` | `run` | Identifier for `<runs-root>/<run-id>/` naming. |
 | `--check-cmd CMD` | — | Executable check command, repeatable; blocks publication on failure. |
 | `--publish-mode stub\|gh` | `stub` | `stub` dry-runs everything except `git push` / `gh pr create`. |
-| `-y` / `--yes` | False | Skip the pre-launch Y/n confirmation. Auto-implied in non-TTY. |
-| `--no-prompt` | False | Skip the interactive pickers entirely (uses `defaults.toml` or hardcoded fallbacks). Implies `--yes`. |
 | `--keep-worktree` | False | Preserve the worktree after the run. |
 | `--simulate-drift-after-approval` | False | Inject post-APPROVED diff drift to exercise the diff-hash gate. |
 | `--container-user UID:GID` | — | Docker `--user` value. |
-| `--skip-preflight` | False | Bypass operational preflight checks. |
 | `--agent-timeout-seconds INT` | `1800` | Per-agent-turn timeout. |
 | `--sim-timeout-seconds INT` | `1500` | Per-SIM-turn timeout. |
 | `--opencode-stdout-stall-seconds INT` | `300` | Kill opencode if its stdout hasn't grown for this many seconds. `0` to disable. |
@@ -628,7 +623,7 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--no-progress-turns INT` | `5` | Stagnation threshold; aborts on no marker progress. |
 | `--malformed-verdict-retries INT` | `2` | Retries for an unparseable SIM verdict. |
 | `--max-review-rounds INT` | `3` | Max REVIEW → WORK loops before `NO_PR_CHANGES_REQUESTED`. |
-| `--sim-scenario {approved,changes_requested,needs_human,malformed,malformed_then_approved}` | `approved` | Fake-SIM behavior (ignored in `--actor opencode`). |
+| `--sim-scenario {approved,changes_requested,needs_human,malformed,malformed_then_approved}` | `approved` | Fake-SIM behavior (ignored when `--agent opencode`). |
 | `--agent-scenario {normal,forbidden_path,no_impl_complete}` | `normal` | Fake-agent behavior. |
 
 ### `cleanup` flags
