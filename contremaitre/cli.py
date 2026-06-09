@@ -970,26 +970,31 @@ def _probe_zen_model(model: str, *, timeout: float = 10.0) -> tuple[str, str | N
 
 
 def _ensure_default_image_built(config: RunConfig) -> int:
-    """Auto-build a known contremaitre image before any real (non-fake) run.
+    """Auto-build a known contremaitre image before any real (non-fake) run."""
+    return _ensure_image_for(
+        docker_image=config.docker_image,
+        actor_mode=config.actor_mode,
+        sim_actor_mode=config.sim_actor_mode,
+    )
 
-    Fires whenever the agent OR the SIM needs a container — `--agent opencode`,
-    `--agent claude|codex`, or a mixed/composite pair — and the image name
-    matches a shipped variant. The image is shared by both roles, so a single
-    build covers the mix. Rebuilds when:
-    - The image doesn't exist, OR
-    - Its `contremaitre.dockerfile-sha256` label is missing or mismatches the
-      current Dockerfile contents (catches "Dockerfile edited, image not
-      rebuilt" — the failure mode that left python3/uv missing, and would
-      otherwise leave codex missing from a stale pre-codex image).
 
-    Custom / third-party images are the operator's responsibility — preflight
-    will surface a clean failure with the build hint.
+def _ensure_image_for(
+    *,
+    docker_image: str,
+    actor_mode: ActorMode,
+    sim_actor_mode: ActorMode | None,
+) -> int:
+    """Build/rebuild the image if it's missing or stale.
+
+    Extracted so `_tui_run_cmd` can trigger the build BEFORE spawning the
+    subprocess — otherwise the build blocks the subprocess for minutes while
+    the TUI's discover timeout (30 s) fires waiting for the run dir.
+
+    Fires whenever any active role needs a container; a pure-fake run skips.
+    Rebuilds when the image is missing OR its dockerfile-sha256 label drifts.
+    Custom images are the operator's responsibility.
     """
-
-    # Build whenever any active role needs a container; only a pure-fake run
-    # (no agent and no SIM container) skips. Mirrors preflight's union check
-    # in `preflight.run_preflight`.
-    modes = {config.actor_mode, config.sim_actor_mode or config.actor_mode}
+    modes = {actor_mode, sim_actor_mode or actor_mode}
     if modes <= {ActorMode.FAKE}:
         return 0
     auto_build_map = {
@@ -997,14 +1002,14 @@ def _ensure_default_image_built(config: RunConfig) -> int:
         _RUST_IMAGE: _VARIANT_DOCKERFILES["rust"],
         _GO_IMAGE: _VARIANT_DOCKERFILES["go"],
     }
-    dockerfile = auto_build_map.get(config.docker_image)
+    dockerfile = auto_build_map.get(docker_image)
     if dockerfile is None:
         return 0
     expected_hash = _dockerfile_hash(dockerfile)
     if expected_hash is None:
         # Dockerfile missing — fall through to build which surfaces the same error.
         return _build_image_inline(
-            image_name=config.docker_image, dockerfile=dockerfile, no_cache=False
+            image_name=docker_image, dockerfile=dockerfile, no_cache=False
         )
     try:
         inspect = subprocess.run(
@@ -1012,7 +1017,7 @@ def _ensure_default_image_built(config: RunConfig) -> int:
                 "docker",
                 "image",
                 "inspect",
-                config.docker_image,
+                docker_image,
                 "--format",
                 '{{ index .Config.Labels "' + _DOCKERFILE_HASH_LABEL + '" }}',
             ],
@@ -1024,22 +1029,22 @@ def _ensure_default_image_built(config: RunConfig) -> int:
         return 0
     if inspect.returncode != 0:
         print(
-            f"contremaitre: image {config.docker_image} not found — building inline",
+            f"contremaitre: image {docker_image} not found — building inline",
             file=sys.stderr,
         )
         return _build_image_inline(
-            image_name=config.docker_image, dockerfile=dockerfile, no_cache=False
+            image_name=docker_image, dockerfile=dockerfile, no_cache=False
         )
     actual_hash = inspect.stdout.strip()
     if actual_hash == expected_hash:
         return 0
     print(
-        f"contremaitre: image {config.docker_image} stale "
+        f"contremaitre: image {docker_image} stale "
         f"(label={actual_hash or '<missing>'}, dockerfile={expected_hash}) — rebuilding",
         file=sys.stderr,
     )
     return _build_image_inline(
-        image_name=config.docker_image, dockerfile=dockerfile, no_cache=False
+        image_name=docker_image, dockerfile=dockerfile, no_cache=False
     )
 
 
@@ -1633,7 +1638,7 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
 
     run_cmd = [sys.executable, "-m", "contremaitre", "run", *forwarded]
 
-    # TUI header labels
+    # TUI header labels + image check inputs
     agent_model = _extract_flag_value(forwarded, "--agent-model", "")
     sim_model = _extract_flag_value(forwarded, "--sim-model", "")
     cli_reviewer_choice = _extract_flag_value(forwarded, "--cli-reviewer", "auto")
@@ -1644,6 +1649,17 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     claude_effort = _extract_flag_value(forwarded, "--claude-effort", "high")
     agent_mode, agent_cli_tool = _agent_name_to_runtime(agent_name)
     sim_mode, sim_cli_tool = _agent_name_to_runtime(sim_name or agent_name)
+
+    # Build the Docker image BEFORE spawning the subprocess. If the image is
+    # missing or stale, building it takes ~3 min — the TUI's 30s discover
+    # timeout would fire waiting for the run dir while the subprocess builds.
+    rc = _ensure_image_for(
+        docker_image=docker_image,
+        actor_mode=agent_mode,
+        sim_actor_mode=sim_mode if sim_mode != agent_mode else None,
+    )
+    if rc != 0:
+        return rc
     _label_kw = dict(
         codex_model=codex_model,
         codex_effort=codex_effort,
