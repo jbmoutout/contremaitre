@@ -1008,9 +1008,7 @@ def _ensure_image_for(
     expected_hash = _dockerfile_hash(dockerfile)
     if expected_hash is None:
         # Dockerfile missing — fall through to build which surfaces the same error.
-        return _build_image_inline(
-            image_name=docker_image, dockerfile=dockerfile, no_cache=False
-        )
+        return _build_image_inline(image_name=docker_image, dockerfile=dockerfile, no_cache=False)
     try:
         inspect = subprocess.run(
             [
@@ -1032,9 +1030,7 @@ def _ensure_image_for(
             f"contremaitre: image {docker_image} not found — building inline",
             file=sys.stderr,
         )
-        return _build_image_inline(
-            image_name=docker_image, dockerfile=dockerfile, no_cache=False
-        )
+        return _build_image_inline(image_name=docker_image, dockerfile=dockerfile, no_cache=False)
     actual_hash = inspect.stdout.strip()
     if actual_hash == expected_hash:
         return 0
@@ -1043,9 +1039,7 @@ def _ensure_image_for(
         f"(label={actual_hash or '<missing>'}, dockerfile={expected_hash}) — rebuilding",
         file=sys.stderr,
     )
-    return _build_image_inline(
-        image_name=docker_image, dockerfile=dockerfile, no_cache=False
-    )
+    return _build_image_inline(image_name=docker_image, dockerfile=dockerfile, no_cache=False)
 
 
 def _dockerfile_hash(dockerfile: Path) -> str | None:
