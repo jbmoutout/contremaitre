@@ -37,14 +37,11 @@ class OpencodeBoundaryTest(unittest.TestCase):
     def test_sim_persona_locks_read_only_tooled_intent(self):
         persona = prompts.SIM_TOOLED_PERSONA
 
-        # Lock the literal allow/deny lines. Bare `assertIn("read", persona)`
-        # matches "already", "thread", "instead" and survives a persona that
-        # grants `write` + `bash` — the policy reversal we care about.
-        self.assertIn("**Allowed**: `read`, `glob`, `grep`.", persona)
-        self.assertIn(
-            "**Forbidden**: `write`, `edit`, `apply_patch`, `bash`, `task`.",
-            persona,
-        )
+        # Lock the allow/deny lines against policy reversal. Wording is
+        # runtime-agnostic (Codex exec_command + Claude/opencode Bash/Read)
+        # so we check capabilities, not tool names.
+        self.assertIn("**Allowed operations**:", persona)
+        self.assertIn("**Forbidden operations**: write, edit, delete", persona)
         # Skill vocabulary is the SIM's language — lock the canonical line.
         self.assertIn(
             "**Module · Interface · Implementation · Depth · Seam · Adapter · "
