@@ -1,13 +1,40 @@
-# Copy to `Makefile.local` (gitignored) and edit. Overrides the defaults in
-# Makefile; a `make run VAR=…` command-line value still wins over both.
-# Flip these freely for tests/runs without dirtying the tree.
-#
+# Copy to `Makefile.local` (gitignored) and edit. Overrides the defaults in Makefile
+# a `make run VAR=…` command-line value still wins over both.
+
+#   ____            _                            _ _
+#  / ___|___  _ __ | |_ _ __ ___ _ __ ___   __ _(_) |_ _ __ ___
+# | |   / _ \| '_ \| __| '__/ _ \ '_ ` _ \ / _` | | __| '__/ _ \
+# | |__| (_) | | | | |_| | |  __/ | | | | | (_| | | |_| | |  __/
+#  \____\___/|_| |_|\__|_|  \___|_| |_| |_|\__,_|_|\__|_|  \___|
+
+
 # Any Makefile variable can be overridden here. Common ones:
 
-# SIM           := claude
-# CLI_REVIEWER  := codex
-# CLAUDE_MODEL  := opus
-# CLAUDE_EFFORT := medium
-# AGENT         := opencode
-# AGENT_MODEL   := qwen/qwen3.7-max
-# MAX_COST_USD  := 10
+# AGENT: claude | codex | opencode | fake
+AGENT        := opencode
+
+# SIM:   claude | codex | opencode   (empty = same as AGENT)
+SIM           := claude
+
+# CLI_REVIEWER: claude | codex | auto | none
+CLI_REVIEWER  := codex
+
+# ── claude settings (when any role = claude) ─────────────────────────────────
+CLAUDE_MODEL  := opus        # empty = account default; e.g. opus | claude-opus-4-8 | sonnet
+CLAUDE_EFFORT := high    # low | medium | high | max
+
+# ── codex settings (when any role = codex) ───────────────────────────────────
+CODEX_MODEL   := gpt-5.5
+CODEX_EFFORT  := high    # minimal | low | medium | high | xhigh
+
+# ── opencode model (when any role = opencode) ───────────
+# Leave empty → interactive picker shows live OpenCode free ◕‿◕ models at launch.
+# Set to an OpenRouter slug to skip the picker, e.g. qwen/qwen3.7-max
+AGENT_MODEL  :=
+SIM_MODEL    :=          # empty = same as AGENT_MODEL (picker proposes it as default)
+
+# ── Reviews loop ───────────────────────────────────────────────────────
+MAX_CLI_REVIEW_ROUNDS := 3
+MAX_REVIEW_ROUNDS     := 3
+
+# MAX_COST_USD  := 5
