@@ -80,24 +80,50 @@ def compute_flow_use(paths: Any) -> dict[str, Any]:
         "schema": "flow_use v1",
         "agent": agent,
         "sim": _sim_metrics(sim_events, paths),
-        "phases": compute_phases(paths, agent_events),
+        "phases": compute_phases_from_paths(paths, agent_events),
     }
 
 
-def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[str, Any]:
-    """Split the run into grilling / impl / review phases by counting actor turns.
+def compute_phases_from_paths(paths: Any, agent_events: list[dict] | None = None) -> dict[str, Any]:
+    """I/O wrapper: read the three event streams off `paths`, then delegate.
 
-    grilling = agent + SIM turns BEFORE SETTLED_DESIGN.md is written (design pass)
-    impl     = agent turns from SETTLED write through IMPLEMENTATION_COMPLETE
-    review   = SIM review rounds (from review_cycles.jsonl, deduped over retries)
-
-    Anchored to `opencode_actor_start` in guardrail_events.jsonl (one start =
-    one process invocation = one turn) and the SETTLED / IMPL_COMPLETE write
-    timestamps in raw_export.jsonl. Surfaced live in the TUI footer Zone 3
-    and rolled into the PR body lede.
+    Post-hoc readers (eval `flow_use.json`, the PR-body lede in `publisher.py`,
+    `viewer/index.py`) go through here. The live TUI calls `compute_phases`
+    directly with the events it already holds in memory + `live=True`.
     """
     if agent_events is None:
         agent_events = read_jsonl(paths.raw_export)
+    guardrails_path = getattr(paths, "guardrail_events", None)
+    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
+    cycles = read_jsonl(paths.review_cycles)
+    return compute_phases(agent_events, guardrails, cycles)
+
+
+def compute_phases(
+    agent_events: list[dict],
+    guardrails: list[dict],
+    cycles: list[dict],
+    *,
+    live: bool = False,
+) -> dict[str, Any]:
+    """Split the run into grilling / impl / review phases by counting actor turns.
+
+    Pure: operates on already-read event lists, no I/O. `compute_phases_from_paths`
+    is the disk-reading wrapper; the live TUI calls this directly with `live=True`.
+
+    grilling = agent + SIM turns BEFORE SETTLED_DESIGN.md is written (design pass)
+    impl     = agent turns from SETTLED write through IMPLEMENTATION_COMPLETE
+    review   = SIM review rounds (from review_cycles, deduped over retries)
+
+    Anchored to `opencode_actor_start` in `guardrails` (one start = one process
+    invocation = one turn) and the SETTLED / IMPL_COMPLETE write timestamps in
+    `agent_events`. Surfaced live in the TUI footer Zone 3 and rolled into the
+    PR body lede.
+
+    `live` controls the SETTLED-absent case (see below): a live run before the
+    SETTLED write wants the accruing grilling counter; a post-hoc run that never
+    settled wants an honest "unknown".
+    """
     # Mode-agnostic write detection: opencode `tool_use` + claude `assistant`
     # tool_use blocks. (Codex has no per-event timestamp — see below.)
     settled_event = _find_write_event(agent_events, _SETTLED_RE)
@@ -105,8 +131,6 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     settled_ms = _timestamp_ms(settled_event)
     impl_ms = _timestamp_ms(impl_event)
 
-    guardrails_path = getattr(paths, "guardrail_events", None)
-    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
     starts: list[tuple[float, str]] = []
     for g in guardrails:
         if g.get("event") != "opencode_actor_start":
@@ -121,18 +145,23 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
     # max(round), not len(): retry / unavailable rows can make
     # review_cycles longer than the number of logical review rounds.
     # The round number is the canonical counter. Always recoverable.
-    cycles = read_jsonl(paths.review_cycles)
     review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
 
-    # The grilling/impl split needs BOTH the SETTLED write timestamp and at
-    # least one agent turn boundary. Neither is present for codex (no
-    # per-event ts) or for pre-`actor-start` CLI runs (no agent
-    # opencode_actor_start logged). In those cases the split is genuinely
-    # unrecoverable, so emit None — an honest "unknown" the readouts render
-    # as "—", instead of the min-of-total-turns garbage the old code
-    # returned when settled_ms was None.
+    # The grilling/impl split needs at least one agent turn boundary, plus
+    # either a recoverable SETTLED write timestamp OR (in a live run) the
+    # accruing pre-SETTLED counter.
+    #
+    # `not has_agent_turn` is genuinely unrecoverable — codex logs no
+    # per-event ts, pre-`actor-start` CLI runs log no agent start — so it is
+    # None in both modes.
+    #
+    # `settled_ms is None` with agent turns present is the fork: live → emit
+    # the partial grilling counter (all starts are pre-SETTLED); post-hoc →
+    # None, the honest "unknown" the readouts render as "—" rather than the
+    # min-of-total-turns garbage the old code returned for a never-settled run.
     has_agent_turn = any(role == "agent" for _, role in starts)
-    if settled_ms is None or not has_agent_turn:
+    unrecoverable = not has_agent_turn or (settled_ms is None and not live)
+    if unrecoverable:
         return {
             "pre_settled_agent_turns": None,
             "pre_settled_sim_turns": None,
@@ -142,15 +171,18 @@ def compute_phases(paths: Any, agent_events: list[dict] | None = None) -> dict[s
         }
 
     # Identify the impl-start turn: the agent turn whose lifetime contains
-    # the SETTLED write (start_ts ≤ settled_ms < next_start_ts).
+    # the SETTLED write (start_ts ≤ settled_ms < next_start_ts). When
+    # settled_ms is None (a live run still grilling), no turn qualifies, so
+    # every start stays pre-SETTLED and impl is empty.
     impl_start_idx: int | None = None
-    for i, (ts, role) in enumerate(starts):
-        if role != "agent":
-            continue
-        next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
-        if ts <= settled_ms < next_ts:
-            impl_start_idx = i
-            break
+    if settled_ms is not None:
+        for i, (ts, role) in enumerate(starts):
+            if role != "agent":
+                continue
+            next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
+            if ts <= settled_ms < next_ts:
+                impl_start_idx = i
+                break
 
     if impl_start_idx is None:
         pre = starts

@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from contremaitre.flow_use import compute_flow_use, compute_phases
+from contremaitre.flow_use import (
+    compute_flow_use,
+    compute_phases,
+    compute_phases_from_paths,
+)
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -58,7 +62,7 @@ def test_compute_phases_opencode_splits_on_settled_write(tmp_path):
     )
     _write_jsonl(paths.guardrail_events, _phase_guardrails())
     _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 1, "verdict": "APPROVED"}])
-    phases = compute_phases(paths)
+    phases = compute_phases_from_paths(paths)
     assert phases["grilling_exchanges"] == 1
     assert phases["impl_turns"] == 1
     assert phases["pre_settled_agent_turns"] == 1
@@ -93,7 +97,7 @@ def test_compute_phases_detects_claude_assistant_write(tmp_path):
     )
     _write_jsonl(paths.guardrail_events, _phase_guardrails())
     _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 1, "verdict": "APPROVED"}])
-    phases = compute_phases(paths)
+    phases = compute_phases_from_paths(paths)
     assert phases["grilling_exchanges"] == 1
     assert phases["impl_turns"] == 1
 
@@ -112,7 +116,7 @@ def test_compute_phases_codex_without_timestamp_is_none_not_garbage(tmp_path):
     )
     _write_jsonl(paths.guardrail_events, _phase_guardrails())
     _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 2, "verdict": "APPROVED"}])
-    phases = compute_phases(paths)
+    phases = compute_phases_from_paths(paths)
     assert phases["grilling_exchanges"] is None
     assert phases["impl_turns"] is None
     assert phases["pre_settled_agent_turns"] is None
@@ -144,9 +148,75 @@ def test_compute_phases_none_when_no_agent_turn_logged(tmp_path):
         [{"event": "opencode_actor_start", "role": "sim", "ts": 2000}],
     )
     _write_jsonl(paths.review_cycles, [])
-    phases = compute_phases(paths)
+    phases = compute_phases_from_paths(paths)
     assert phases["grilling_exchanges"] is None
     assert phases["review_rounds"] == 0
+
+
+# --- pure core: events in, counts out (no paths / no disk) ------------------
+
+
+def _settled_write(ts: int) -> dict:
+    return {
+        "type": "tool_use",
+        "timestamp": ts,
+        "part": {
+            "tool": "write",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "/app/.contremaitre/SETTLED_DESIGN.md", "content": "x"},
+            },
+        },
+    }
+
+
+def test_compute_phases_pure_core_splits_without_io():
+    # Same fixture as the paths-based opencode test, fed directly as lists.
+    phases = compute_phases(
+        [_settled_write(3500)],
+        _phase_guardrails(),
+        [{"reviewer": "sim", "round": 1, "verdict": "APPROVED"}],
+    )
+    assert phases["grilling_exchanges"] == 1
+    assert phases["impl_turns"] == 1
+    assert phases["pre_settled_agent_turns"] == 1
+
+
+def test_compute_phases_live_counts_before_settled_where_posthoc_is_none():
+    # No SETTLED write yet, but an agent turn has started. live=True must emit
+    # the accruing grilling counter; the default (post-hoc) must stay None so
+    # eval/report history semantics for never-settled runs are unchanged.
+    guardrails = [
+        {"event": "opencode_actor_start", "role": "agent", "ts": 1000},
+        {"event": "opencode_actor_start", "role": "sim", "ts": 2000},
+    ]
+    posthoc = compute_phases([], guardrails, [])
+    assert posthoc["grilling_exchanges"] is None
+    assert posthoc["impl_turns"] is None
+
+    live = compute_phases([], guardrails, [], live=True)
+    assert live["grilling_exchanges"] == 1  # min(1 agent, 1 sim)
+    assert live["impl_turns"] == 0
+
+
+def test_compute_phases_live_still_none_without_agent_turn():
+    # `live` does not rescue a genuinely unrecoverable split: no agent
+    # actor-start means no anchor, so both modes return None.
+    guardrails = [{"event": "opencode_actor_start", "role": "sim", "ts": 2000}]
+    live = compute_phases([], guardrails, [], live=True)
+    assert live["grilling_exchanges"] is None
+
+
+def test_compute_phases_review_rounds_use_max_round_not_row_count():
+    # Retry / unavailable rows inflate len(cycles); max(round) is the canonical
+    # counter, unified across every surface (was len() in the old TUI mirror).
+    cycles = [
+        {"reviewer": "sim", "round": 1, "verdict": "UNAVAILABLE"},
+        {"reviewer": "sim", "round": 1, "verdict": "CHANGES_REQUESTED"},
+        {"reviewer": "sim", "round": 2, "verdict": "APPROVED"},
+    ]
+    phases = compute_phases([_settled_write(3500)], _phase_guardrails(), cycles)
+    assert phases["review_rounds"] == 2  # not len(cycles) == 3
 
 
 def _paths(tmp_path: Path):

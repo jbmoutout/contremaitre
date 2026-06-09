@@ -38,6 +38,7 @@ from typing import Any
 from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
+from .flow_use import compute_phases
 from .models import ModelSpec, resolved_model_from_events
 
 # Unknown identity placeholder for runs whose model dicts can't be read yet.
@@ -1026,81 +1027,6 @@ def _architecture_review_in(events: list[dict[str, Any]]) -> bool:
             if APPLY_PATCH_ARCH_REVIEW_RE.search(patch):
                 return True
     return False
-
-
-def _compute_phases_for_tui(
-    paths: dict[str, Path],
-    agent_events: list[dict[str, Any]],
-    guardrails: list[dict[str, Any]],
-    review_cycles: list[dict[str, Any]],
-) -> dict[str, int]:
-    """In-TUI mirror of flow_use.compute_phases.
-
-    The TUI ticks ~once a second and already holds the events it needs.
-    Re-reading from disk here would just duplicate I/O. Same logic as
-    flow_use.compute_phases — anchored to opencode_actor_start + the
-    SETTLED / IMPLEMENTATION_COMPLETE write timestamps.
-    """
-    settled_event = None
-    impl_event = None
-    for e in agent_events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        if (part.get("state") or {}).get("status") != "completed":
-            continue
-        inp = (part.get("state") or {}).get("input") or {}
-        target = inp.get("filePath") or inp.get("path") or inp.get("patchText") or ""
-        if settled_event is None and "SETTLED_DESIGN" in target.upper():
-            settled_event = e
-        if impl_event is None and "IMPLEMENTATION_COMPLETE" in target:
-            impl_event = e
-
-    settled_ms = settled_event.get("timestamp") if settled_event else None
-    impl_ms = impl_event.get("timestamp") if impl_event else None
-
-    starts: list[tuple[float, str]] = []
-    for g in guardrails:
-        if g.get("event") != "opencode_actor_start":
-            continue
-        ts_str = g.get("ts", "")
-        try:
-            from datetime import datetime
-
-            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp() * 1000
-        except (ValueError, AttributeError):
-            continue
-        role = g.get("role")
-        if role in ("agent", "sim", "review"):
-            starts.append((ts, role))
-    starts.sort()
-
-    impl_start_idx: int | None = None
-    if settled_ms is not None:
-        for i, (ts, role) in enumerate(starts):
-            if role != "agent":
-                continue
-            next_ts = starts[i + 1][0] if i + 1 < len(starts) else float("inf")
-            if ts <= settled_ms < next_ts:
-                impl_start_idx = i
-                break
-
-    if impl_start_idx is None:
-        pre, post = starts, []
-    else:
-        pre, post = starts[:impl_start_idx], starts[impl_start_idx:]
-
-    pre_agent = sum(1 for _, r in pre if r == "agent")
-    pre_sim = sum(1 for _, r in pre if r == "sim")
-    impl = sum(1 for ts, r in post if r == "agent" and (impl_ms is None or ts <= impl_ms))
-
-    return {
-        "grilling_exchanges": min(pre_agent, pre_sim),
-        "impl_turns": impl,
-        "review_rounds": len(review_cycles),
-    }
 
 
 def _self_verified_in(events: list[dict[str, Any]]) -> bool:
@@ -2912,12 +2838,13 @@ if _TEXTUAL_AVAILABLE:
                 cli_review_failed=cli_review_failed,
             )
 
-            # Phase counters mirror flow_use.compute_phases so footer matches eval.
+            # Phase counters come from flow_use.compute_phases (the one source
+            # of truth shared with eval/viewer/publisher), called live=True on
+            # the events we already hold so the pre-SETTLED grilling counter
+            # keeps accruing instead of reading None.
             review_cycles = _read_jsonl(self.paths["review_cycles"])
             test_runs = _read_jsonl(self.paths["test_runs"])
-            phase_counts = _compute_phases_for_tui(
-                self.paths, agent_events, guardrails, review_cycles
-            )
+            phase_counts = compute_phases(agent_events, guardrails, review_cycles, live=True)
 
             # Verdict zone text. `attached` covers read-only TUI on an
             # in-progress run; terminal badges come from TerminalVerdict
@@ -2976,8 +2903,8 @@ if _TEXTUAL_AVAILABLE:
                 _current_phase_label(
                     phase=phase,
                     color_state=color_state,
-                    grilling_exchanges=phase_counts["grilling_exchanges"],
-                    impl_turns=phase_counts["impl_turns"],
+                    grilling_exchanges=phase_counts["grilling_exchanges"] or 0,
+                    impl_turns=phase_counts["impl_turns"] or 0,
                     self_verified=self_verified,
                     impl_complete=impl_complete,
                     review_cycles=review_cycles,
