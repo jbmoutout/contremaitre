@@ -125,134 +125,26 @@ class ResolveChoiceTest(unittest.TestCase):
         )
         self.assertEqual(out, "none")
 
-    def test_two_installed_enter_picks_one(self):
-        # When both are installed, Enter with a saved_default of "codex"
-        # accepts the saved tool; no "both" option is offered.
+    def test_two_installed_numeric_pick_codex(self):
         out = cli_reviewer.resolve_choice(
             flag_value="auto",
             available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
-            saved_default="codex",
-            input_fn=lambda _: "",  # Enter = accept saved
-            print_fn=_noop,
-        )
-        self.assertEqual(out, "codex")
-
-    def test_two_installed_numeric_pick_overrides_saved(self):
-        # Operator saved "codex" but picks [2] (claude) numerically — numeric wins.
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default="codex",
             input_fn=lambda _: "2",
             print_fn=_noop,
         )
         self.assertEqual(out, "claude")
 
-    def test_two_installed_no_saved_enter_skips(self):
-        # No saved default, Enter = skip.
+    def test_two_installed_enter_skips(self):
+        # No saved default: Enter always skips.
         out = cli_reviewer.resolve_choice(
             flag_value="auto",
             available={"codex": "/bin/codex", "claude": "/bin/claude"},
             tty=True,
-            saved_default=None,
             input_fn=lambda _: "",
             print_fn=_noop,
         )
         self.assertEqual(out, "none")
-
-    def test_two_installed_saved_skip_overrides_to_none(self):
-        # saved_default="none" with both installed: Enter skips.
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default="none",
-            input_fn=lambda _: "",
-            print_fn=_noop,
-        )
-        self.assertEqual(out, "none")
-
-    def test_two_installed_saved_auto_enter_picks_first_available(self):
-        # saved_default="auto" (defaults.toml value): Enter must select the
-        # first available tool, not silently skip. Without this fix the
-        # numbered picker returned "none" on Enter when no concrete tool was
-        # saved, making the CLI review loop unreachable for most operators.
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default="auto",
-            input_fn=lambda _: "",
-            print_fn=_noop,
-        )
-        self.assertEqual(out, "codex")
-
-    def test_two_installed_saved_old_both_enter_picks_first_available(self):
-        # saved_default="both" is the legacy value from old defaults.toml
-        # files — must behave the same as "auto" (first available on Enter).
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default="both",
-            input_fn=lambda _: "",
-            print_fn=_noop,
-        )
-        self.assertEqual(out, "codex")
-
-    def test_two_installed_no_saved_default_enter_still_skips(self):
-        # saved_default=None (never set): Enter should still skip — we
-        # only auto-select on explicit "auto"/"both", not on unset.
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default=None,
-            input_fn=lambda _: "",
-            print_fn=_noop,
-        )
-        self.assertEqual(out, "none")
-
-
-class SavedDefaultTest(unittest.TestCase):
-    """`saved_default` prefills the auto-picker without short-circuiting it."""
-
-    def test_two_installed_enter_accepts_saved_codex(self):
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"codex": "/bin/codex", "claude": "/bin/claude"},
-            tty=True,
-            saved_default="codex",
-            input_fn=lambda _: "",
-            print_fn=_noop,
-        )
-        self.assertEqual(out, "codex")
-
-    def test_one_installed_saved_none_flips_default_to_n(self):
-        # `saved_default="none"` flips Enter from Y to N. Y still works
-        # explicitly, but Enter now skips.
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"claude": "/bin/claude"},
-            tty=True,
-            saved_default="none",
-            input_fn=lambda _: "",
-            print_fn=_noop,
-        )
-        self.assertEqual(out, "none")
-
-    def test_one_installed_saved_default_y_still_accepts(self):
-        out = cli_reviewer.resolve_choice(
-            flag_value="auto",
-            available={"claude": "/bin/claude"},
-            tty=True,
-            saved_default="claude",
-            input_fn=lambda _: "",
-            print_fn=_noop,
-        )
-        self.assertEqual(out, "claude")
 
 
 class ExpandChoiceTest(unittest.TestCase):

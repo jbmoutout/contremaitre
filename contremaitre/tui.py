@@ -3126,8 +3126,18 @@ def spawn_and_attach(
     # Spawn the orchestrator detached from our stdout so the TUI owns the
     # terminal. Its output (initial prompt etc.) goes to a sidecar log
     # under the run dir once it exists; we capture it transiently here.
+    #
+    # stdin=DEVNULL is load-bearing: the host already ran the picker, the
+    # preflight presence check, and the Y/n confirm in `_tui_run_cmd` before
+    # we got here. The subprocess re-enters `_run_cmd`, which gates its own
+    # confirm on `sys.stdin.isatty()`. If the subprocess inherited our TTY it
+    # would block on `input()` forever — the run dir would never be created
+    # and the discover loop below would time out. A null stdin makes
+    # `isatty()` False so the subprocess correctly takes the non-interactive
+    # path and goes straight to run().
     proc = subprocess.Popen(
         run_cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )

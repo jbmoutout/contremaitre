@@ -22,7 +22,7 @@ class PreflightTest(unittest.TestCase):
         self.assertIn("network_policy", self._fail_names(report))
 
     def test_unlimited_openrouter_key_fails(self):
-        config = self._config(http_proxy="http://proxy.local:8080")
+        config = self._paid_model_config(http_proxy="http://proxy.local:8080")
         with (
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}),
             self._mock_docker_ok(),
@@ -40,7 +40,9 @@ class PreflightTest(unittest.TestCase):
         # Provider-side limit and orchestrator cap enforce different things:
         # the orchestrator cap is the per-run budget, the provider limit is
         # the daily backstop. A looser daily limit warns, doesn't block.
-        config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))
+        config = self._paid_model_config(
+            http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30)
+        )
         with (
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}),
             self._mock_docker_ok(),
@@ -62,7 +64,9 @@ class PreflightTest(unittest.TestCase):
         self.assertEqual("WARN", self._status_by_name(report)["openrouter_key"])
 
     def test_bounded_openrouter_key_and_explicit_proxy_pass(self):
-        config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))
+        config = self._paid_model_config(
+            http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30)
+        )
         with (
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}),
             self._mock_docker_ok(),
@@ -96,9 +100,13 @@ class PreflightTest(unittest.TestCase):
         self.assertEqual("PASS", self._status_by_name(report)["openrouter_key"])
 
     def test_missing_key_fails_with_paid_model(self):
-        # Default RunConfig models point at `openrouter/...` — paid slugs
-        # that require a key. Absent key + paid model must still FAIL.
-        config = self._config(http_proxy="http://proxy.local:8080")
+        # Paid OpenRouter slugs require a key. Absent key + paid model must
+        # still FAIL, without relying on a dataclass/parser fallback.
+        config = self._config(
+            http_proxy="http://proxy.local:8080",
+            agent_model="openrouter/deepseek/deepseek-v4-flash",
+            sim_model="openrouter/deepseek/deepseek-v4-flash",
+        )
         with patch.dict(os.environ, {}, clear=False), self._mock_docker_ok():
             os.environ.pop("OPENROUTER_API_KEY", None)
             report = run_preflight(config)
@@ -107,7 +115,9 @@ class PreflightTest(unittest.TestCase):
         self.assertIn("openrouter_key", self._fail_names(report))
 
     def test_non_byok_limited_openrouter_key_warns_but_passes(self):
-        config = self._config(http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30))
+        config = self._paid_model_config(
+            http_proxy="http://proxy.local:8080", caps=Caps(max_cost_usd=30)
+        )
         with (
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "key"}),
             self._mock_docker_ok(),
@@ -190,6 +200,13 @@ class PreflightTest(unittest.TestCase):
         }
         data.update(overrides)
         return RunConfig(**data)
+
+    def _paid_model_config(self, **overrides):
+        return self._config(
+            agent_model="openrouter/deepseek/deepseek-v4-flash",
+            sim_model="openrouter/deepseek/deepseek-v4-flash",
+            **overrides,
+        )
 
     @staticmethod
     def _fail_names(report):

@@ -22,7 +22,7 @@ dependency group (`uv sync --group dev`). The TUI requires `textual`
 - **Docker / opencode launch** — `actors.py` (`OpencodeActorRunner.build_docker_command`).
 - **Hard gates** — `evaluator.py` + `diffscan.py` + `verdicts.py`. Strict by design.
 - **Live UI** — `tui.py`. Reads JSONL artifacts; never writes.
-- **CLI subcommands** — `cli.py` (`run`, `doctor`, `fixture`, `image`, `tui`, `cleanup`, `eval`).
+- **CLI subcommands** — `cli.py` (`run`, `doctor`, `models`, `fixture`, `image`, `tui`, `cleanup`, `eval`).
 - **Eval canary** — `eval.py` (cases under `golden_cases/`) + `manifest.py` (run provenance).
 
 ## Conventions

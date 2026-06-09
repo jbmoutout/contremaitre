@@ -9,7 +9,7 @@
 #   contremaitre image build --variant rust --no-cache
 #
 # Use: pass --docker-image contremaitre-agent-rust:latest to `run` /
-# `tui run`, or use the `just rust` preset in the justfile.
+# `tui run`, or set DOCKER_IMAGE=contremaitre-agent-rust:latest in the Makefile.
 #
 # Crate dependencies are downloaded at check time from crates.io (the
 # per-run container has network access via --allow-open-egress). A

@@ -9,18 +9,19 @@ The agent and SIM live inside per-run Docker containers. Each role runs one of t
 ## Quickstart
 
 ```bash
-just tui-run main git@github.com:<you>/<target-repo>.git
+make run BASE=main FORK=git@github.com:<you>/<target-repo>.git
 ```
 
 The TUI shows the agent and SIM working live, side-by-side. When the run finishes successfully, a draft PR opens on your fork.
 
 **Prerequisites**
 
-- [`just`](https://github.com/casey/just) — `brew install just`
 - Docker (the runtime image builds itself on first run, ~3 min)
 - [`gh`](https://cli.github.com/) authenticated (`gh auth login`)
 - Python 3.11+, [`uv`](https://docs.astral.sh/uv/) — `uv sync --extra tui` for the TUI; `uv sync --group dev` to run tests
-The interactive launcher confirms with `Continue? [Y/n]` before each run; pass `-y` to skip or `--no-prompt` for full automation. See [docs/control-plane.md#launch-sequence](docs/control-plane.md#launch-sequence) for the exact flow.
+- `make` — already present on macOS/Linux
+
+The interactive launcher confirms with `Continue? [Y/n]` before each run. See [docs/control-plane.md#launch-sequence](docs/control-plane.md#launch-sequence) for the exact flow.
 
 ## Models
 
@@ -28,16 +29,16 @@ By default the picker offers free [OpenCode Zen](https://opencode.ai/docs/zen/) 
 
 To use paid OpenRouter models, set `OPENROUTER_API_KEY` in `.env` and paste any OpenRouter slug at the picker prompt (e.g. `openrouter/anthropic/claude-sonnet-4.6`, `openrouter/qwen/qwen3-coder-plus`). Preflight verifies the key has a provider-side credit limit and warns on unlimited keys. See [`.env.example`](.env.example).
 
-Skip the picker entirely with `--no-prompt` (uses [`.contremaitre/defaults.toml`](#saved-picker-defaults)) or pass `--agent-model` / `--sim-model` explicitly.
+Skip the picker by passing `--agent-model` / `--sim-model` explicitly (or setting `AGENT_MODEL` / `SIM_MODEL` in the Makefile). Run `make models` to see the current Zen catalog with live quota status.
 
 ### Codex / Claude (your subscription CLI)
 
 Instead of opencode, a role can run a **frontier CLI headless on your subscription** — no API key, no per-token billing. Two tools are wired:
 
-- **codex** on your ChatGPT plan (`--cli-tool codex`, the default): model + effort via `--codex-model` (default `gpt-5.5`) / `--codex-effort` (default `high`). Auth is a logged-in `codex` on the host (`~/.codex/auth.json`); preflight checks the token isn't about to expire.
-- **claude** on your Claude plan (`--cli-tool claude`): model + effort via `--claude-model` (empty = your `~/.claude` account default) / `--claude-effort` (`low|medium|high|max`, default `high`). Auth is a headless OAuth token: run `claude setup-token` on the host and export `CLAUDE_CODE_OAUTH_TOKEN`; preflight checks it's set.
+- **codex** on your ChatGPT plan (`--agent codex`): model + effort via `--codex-model` (default `gpt-5.5`) / `--codex-effort` (default `high`). Auth is a logged-in `codex` on the host (`~/.codex/auth.json`); preflight checks the token isn't about to expire.
+- **claude** on your Claude plan (`--agent claude`): model + effort via `--claude-model` (empty = your `~/.claude` account default) / `--claude-effort` (`low|medium|high|max`, default `high`). Auth is a headless OAuth token: run `claude setup-token` on the host and export `CLAUDE_CODE_OAUTH_TOKEN`; preflight checks it's set.
 
-Pick `codex` or `claude` for the agent and/or SIM in the launch screen, or set `--actor cli --cli-tool <tool>` (`--sim-actor opencode` for a mix), or `actor = "codex"` / `actor = "claude"` in `defaults.toml`. Egress is **locked by default** — the in-container token is exfiltratable, so the container only reaches the model provider through an allowlist proxy (OpenAI, Anthropic, OpenRouter, and OpenCode Zen). Pass `--allow-open-egress` to run it open when the agent needs other hosts (PyPI/npm/GitHub to install deps). Details: [docs/control-plane.md#cli-actor-codex--claude-auth--egress-lock](docs/control-plane.md#cli-actor-codex--claude-auth--egress-lock).
+Select a role via `--agent claude` or `--agent codex` (or `AGENT=claude` / `AGENT=codex` in the Makefile). Mix with `--sim opencode` for a CLI agent + opencode SIM (or the reverse). Egress is **locked by default** — the in-container token is exfiltratable, so the container only reaches the model provider through an allowlist proxy (OpenAI, Anthropic, OpenRouter, and OpenCode Zen). Pass `--allow-open-egress` (or `ALLOW_OPEN_EGRESS=1` in the Makefile) to run it open when the agent needs other hosts (PyPI/npm/GitHub to install deps). Details: [docs/control-plane.md#cli-actor-codex--claude-auth--egress-lock](docs/control-plane.md#cli-actor-codex--claude-auth--egress-lock).
 
 ## How it works
 
@@ -57,15 +58,14 @@ State machine, all five terminal verdicts, and the artifact contract: [docs/cont
 
 ### Flags worth knowing
 
-The launcher takes the same flags whether you call `just tui-run …` or `python3 -m contremaitre run …` directly. The most common ones:
+The launcher takes the same flags whether you call `make run …` or `python3 -m contremaitre run …` directly. The most common ones:
 
 - `--base main` *(required)* — branch the worktree is sourced from and the PR target.
 - `--fork git@github.com:<you>/<repo>.git` *(required for real PRs)* — push remote for the run branch.
 - `--upstream …` + `--gh-repo <owner>/<repo>` — when `--fork` is *your* fork and you want the PR opened on the upstream repo.
-- `--actor opencode|cli` / `--sim-actor opencode|cli` — per-role runtime: `opencode` (a model) or `cli` (a subscription CLI). Omit to pick interactively; defaults from `defaults.toml`. Mixing is allowed (`--actor cli --sim-actor opencode`).
-- `--cli-tool codex|claude` — which subscription CLI a `cli` role drives (default `codex`).
-- `--sim-cli-tool codex|claude` — override the SIM's CLI tool for a **cross-CLI** run (codex agent + claude SIM, or the reverse); default: same as `--cli-tool`.
-- `--agent-model` / `--sim-model` — OpenRouter model slug, or an OpenCode Zen model, for an opencode role. Omit to pick interactively.
+- `--agent claude|codex|opencode|fake` — per-run **agent** runtime. `opencode` = a live model (see `--agent-model`); `claude` / `codex` = a subscription CLI headless; `fake` = smoke fixture.
+- `--sim claude|codex|opencode` — override the **SIM** runtime, enabling a mixed run (e.g. `--agent codex --sim opencode`). Omit to mirror `--agent`.
+- `--agent-model` / `--sim-model` — OpenRouter model slug, or an OpenCode Zen model, for an opencode role. Omit to pick interactively (TTY) or set in the Makefile; in headless opencode-agent runs, an omitted `--sim-model` mirrors `--agent-model`.
 - `--codex-model` / `--codex-effort` — codex-native model (default `gpt-5.5`) and reasoning effort (default `high`) for a codex role.
 - `--claude-model` / `--claude-effort` — claude model (empty = `~/.claude` account default) and effort (`low|medium|high|max`, default `high`) for a claude role.
 - `--cli-reviewer auto|codex|claude|none` — after the draft PR opens, run a post-publish revision loop: a CLI reviewer (codex/claude, in a read-only Docker container) reviews host-provided PR context mounted at `/review` plus the read-only worktree at `/app`; GitHub credentials and `gh` calls stay on the host, which posts the returned markdown as the PR comment. `LOOKS_GOOD` → loop exits as `READY_FOR_DRAFT_PR`; `NEEDS_ATTENTION` or `MUST_FIX` → the agent addresses the required changes on the same branch, then the host commits, reruns deterministic gates (`--check-cmd`, diff scan, diff hash stability, clean worktree), pushes only if they pass, and starts the next round. After `--max-cli-review-rounds` (default 3) rounds without `LOOKS_GOOD`, or if a post-publish revision cannot be safely pushed, the run ends as `PR_NEEDS_HUMAN` (PR is published, a human should review before merging). Uses your Claude Pro/Max or ChatGPT Plus subscription (NOT API). `auto` detects what's installed; `none` skips. Also projects the worst verdict as a commit status (context `contremaitre/cli-review`): `MUST_FIX` → `failure`, else `success` — require it in branch protection to gate merge.
@@ -73,7 +73,6 @@ The launcher takes the same flags whether you call `just tui-run …` or `python
 - `--publish-mode stub|gh` — `stub` (default) is a full dry-run with no `git push` or `gh pr create`; `gh` opens the draft PR.
 - `--max-turns 30` / `--max-wall-minutes 180` / `--max-cost-usd 30` — per-run budgets; the orchestrator aborts cleanly on cap.
 - `--allow-open-egress` — accept open egress instead of configuring `--docker-network` / `--http-proxy` / `--https-proxy`. A **CLI** role (codex/claude) is egress-locked by default; pass this to run it open (e.g. so the agent can install deps from PyPI/npm that the provider-only allowlist blocks) — warned, since the token is exfiltratable.
-- `-y` / `--yes` — skip the confirmation prompt (CI / scripts). `--no-prompt` also skips the interactive pickers.
 
 Headless mode is the same command minus the TUI prefix:
 
@@ -82,24 +81,6 @@ GITHUB_TOKEN=$(gh auth token) python3 -m contremaitre run --base main --fork …
 ```
 
 The full flag reference lives in [docs/control-plane.md#cli-reference](docs/control-plane.md#cli-reference), or run `python3 -m contremaitre run --help`.
-
-### Saved picker defaults
-
-Hand-edit `.contremaitre/defaults.toml` (cwd-local; XDG fallback at `$XDG_CONFIG_HOME/contremaitre/defaults.toml`) to seed the launch-screen pickers. The file is gitignored; per-run CLI flags always win.
-
-```toml
-actor = "codex"                                          # opencode | codex | claude | fake  (codex/claude alias the cli runtime + tool)
-# sim_actor = "opencode"                                 # mix: CLI agent + opencode SIM
-codex_model = "gpt-5.5"                                  # codex-native model when a role is codex
-codex_effort = "high"                                    # minimal | low | medium | high | xhigh
-# claude_model = "opus"                                  # claude model when a role is claude (empty = account default)
-# claude_effort = "high"                                 # low | medium | high | max
-agent_model = "opencode/big-pickle"                      # used when a role is opencode
-sim_model = "opencode/big-pickle"
-cli_reviewer = "auto"                                    # auto | codex | claude | none
-```
-
-All keys are optional; unknown / malformed values degrade silently. `--no-prompt` skips the pickers entirely and uses these values verbatim.
 
 ### Caveats
 
@@ -136,7 +117,7 @@ For controlled egress on an **opencode** run (instead of `--allow-open-egress`),
 
 ## Contributing
 
-PRs welcome. Conventions live in [AGENTS.md](AGENTS.md); run `uv run pytest` and `just lint` before opening one.
+PRs welcome. Conventions live in [AGENTS.md](AGENTS.md); run `uv run pytest` and `make lint` before opening one.
 
 ## License
 

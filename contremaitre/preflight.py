@@ -110,16 +110,6 @@ def run_preflight(config: RunConfig) -> PreflightReport:
 
 
 def enforce_preflight(config: RunConfig, paths: RunPaths) -> None:
-    if config.skip_preflight:
-        write_json(
-            paths.preflight_report,
-            {
-                "passed": True,
-                "skipped": True,
-                "reason": "--skip-preflight was set",
-            },
-        )
-        return
     report = run_preflight(config)
     write_json(paths.preflight_report, report.to_dict())
     if not report.passed:
@@ -151,7 +141,7 @@ def _check_repo(config: RunConfig) -> PreflightCheck:
 
 def _check_opencode_config(config: RunConfig) -> PreflightCheck:
     if not config.opencode_config:
-        return _fail("opencode_config", "--opencode-config is required for --actor opencode", {})
+        return _fail("opencode_config", "--opencode-config is required for --agent opencode", {})
     if not config.opencode_config.exists():
         return _fail(
             "opencode_config", f"opencode config does not exist: {config.opencode_config}", {}
