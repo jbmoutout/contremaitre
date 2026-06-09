@@ -717,7 +717,6 @@ def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
     print(f"[info] CLI egress: {network} + allowlist proxy ({proxy})")
 
 
-
 def _codex_token_line() -> str:
     import time as _time
 
@@ -1365,7 +1364,6 @@ def _fixture_init_cmd(args: argparse.Namespace) -> int:
     path = init_fixture(args.path.resolve(), overwrite=args.overwrite)
     print(path)
     return 0
-
 
 
 def _extract_flag_value(args: list[str], flag: str, default: str) -> str:

@@ -452,7 +452,6 @@ class _StubRunner:
         self.calls.append("review")
 
 
-
 class ForwardedFlagHelpersTest(unittest.TestCase):
     """`_set_flag_value` / `_remove_flag` fold an interactive choice back into
     the passthrough flags handed to the `contremaitre run` subprocess."""
@@ -484,7 +483,6 @@ class ForwardedFlagHelpersTest(unittest.TestCase):
         args = ["--sim-actor", "opencode", "--x", "1", "--sim-actor=cli"]
         _remove_flag(args, "--sim-actor")
         self.assertEqual(args, ["--x", "1"])
-
 
 
 class CompositeRunnerTest(unittest.TestCase):
