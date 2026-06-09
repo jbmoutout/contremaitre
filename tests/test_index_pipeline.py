@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from contremaitre.models import ModelSpec
+from contremaitre.run_record import parse_review_cycles
 from contremaitre.viewer.index import (
     _collect_pipeline_pairings,
     _diffstat_loc,
@@ -205,23 +206,32 @@ def test_pr_review_verdict_none_when_no_review(tmp_path):
     assert _pr_review_verdict(tmp_path) is None
 
 
-def test_review_signals_sim_rounds_and_changes(tmp_path):
-    _write_jsonl(
-        tmp_path / "review_cycles.jsonl",
+def test_review_signals_sim_rounds_and_changes():
+    cycles = parse_review_cycles(
         [
             {"reviewer": "sim", "round": 1, "verdict": "CHANGES_REQUESTED"},
             {"reviewer": "sim", "round": 2, "verdict": "APPROVED"},
-        ],
+        ]
     )
-    sig = _review_signals(tmp_path)
+    sig = _review_signals(cycles)
     assert sig["sim_rounds"] == 2
     assert sig["sim_changes"] is True  # round 1 bounced
 
 
-def test_review_signals_all_none_without_cycles(tmp_path):
-    sig = _review_signals(tmp_path)
+def test_review_signals_all_none_without_cycles():
+    sig = _review_signals([])
     assert sig["sim_rounds"] is None
     assert sig["sim_changes"] is None
+
+
+def test_review_signals_missing_reviewer_counts_as_sim():
+    # The `sim_cycles` seam normalises an absent `reviewer` to "sim" (the
+    # tolerant default two of three legacy readers used). A row with no
+    # reviewer key is therefore counted, where the old viewer dropped it.
+    cycles = parse_review_cycles([{"round": 1, "verdict": "APPROVED"}])
+    sig = _review_signals(cycles)
+    assert sig["sim_rounds"] == 1
+    assert sig["sim_changes"] is False
 
 
 # --------------------------------------------------------------------------
