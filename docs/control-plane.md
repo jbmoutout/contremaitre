@@ -402,6 +402,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + CLI runs, validated as the per-role union plus the post-publish CLI reviewer: repo/base ref, Docker image, `:ro` mount, network policy (CLI defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), codex / claude auth checks for active CLI tools. See [Preflight](#preflight).
 - [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
 - [`publisher.py`](../contremaitre/publisher.py) — publication boundary: `StubPublisher` (dry-run) vs `GhPublisher` (real `gh pr create --draft`). PR title + body derived from `.contremaitre/SETTLED_DESIGN.md` + SIM verdict summary; `--pr-title` / `--pr-body` override.
+- [`run_record.py`](../contremaitre/run_record.py) — the **Run record**: typed, read-side view of one run's artifacts. `RunStats` (the `stats.json` contract) and `ReviewCycle` (a `review_cycles.jsonl` row) are tolerant `from_record`/`from_row` readers; `sim_cycles()` is the one cross-reader fold (SIM rows minus `unavailable`); `RunRecord.load` is a thin façade for post-hoc readers (viewer index, eval). The TUI, viewer, flow-use, and eval all cross this one interface instead of re-deriving artifact fields with `.get()` chains — generalising the `ModelSpec.from_record` move (ADR-0001) to the rest of the contract. The seam is parsing, not loading: the live TUI keeps its tail loop and calls the parsers on dicts it already holds.
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
 - [`tui.py`](../contremaitre/tui.py) — read-only Textual TUI tailing JSONL artifacts. 7-phase footer (init → exploring → grilling → implementing → reviewing → cli_review → done) + SIM reviewer status glyphs + CLI review loop status + warning tokens + subscription-window usage (codex rollout snapshots / claude statusLine snapshots) + verdict badge.
 - [`verdicts.py`](../contremaitre/verdicts.py) — strict SIM verdict parser (fence-tolerant JSON extraction) and `diff_hash()` used by the diff-hash gate.
@@ -409,7 +410,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 
 ## Artifact contract
 
-Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is additive — readers must use `.get()`-style access. Paths are registered in [models.RunPaths](../contremaitre/models.py#L145-L181).
+Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is additive — readers must use `.get()`-style access. Paths are registered in [models.RunPaths](../contremaitre/models.py#L145-L181). The typed reader for `stats.json` and `review_cycles.jsonl` is [`run_record.py`](../contremaitre/run_record.py) (`RunStats` / `ReviewCycle` / `RunRecord`); readers route through it rather than re-parsing those dicts inline.
 
 ### Conversation streams
 

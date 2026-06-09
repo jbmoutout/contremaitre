@@ -39,6 +39,7 @@ from typing import Any
 
 from .extract import parse_apply_patch
 from .jsonlog import read_jsonl
+from .run_record import parse_review_cycles, sim_cycles
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +146,7 @@ def compute_phases(
     # max(round), not len(): retry / unavailable rows can make
     # review_cycles longer than the number of logical review rounds.
     # The round number is the canonical counter. Always recoverable.
-    review_rounds = max((e.get("round") or 0) for e in cycles) if cycles else 0
+    review_rounds = max((c.round for c in parse_review_cycles(cycles)), default=0)
 
     # The grilling/impl split needs at least one agent turn boundary, plus
     # either a recoverable SETTLED write timestamp OR (in a live run) the
@@ -348,13 +349,10 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     # Match against the SIM's own last verdict (not an `unavailable` marker
     # row) so the ratio reflects SIM tool-use → SIM verdict alignment.
     sim_useful_ratio: float | None = None
-    review_cycles = read_jsonl(paths.review_cycles)
-    sim_cycles = [
-        c for c in review_cycles if c.get("reviewer", "sim") == "sim" and not c.get("unavailable")
-    ]
-    if sim_cycles:
-        last = sim_cycles[-1]
-        verdict_text = last.get("summary", "") + " ".join(last.get("checks_performed", []))
+    sims = sim_cycles(parse_review_cycles(read_jsonl(paths.review_cycles)))
+    if sims:
+        last = sims[-1]
+        verdict_text = last.summary + " ".join(last.checks_performed)
         grep_calls = [e for e in tool_calls if _tool_name(e) == "grep"]
         if grep_calls:
             cited = sum(1 for e in grep_calls if _grep_args_cited_in(e, verdict_text))

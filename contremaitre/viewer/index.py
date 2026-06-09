@@ -17,8 +17,8 @@ from urllib.parse import urlsplit
 
 from ..costs import sum_token_usage
 from ..flow_use import compute_phases_from_paths
-from ..models import ModelSpec
 from ..paths import build_run_paths
+from ..run_record import ReviewCycle, RunRecord, RunStats, sim_cycles
 from . import VIEWER_FILENAME
 
 _HERE = Path(__file__).resolve().parent
@@ -61,7 +61,9 @@ def _collect_rows(runs_root: Path) -> list[dict[str, Any]]:
 
 
 def _summarize_run(run_dir: Path) -> dict[str, Any]:
-    stats = _read_json(run_dir / "stats.json", default={}) or {}
+    stats = RunStats.from_record(
+        _read_json(run_dir / "stats.json", default={}), run_id=run_dir.name
+    )
     pr = _read_json(run_dir / "pr.json", default=None)
     config = _read_json(run_dir / "run_config.json", default=None)
 
@@ -81,16 +83,16 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "run_id": run_dir.name,
         "viewer_href": f"{run_dir.name}/{VIEWER_FILENAME}",
         "when": _format_when(run_dir.name),
-        "agent_model": _spec_canonical(stats.get("agent_model"))[0],
-        "sim_model": _spec_canonical(stats.get("sim_model"))[0],
+        "agent_model": stats.agent_canonical()[0],
+        "sim_model": stats.sim_canonical()[0],
         "repo": repo,
         "base": base,
-        "verdict": stats.get("verdict") or "?",
-        "terminal_state": stats.get("terminal_state") or "?",
-        "duration_seconds": stats.get("duration_seconds"),
-        "turns": stats.get("turns"),
-        "cost_usd": stats.get("recorded_cost_usd"),
-        "reason": (stats.get("reason") or "").strip(),
+        "verdict": stats.verdict or "?",
+        "terminal_state": stats.terminal_state or "?",
+        "duration_seconds": stats.duration_seconds,
+        "turns": stats.turns,
+        "cost_usd": stats.recorded_cost_usd,
+        "reason": stats.reason,
         "impl_complete": _read_impl_complete(run_dir),
         "settled_preamble": _read_settled_preamble(run_dir),
         "pr_kind": (pr or {}).get("kind") if isinstance(pr, dict) else None,
@@ -288,19 +290,6 @@ def _format_when(run_id: str) -> str:
     except ValueError:
         return run_id
     return dt.strftime("%Y-%m-%d %H:%M")
-
-
-def _spec_canonical(model: object) -> tuple[str | None, str | None]:
-    """Uniform `(name, runtime)` for a role's persisted model identity.
-
-    Routes through `ModelSpec.from_record` (which absorbs the canonical dict
-    *and* any legacy on-disk label/slug string), so the viewer never parses a
-    model string itself. Returns `(None, None)` when identity is absent.
-    """
-
-    if not model:
-        return None, None
-    return ModelSpec.from_record(model).canonical()
 
 
 def _slug_from_pr_url(url: str | None) -> str | None:
@@ -610,30 +599,23 @@ def _pr_review_verdict(run_dir: Path) -> str | None:
     return worst
 
 
-def _review_signals(run_dir: Path) -> dict[str, Any]:
-    """SIM review signals from `review_cycles.jsonl` for one run.
+def _review_signals(cycles: list[ReviewCycle]) -> dict[str, Any]:
+    """SIM review signals from parsed review cycles for one run.
 
-    `sim_rounds` is the highest round the primary reviewer reached;
-    `sim_changes` records whether the reviewer ever bounced the diff
-    (returned a non-APPROVED verdict). It is None when the reviewer produced
-    no verdict row, so coverage stays honest for runs that never reached
-    review.
+    `sim_rounds` is the highest round the SIM reviewer reached; `sim_changes`
+    records whether the reviewer ever bounced the diff (returned a non-APPROVED
+    verdict). It is None when the reviewer produced no verdict row, so coverage
+    stays honest for runs that never reached review.
+
+    The SIM-and-not-`unavailable` filter is `sim_cycles()` behind the seam;
+    rolling those rows up into rounds/changes stays caller-side.
     """
 
-    sim_verdicts: list[str] = []
-    sim_rounds = 0
-    for row in _jsonl(run_dir / "review_cycles.jsonl"):
-        if row.get("unavailable"):
-            continue
-        verdict = row.get("verdict")
-        if not verdict:
-            continue
-        if row.get("reviewer") == "sim":
-            sim_verdicts.append(verdict)
-            sim_rounds = max(sim_rounds, int(row.get("round") or 0))
+    sims = [c for c in sim_cycles(cycles) if c.verdict]
+    sim_rounds = max((c.round for c in sims), default=0)
     return {
         "sim_rounds": sim_rounds or None,
-        "sim_changes": (any(v != "APPROVED" for v in sim_verdicts) if sim_verdicts else None),
+        "sim_changes": (any(c.verdict != "APPROVED" for c in sims) if sims else None),
     }
 
 
@@ -649,14 +631,17 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     can report honest per-metric coverage.
     """
 
-    stats = _read_json(run_dir / "stats.json", default=None)
-    if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
+    if not (run_dir / "stats.json").is_file():
         return None
-    agent, agent_rt = _spec_canonical(stats.get("agent_model"))
-    sim, sim_rt = _spec_canonical(stats.get("sim_model"))
+    record = RunRecord.load(run_dir)
+    stats = record.stats
+    if stats.actor_mode == "fake":
+        return None
+    agent, agent_rt = stats.agent_canonical()
+    sim, sim_rt = stats.sim_canonical()
     if not agent or not sim:
         return None
-    if stats.get("verdict") in _INFRA_VERDICTS:
+    if stats.verdict in _INFRA_VERDICTS:
         return {"agent": agent, "agent_rt": agent_rt, "sim": sim, "sim_rt": sim_rt, "infra": True}
 
     # Phases computed LIVE via the fixed flow_use.compute_phases, not the
@@ -666,7 +651,7 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     # turns — so the dashboard shows "—" rather than wrong numbers.
     phases = compute_phases_from_paths(build_run_paths(run_dir.parent, run_dir.name))
     loc = _diffstat_loc(run_dir)
-    review = _review_signals(run_dir)
+    review = _review_signals(record.review_cycles)
     pr_verdict = _pr_review_verdict(run_dir)
 
     # Agent output tokens — the code-production signal (cost is $0 for
@@ -683,9 +668,9 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
         "sim": sim,
         "sim_rt": sim_rt,
         "infra": False,
-        "lands_pr": str(stats.get("verdict") or "") in {"READY_FOR_DRAFT_PR", "PR_NEEDS_HUMAN"},
-        "turns": stats.get("turns"),
-        "duration": stats.get("duration_seconds"),
+        "lands_pr": str(stats.verdict or "") in {"READY_FOR_DRAFT_PR", "PR_NEEDS_HUMAN"},
+        "turns": stats.turns,
+        "duration": stats.duration_seconds,
         "design_rounds": phases.get("grilling_exchanges"),
         "impl_turns": phases.get("impl_turns"),
         "sim_rounds": review["sim_rounds"],
@@ -870,12 +855,10 @@ def _count_infra_runs(runs_root: Path) -> int:
     for entry in sorted(runs_root.iterdir()):
         if not entry.is_dir() or entry.name.startswith("_"):
             continue
-        stats = _read_json(entry / "stats.json", default=None)
-        if (
-            isinstance(stats, dict)
-            and stats.get("actor_mode") != "fake"
-            and stats.get("verdict") in _INFRA_VERDICTS
-        ):
+        if not (entry / "stats.json").is_file():
+            continue
+        stats = RunStats.from_record(_read_json(entry / "stats.json", default={}))
+        if stats.actor_mode != "fake" and stats.verdict in _INFRA_VERDICTS:
             count += 1
     return count
 
@@ -896,15 +879,19 @@ def _infra_only_pairings(runs_root: Path) -> list[dict[str, Any]]:
     for entry in sorted(runs_root.iterdir()):
         if not entry.is_dir() or entry.name.startswith("_"):
             continue
-        stats = _read_json(entry / "stats.json", default=None)
-        if not isinstance(stats, dict) or stats.get("actor_mode") == "fake":
+        if not (entry / "stats.json").is_file():
             continue
-        agent, agent_rt = _spec_canonical(stats.get("agent_model"))
-        sim, sim_rt = _spec_canonical(stats.get("sim_model"))
+        stats = RunStats.from_record(
+            _read_json(entry / "stats.json", default={}), run_id=entry.name
+        )
+        if stats.actor_mode == "fake":
+            continue
+        agent, agent_rt = stats.agent_canonical()
+        sim, sim_rt = stats.sim_canonical()
         if not agent or not sim:
             continue
         real_infra = counts.setdefault((agent, agent_rt, sim, sim_rt), [0, 0])
-        real_infra[1 if stats.get("verdict") in _INFRA_VERDICTS else 0] += 1
+        real_infra[1 if stats.verdict in _INFRA_VERDICTS else 0] += 1
 
     out = [
         {"agent": a, "agent_rt": a_rt, "sim": s, "sim_rt": s_rt, "infra_n": infra}

@@ -40,6 +40,7 @@ from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
 from .flow_use import compute_phases
 from .models import ModelSpec, resolved_model_from_events
+from .run_record import RunStats, parse_review_cycles
 
 # Unknown identity placeholder for runs whose model dicts can't be read yet.
 _UNKNOWN_SPEC = ModelSpec(runtime="opencode", requested="?")
@@ -443,11 +444,9 @@ def _round_verdict(review_cycles: list[dict[str, Any]], round_n: int) -> str | N
 
     return next(
         (
-            r.get("verdict")
-            for r in review_cycles
-            if (r.get("round") or 0) == round_n
-            and r.get("reviewer", "sim") == "sim"
-            and not r.get("unavailable")
+            c.verdict
+            for c in parse_review_cycles(review_cycles)
+            if c.round == round_n and c.is_sim and not c.unavailable
         ),
         None,
     )
@@ -480,14 +479,14 @@ def _reviewer_status(
       - `unavailable`  — marked unavailable in review_cycles
     """
 
-    for cycle in review_cycles:
-        if (cycle.get("round") or 0) != round_n:
+    for cycle in parse_review_cycles(review_cycles):
+        if cycle.round != round_n:
             continue
-        if cycle.get("reviewer", "sim") != "sim":
+        if not cycle.is_sim:
             continue
-        if cycle.get("unavailable"):
+        if cycle.unavailable:
             return "unavailable"
-        v = (cycle.get("verdict") or "").upper()
+        v = (cycle.verdict or "").upper()
         if v == "APPROVED":
             return "approved"
         if v == "CHANGES_REQUESTED":
@@ -2801,7 +2800,7 @@ if _TEXTUAL_AVAILABLE:
                 except (OSError, json.JSONDecodeError):
                     pass
 
-            tv: str | None = stats_data.get("verdict") if terminal else None
+            tv: str | None = RunStats.from_record(stats_data).verdict if terminal else None
             provider_failure = _provider_fast_fail(guardrails)
             pr_data = _read_pr_json(self.run_dir) or {}
             pr_url = pr_data.get("url") if pr_data.get("kind") == "PUBLISHED" else None
@@ -3238,9 +3237,10 @@ def _read_run_models(
     if stats.exists():
         try:
             d = json.loads(stats.read_text(encoding="utf-8"))
+            rec = RunStats.from_record(d)
             return (
-                ModelSpec.from_record(d.get("agent_model")),
-                ModelSpec.from_record(d.get("sim_model")),
+                rec.agent_spec or _UNKNOWN_SPEC,
+                rec.sim_spec or _UNKNOWN_SPEC,
                 d.get("cli_reviewer", "none"),
                 "?",
                 None,

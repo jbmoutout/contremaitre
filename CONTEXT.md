@@ -29,3 +29,12 @@ The model a run *actually* ran, as reported by the runtime's stream
 (claude's `system/init` carries it; codex is silent; opencode's requested slug
 *is* the resolved model). Distinct from **requested** so two `claude default`
 runs that resolved to different models do not collide in grouping.
+
+**Run record**
+The typed, read-side view of one run's artifacts. The orchestrator and evaluator
+write the artifact contract (`stats.json`, `review_cycles.jsonl`, …) as loose JSON;
+the Run record (`run_record.py`) parses that shape *once* — `RunStats`, `ReviewCycle`,
+and the `RunRecord` façade — so every reader (the TUI, the viewer index, flow-use,
+eval) crosses one interface instead of re-deriving field names with `.get()` chains.
+Tolerant by construction (defaults, never requirements), like [`ModelSpec`](#modelspec)
+`from_record`, which it composes for the model-identity fields.

@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from .manifest import manifest_digest
+from .run_record import RunStats
 
 
 GOLDEN_CASES_DIRNAME = "golden_cases"
@@ -851,6 +852,10 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
 
     run_config = _read_json_safe(run_dir / "run_config.json") or {}
     stats = _read_json_safe(run_dir / "stats.json") or {}
+    # Scalar fields route through the Run record; the raw `stats` dict is still
+    # read directly for the model-identity dicts at the digest carve-out below
+    # (`RunStats` parses those into `ModelSpec`, which would force a re-serialise).
+    stats_rec = RunStats.from_record(stats, run_id=run_dir.name)
     pr_eval = _read_json_safe(run_dir / "eval" / "pr_eval.json") or {}
     flow_use = _read_json_safe(run_dir / "eval" / "flow_use.json") or {}
 
@@ -868,7 +873,7 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
     diff = _diff_stats(run_dir)
     depth = _review_depth(run_dir)
 
-    terminal = stats.get("verdict") or pr_eval.get("verdict")
+    terminal = stats_rec.verdict or pr_eval.get("verdict")
     terminal_score = _TERMINAL_TO_SCORE.get(terminal) if terminal else None
 
     # Severity-weighted finding count: Conventional Comments labels already
@@ -907,8 +912,8 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
         "files_changed": diff["files_changed"],
         "loc_net_delta": diff["loc_net_delta"],
         "review_rounds": depth["rounds"],
-        "cost_usd": stats.get("recorded_cost_usd"),
-        "wall_seconds": stats.get("duration_seconds"),
+        "cost_usd": stats_rec.recorded_cost_usd,
+        "wall_seconds": stats_rec.duration_seconds,
     }
 
     diagnostic = {
@@ -952,7 +957,7 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
             "files_changed": diff["files_changed"],
         },
         "efficiency": {
-            "turns": stats.get("turns"),
+            "turns": stats_rec.turns,
             "agent_tool_call_count": _flow_value(flow_agent, "tool_call_count"),
             "sim_tool_call_count": _flow_value(flow_sim, "sim_tool_call_count"),
         },
@@ -1012,7 +1017,7 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
 
     return CanaryReport(
         case_id=case.case_id,
-        run_id=stats.get("run_id") or run_dir.name,
+        run_id=stats_rec.run_id,
         run_dir=str(run_dir),
         system_digest=system_digest,
         input_digest=input_digest,
