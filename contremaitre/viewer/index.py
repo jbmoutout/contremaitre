@@ -61,7 +61,9 @@ def _collect_rows(runs_root: Path) -> list[dict[str, Any]]:
 
 
 def _summarize_run(run_dir: Path) -> dict[str, Any]:
-    stats = RunStats.from_record(_read_json(run_dir / "stats.json", default={}), run_id=run_dir.name)
+    stats = RunStats.from_record(
+        _read_json(run_dir / "stats.json", default={}), run_id=run_dir.name
+    )
     pr = _read_json(run_dir / "pr.json", default=None)
     config = _read_json(run_dir / "run_config.json", default=None)
 
@@ -879,7 +881,9 @@ def _infra_only_pairings(runs_root: Path) -> list[dict[str, Any]]:
             continue
         if not (entry / "stats.json").is_file():
             continue
-        stats = RunStats.from_record(_read_json(entry / "stats.json", default={}), run_id=entry.name)
+        stats = RunStats.from_record(
+            _read_json(entry / "stats.json", default={}), run_id=entry.name
+        )
         if stats.actor_mode == "fake":
             continue
         agent, agent_rt = stats.agent_canonical()
