@@ -1,8 +1,8 @@
 """Shared detached-container lifecycle and actor types.
 
-Module-internal (`_`-prefix file = not CLI-public). Three callers share the
-container runner on this side of the seam — actors.py (opencode path),
-cli_actor.py (CLI tool path), and checks.py (sidecar path).
+Module-internal (`_`-prefix file = not CLI-public). Two callers share the
+container runner on this side of the seam — actors.py (opencode path) and
+cli_actor.py (CLI tool path).
 
 Seam rule: what `run_detached`'s call graph needs moves here. SQLite recovery
 and ActorOutput assembly stay caller-side because they're opencode-specific.
