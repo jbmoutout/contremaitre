@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..costs import sum_token_usage
-from ..flow_use import compute_phases
+from ..flow_use import compute_phases_from_paths
 from ..models import ModelSpec
 from ..paths import build_run_paths
 from . import VIEWER_FILENAME
@@ -664,7 +664,7 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     # fix). grilling/impl come back None when unrecoverable — codex streams
     # carry no timestamps, and pre-actor-start CLI runs logged no agent
     # turns — so the dashboard shows "—" rather than wrong numbers.
-    phases = compute_phases(build_run_paths(run_dir.parent, run_dir.name))
+    phases = compute_phases_from_paths(build_run_paths(run_dir.parent, run_dir.name))
     loc = _diffstat_loc(run_dir)
     review = _review_signals(run_dir)
     pr_verdict = _pr_review_verdict(run_dir)

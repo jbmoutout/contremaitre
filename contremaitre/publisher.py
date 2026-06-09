@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from .flow_use import compute_phases
+from .flow_use import compute_phases_from_paths
 from .jsonlog import append_jsonl, write_json
 from .models import PublishMode, RunConfig, RunPaths
 from .scaffolds import (
@@ -266,7 +266,7 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     # on candidate selection alone". grill≤1 with impl=1 is the skipped-grilling
     # pattern; grill≥3 means real back-and-forth before SETTLED.
     try:
-        phases = compute_phases(paths)
+        phases = compute_phases_from_paths(paths)
     except Exception:
         phases = {
             "grilling_exchanges": None,
