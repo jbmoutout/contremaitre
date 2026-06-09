@@ -128,8 +128,8 @@ WORK SESSION (one opencode session — `agent_turn → sim_turn → agent_turn �
     │ agent: "Which would you like              SIM: picks one + 2-3 sentence
     │   to explore?"                  ◄────►    justification in skill vocab
     │ event: `turn` (per turn,                 (Module / Seam / Depth …)
-    │   role-tagged from actor JSONL)          forbidden tools: write / edit /
-    │ TUI phase: grilling                      bash / task / apply_patch
+    │   role-tagged from actor JSONL)          forbidden operations: write /
+    │ TUI phase: grilling                      edit / delete (mount is :ro)
     │
   Grill / Deepening
     │ N turns. Agent proposes               ◄────► SIM cites constraints,
@@ -312,7 +312,7 @@ The agent and SIM never hold:
 Read-only enforcement is belt-and-suspenders:
 
 1. SIM container mounts `/app:ro`.
-2. SIM persona (`prompts/sim_tooled_persona.md`) explicitly forbids `write` / `edit` / `apply_patch` / `bash` / `task`.
+2. SIM persona (`prompts/sim_tooled_persona.md`) forbids write/edit/delete operations — runtime-agnostic so the persona works for Codex (`exec_command`) and Claude/opencode (`Bash`, `Read`, etc.).
 3. Host `diffscan.py` blocks publication if forbidden paths appear in the diff.
 
 Opencode containers see only `OPENROUTER_API_KEY` (when set) and the proxy variables passed via CLI flags. Ambient host env is never inherited. When `OPENROUTER_API_KEY` is absent, runs default to free OpenCode Zen models served by OpenCode; the container's `OPENROUTER_API_KEY` is simply not exported.

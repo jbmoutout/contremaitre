@@ -44,7 +44,7 @@ Pick `codex` or `claude` for the agent and/or SIM in the launch screen, or set `
 Inside one multi-turn session — driven by an opencode model or a subscription CLI (codex/claude), same flow either way — the agent runs the skill end-to-end:
 
 1. **Explore + propose** — agent reads the codebase, writes `.contremaitre/architecture-review.html` (candidate cards), then asks the SIM which to deepen.
-2. **Grill** — N turns of agent ↔ SIM exchanges. SIM cites constraints from the code (`read` / `glob` / `grep` only); the agent defends or revises.
+2. **Grill** — N turns of agent ↔ SIM exchanges. SIM searches the codebase to verify claims and cites constraints by file/line; the agent defends or revises.
 3. **Settle** — agent writes `.contremaitre/SETTLED_DESIGN.md` — the design handoff that REVIEW reads.
 4. **Implement** — agent edits files; SIM watches each diff for drift from SETTLED. The project's tests + CI lint/format gate run scoped to changed files.
 5. **Marker** — agent writes `.contremaitre/IMPLEMENTATION_COMPLETE`, ending WORK.
