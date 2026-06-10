@@ -1199,9 +1199,7 @@ class CliActorStartEventTest(unittest.TestCase):
                 "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
             ):
                 runner.agent_turn("hello")
-            starts = [
-                e for e in self._guardrails(paths) if e.get("event") == "opencode_actor_start"
-            ]
+            starts = [e for e in self._guardrails(paths) if e.get("event") == "actor_start"]
             self.assertEqual(len(starts), 1)
             self.assertEqual(starts[0]["role"], "agent")
             self.assertEqual(starts[0]["tool"], "codex")
@@ -1228,7 +1226,7 @@ class CliActorStartEventTest(unittest.TestCase):
             starts = [
                 e
                 for e in self._guardrails(paths)
-                if e.get("event") == "opencode_actor_start" and e.get("role") == "review"
+                if e.get("event") == "actor_start" and e.get("role") == "review"
             ]
             self.assertEqual(starts[0]["reviewer_id"], "extra")
 

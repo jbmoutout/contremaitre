@@ -1093,13 +1093,12 @@ class CliActorRunner:
             extra_mounts=extra_mounts,
         )
         env = self.driver.container_env(self._docker_env())
-        # Emit the runtime-agnostic actor-start guardrail (legacy name
-        # OPENCODE_ACTOR_START — predates the CLI actors) BEFORE launch, exactly
+        # Emit the runtime-agnostic actor-start guardrail BEFORE launch, exactly
         # like OpencodeActorRunner. TUI phase tracking, turn separators, review
         # round counters, and flow_use metrics all key off this event; without it
         # a CLI run has blank telemetry. One start = one turn = one invocation.
         start_event: dict[str, object] = {
-            "event": events.OPENCODE_ACTOR_START,
+            "event": events.ACTOR_START,
             "role": role,
             "mount_mode": mount_mode,
             "model": model,

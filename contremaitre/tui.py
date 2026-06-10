@@ -457,9 +457,7 @@ def _current_review_round(guardrails: list[dict[str, Any]]) -> int:
     """Round number derived from the count of REVIEW-SIM actor starts."""
 
     return sum(
-        1
-        for g in guardrails
-        if g.get("event") == "opencode_actor_start" and g.get("role") == "review"
+        1 for g in guardrails if g.get("event") == "actor_start" and g.get("role") == "review"
     )
 
 
@@ -497,9 +495,7 @@ def _reviewer_status(
         return "streaming"
 
     matching_starts = [
-        g
-        for g in guardrails
-        if g.get("event") == "opencode_actor_start" and g.get("role") == "review"
+        g for g in guardrails if g.get("event") == "actor_start" and g.get("role") == "review"
     ]
     if len(matching_starts) >= round_n:
         return "streaming"
@@ -2038,7 +2034,7 @@ def _cli_review_tool_header(tool: str) -> Text:
 def _turn_separator(turn_number: int, role: str) -> Text:
     """Visual break at an orchestrator-driven handover boundary.
 
-    Driven by `opencode_actor_start` events in guardrail_events.jsonl —
+    Driven by `actor_start` events in guardrail_events.jsonl —
     each one marks the orchestrator handing the conversation to a new
     role (agent → sim, sim → agent, sim → reviewer). The separator is
     written into the pane that just finished a turn, so the operator
@@ -2261,7 +2257,7 @@ if _TEXTUAL_AVAILABLE:
             self._prev_active: str | None | object = _UNSET_ACTIVE
             self._wink_ticks_remaining: int = 0
             # Per-pane handover separator counters. Each orchestrator
-            # turn handover emits one `opencode_actor_start` event with
+            # turn handover emits one `actor_start` event with
             # role agent/sim/review; we render a separator into the
             # *just-finished* pane each time a new start event appears
             # for it, so the label corresponds to the turn that ended.
@@ -2489,7 +2485,7 @@ if _TEXTUAL_AVAILABLE:
                 widget.scroll_end(animate=False)
 
         def _update_turn_separators(self) -> None:
-            # Drive handover separators off `opencode_actor_start` in
+            # Drive handover separators off `actor_start` in
             # guardrail_events. Runs BEFORE the per-pane log updates so
             # the separator lands between turn N and turn N+1: the
             # orchestrator guarantees all of turn N's events are in
@@ -2500,12 +2496,12 @@ if _TEXTUAL_AVAILABLE:
             agent_starts = [
                 e
                 for e in guardrails
-                if e.get("event") == "opencode_actor_start" and e.get("role") == "agent"
+                if e.get("event") == "actor_start" and e.get("role") == "agent"
             ]
             sim_starts = [
                 e
                 for e in guardrails
-                if e.get("event") == "opencode_actor_start" and e.get("role") in ("sim", "review")
+                if e.get("event") == "actor_start" and e.get("role") in ("sim", "review")
             ]
             agent_widget = self.query_one("#agent-log", RichLog)
             sim_widget = self.query_one("#sim-log", RichLog)
@@ -2809,18 +2805,15 @@ if _TEXTUAL_AVAILABLE:
             pr_title = pr_data.get("title") if pr_data.get("kind") == "PUBLISHED" else None
 
             agent_started = any(
-                g.get("event") == "opencode_actor_start" and g.get("role") == "agent"
-                for g in guardrails
+                g.get("event") == "actor_start" and g.get("role") == "agent" for g in guardrails
             )
             # WORK-loop SIM only — `role=sim`. Review-pass SIM is a separate
             # role and gates the Implementing → Reviewing transition below.
             sim_started = any(
-                g.get("event") == "opencode_actor_start" and g.get("role") == "sim"
-                for g in guardrails
+                g.get("event") == "actor_start" and g.get("role") == "sim" for g in guardrails
             )
             review_started = any(
-                g.get("event") == "opencode_actor_start" and g.get("role") == "review"
-                for g in guardrails
+                g.get("event") == "actor_start" and g.get("role") == "review" for g in guardrails
             )
             architecture_review_done = _architecture_review_in(agent_events)
             # cli_review_started / _completed / _failed hoisted above.

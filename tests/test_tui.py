@@ -74,7 +74,7 @@ def _g(kind: str, **fields) -> dict:
 
 
 def _actor_start(role: str) -> dict:
-    return _g(events.OPENCODE_ACTOR_START, role=role)
+    return _g(events.ACTOR_START, role=role)
 
 
 # ===== _read_jsonl =====
@@ -427,20 +427,20 @@ def test_current_review_round_zero_when_no_starts():
 
 def test_current_review_round_counts_only_sim_review_starts():
     guardrails = [
-        _g(events.OPENCODE_ACTOR_START, role="agent"),
-        _g(events.OPENCODE_ACTOR_START, role="sim"),
-        _g(events.OPENCODE_ACTOR_START, role="review"),
+        _g(events.ACTOR_START, role="agent"),
+        _g(events.ACTOR_START, role="sim"),
+        _g(events.ACTOR_START, role="review"),
     ]
     assert _current_review_round(guardrails) == 1
 
 
 def test_current_review_round_advances_per_loop_back():
     guardrails = [
-        _g(events.OPENCODE_ACTOR_START, role="review"),
-        _g(events.OPENCODE_ACTOR_START, role="agent"),
-        _g(events.OPENCODE_ACTOR_START, role="review"),
-        _g(events.OPENCODE_ACTOR_START, role="agent"),
-        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 3 just opened
+        _g(events.ACTOR_START, role="review"),
+        _g(events.ACTOR_START, role="agent"),
+        _g(events.ACTOR_START, role="review"),
+        _g(events.ACTOR_START, role="agent"),
+        _g(events.ACTOR_START, role="review"),  # round 3 just opened
     ]
     assert _current_review_round(guardrails) == 3
 
@@ -453,13 +453,13 @@ def test_reviewer_status_idle_when_no_start():
 
 
 def test_reviewer_status_streaming_when_started_no_verdict():
-    guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
+    guardrails = [_g(events.ACTOR_START, role="review")]
     assert _reviewer_status(round_n=1, review_cycles=[], guardrails=guardrails) == "streaming"
 
 
 def test_reviewer_status_approved():
     cycles = [{"round": 1, "verdict": "APPROVED", "reviewer": "sim"}]
-    guardrails = [_g(events.OPENCODE_ACTOR_START, role="review")]
+    guardrails = [_g(events.ACTOR_START, role="review")]
     assert _reviewer_status(round_n=1, review_cycles=cycles, guardrails=guardrails) == "approved"
 
 
@@ -484,9 +484,9 @@ def test_reviewer_status_per_round_independence():
         {"round": 1, "verdict": "CHANGES_REQUESTED", "reviewer": "sim"},
     ]
     guardrails = [
-        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 1
-        _g(events.OPENCODE_ACTOR_START, role="agent"),  # work loop
-        _g(events.OPENCODE_ACTOR_START, role="review"),  # round 2 — streaming
+        _g(events.ACTOR_START, role="review"),  # round 1
+        _g(events.ACTOR_START, role="agent"),  # work loop
+        _g(events.ACTOR_START, role="review"),  # round 2 — streaming
     ]
     assert _reviewer_status(round_n=2, review_cycles=cycles, guardrails=guardrails) == "streaming"
     # Round 1 verdict is still recoverable for prior-round inspection.
@@ -1076,7 +1076,7 @@ def test_latest_pending_tool_completed_returns_none():
         # hard_gates_checked passed=True → ✓.
         (events.HARD_GATES_CHECKED, {"passed": True}, ["✓"]),
         # actor_start surfaces the role so the operator sees agent/sim/review.
-        (events.OPENCODE_ACTOR_START, {"role": "review"}, ["role=review"]),
+        (events.ACTOR_START, {"role": "review"}, ["role=review"]),
         (events.WORK_SESSION_END, {"role": "agent"}, ["role=agent"]),
         (events.TURN_CAP, {"role": "agent"}, ["role=agent"]),
     ],

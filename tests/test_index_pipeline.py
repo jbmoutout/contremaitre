@@ -106,10 +106,10 @@ def _make_run(
     # guardrails: agent/sim turn boundaries for the phase split + an
     # optional post-publish CLI review verdict.
     guardrails: list[dict] = [
-        {"event": "opencode_actor_start", "role": "agent", "ts": 1000},
-        {"event": "opencode_actor_start", "role": "sim", "ts": 2000},
-        {"event": "opencode_actor_start", "role": "agent", "ts": 3000},
-        {"event": "opencode_actor_start", "role": "review", "ts": 4000},
+        {"event": "actor_start", "role": "agent", "ts": 1000},
+        {"event": "actor_start", "role": "sim", "ts": 2000},
+        {"event": "actor_start", "role": "agent", "ts": 3000},
+        {"event": "actor_start", "role": "review", "ts": 4000},
     ]
     if cli_review_verdict is not None:
         guardrails.append(

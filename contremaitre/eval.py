@@ -270,7 +270,7 @@ def run_case(case: CaseDef, config: ConfigDef, *, runs_root: Path, rep_index: in
 # silently ignored — `progress` / `no_progress` fire several times per turn
 # and would drown out the phase signal.
 _PROGRESS_EVENTS = {
-    "opencode_actor_start",
+    "actor_start",
     "turn",
     "review_verdict",
     "revision_requested",
@@ -296,7 +296,7 @@ def _fmt_progress(obj: dict[str, Any], elapsed: float, state: dict[str, int]) ->
     """Map one guardrail event to a short progress line. None to skip.
 
     `state` is a per-watcher mutable dict — used to maintain per-role turn
-    counters (the orchestrator emits one `opencode_actor_start` per agent or
+    counters (the orchestrator emits one `actor_start` per agent or
     SIM container launch; we count them rather than expecting a discrete
     `turn` event, which only lands in `timeline.jsonl`).
     """
@@ -305,7 +305,7 @@ def _fmt_progress(obj: dict[str, Any], elapsed: float, state: dict[str, int]) ->
     if e not in _PROGRESS_EVENTS:
         return None
     minutes = f"{elapsed / 60:5.1f}m"
-    if e == "opencode_actor_start":
+    if e == "actor_start":
         role = obj.get("role", "?")
         if role == "agent":
             state["agent_turns"] = state.get("agent_turns", 0) + 1

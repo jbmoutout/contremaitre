@@ -115,7 +115,7 @@ def compute_phases(
     impl     = agent turns from SETTLED write through IMPLEMENTATION_COMPLETE
     review   = SIM review rounds (from review_cycles, deduped over retries)
 
-    Anchored to `opencode_actor_start` in `guardrails` (one start = one process
+    Anchored to `actor_start` in `guardrails` (one start = one process
     invocation = one turn) and the SETTLED / IMPL_COMPLETE write timestamps in
     `agent_events`. Surfaced live in the TUI footer Zone 3 and rolled into the
     PR body lede.
@@ -133,7 +133,7 @@ def compute_phases(
 
     starts: list[tuple[float, str]] = []
     for g in guardrails:
-        if g.get("event") != "opencode_actor_start":
+        if g.get("event") != "actor_start":
             continue
         ts = _timestamp_ms(g)
         role = g.get("role")

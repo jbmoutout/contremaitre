@@ -342,7 +342,7 @@ class OpencodeActorRunner:
             role=role,
         )
         start_event: dict[str, object] = {
-            "event": events.OPENCODE_ACTOR_START,
+            "event": events.ACTOR_START,
             "role": role,
             "mount_mode": mount_mode,
             "model": model,

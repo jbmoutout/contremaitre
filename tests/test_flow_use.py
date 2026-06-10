@@ -32,10 +32,10 @@ def _phase_paths(tmp_path: Path):
 # precede it: grilling = min(1, 1) = 1, impl = 1.
 def _phase_guardrails() -> list[dict]:
     return [
-        {"event": "opencode_actor_start", "role": "agent", "ts": 1000},
-        {"event": "opencode_actor_start", "role": "sim", "ts": 2000},
-        {"event": "opencode_actor_start", "role": "agent", "ts": 3000},
-        {"event": "opencode_actor_start", "role": "review", "ts": 4000},
+        {"event": "actor_start", "role": "agent", "ts": 1000},
+        {"event": "actor_start", "role": "sim", "ts": 2000},
+        {"event": "actor_start", "role": "agent", "ts": 3000},
+        {"event": "actor_start", "role": "review", "ts": 4000},
     ]
 
 
@@ -145,7 +145,7 @@ def test_compute_phases_none_when_no_agent_turn_logged(tmp_path):
     )
     _write_jsonl(
         paths.guardrail_events,
-        [{"event": "opencode_actor_start", "role": "sim", "ts": 2000}],
+        [{"event": "actor_start", "role": "sim", "ts": 2000}],
     )
     _write_jsonl(paths.review_cycles, [])
     phases = compute_phases_from_paths(paths)
@@ -187,8 +187,8 @@ def test_compute_phases_live_counts_before_settled_where_posthoc_is_none():
     # the accruing grilling counter; the default (post-hoc) must stay None so
     # eval/report history semantics for never-settled runs are unchanged.
     guardrails = [
-        {"event": "opencode_actor_start", "role": "agent", "ts": 1000},
-        {"event": "opencode_actor_start", "role": "sim", "ts": 2000},
+        {"event": "actor_start", "role": "agent", "ts": 1000},
+        {"event": "actor_start", "role": "sim", "ts": 2000},
     ]
     posthoc = compute_phases([], guardrails, [])
     assert posthoc["grilling_exchanges"] is None
@@ -202,7 +202,7 @@ def test_compute_phases_live_counts_before_settled_where_posthoc_is_none():
 def test_compute_phases_live_still_none_without_agent_turn():
     # `live` does not rescue a genuinely unrecoverable split: no agent
     # actor-start means no anchor, so both modes return None.
-    guardrails = [{"event": "opencode_actor_start", "role": "sim", "ts": 2000}]
+    guardrails = [{"event": "actor_start", "role": "sim", "ts": 2000}]
     live = compute_phases([], guardrails, [], live=True)
     assert live["grilling_exchanges"] is None
 

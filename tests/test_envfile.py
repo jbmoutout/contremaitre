@@ -100,9 +100,7 @@ class UpsertEnvVarTest(unittest.TestCase):
 
             upsert_env_var(path, "CLAUDE_CODE_OAUTH_TOKEN", "tok")
 
-            self.assertEqual(
-                path.read_text(encoding="utf-8"), "CLAUDE_CODE_OAUTH_TOKEN='tok'\n"
-            )
+            self.assertEqual(path.read_text(encoding="utf-8"), "CLAUDE_CODE_OAUTH_TOKEN='tok'\n")
 
     def test_written_value_round_trips_through_loader(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):

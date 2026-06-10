@@ -33,7 +33,7 @@ WORK_SESSION_END = "work_session_end"
 
 # ----- Actor lifecycle -----
 
-OPENCODE_ACTOR_START = "opencode_actor_start"
+ACTOR_START = "actor_start"
 SUBAGENT_STEP_FINISH_HARVESTED = "subagent_step_finish_harvested"
 
 # ----- Review loop -----
