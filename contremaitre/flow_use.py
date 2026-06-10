@@ -34,12 +34,11 @@ Added (SIM): sim_read_settled, sim_read_diff, sim_read_diff_partial,
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from typing import Any
 
 from .jsonlog import read_jsonl
 from .extract import parse_apply_patch as _parse_apply_patch
-from .tool_events import ToolUseEvent, iter_tool_use_events
+from .tool_events import ToolUseEvent, extract_timestamp_ms, iter_tool_use_events
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +127,8 @@ def compute_phases(
     # Mode-agnostic write detection via normalised tool-use events.
     # (Codex has no per-event timestamp — see below.)
     tool_events = iter_tool_use_events(agent_events)
-    settled_event = _find_write_event(tool_events, _SETTLED_RE)
-    impl_event = _find_write_event(tool_events, _IMPL_COMPLETE_RE)
+    settled_event = _find_write_to(tool_events, _SETTLED_RE)
+    impl_event = _find_write_to(tool_events, _IMPL_COMPLETE_RE)
     settled_ms = settled_event.timestamp_ms if settled_event else None
     impl_ms = impl_event.timestamp_ms if impl_event else None
 
@@ -408,18 +407,6 @@ def _convergence(file_access: dict[str, int]) -> tuple[str, float, int, int]:
 
 
 def _find_write_to(tool_calls: list[ToolUseEvent], pattern: re.Pattern) -> ToolUseEvent | None:
-    for e in tool_calls:
-        if e.tool not in ("write", "edit", "apply_patch"):
-            continue
-        if e.state.get("status") != "completed" and e.runtime == "opencode":
-            continue
-        target = e.file_path or e.input.get("patchText") or e.input.get("patch") or ""
-        if pattern.search(str(target)):
-            return e
-    return None
-
-
-def _find_write_event(events: list[ToolUseEvent], pattern: re.Pattern) -> ToolUseEvent | None:
     """First tool-use event that WRITES a path matching `pattern`, across runtimes.
 
     Codex is intentionally NOT handled: its `--json` stream carries no
@@ -428,7 +415,7 @@ def _find_write_event(events: list[ToolUseEvent], pattern: re.Pattern) -> ToolUs
     caller treats a missing settled event as "unknown" and emits None
     rather than a wrong number — see `compute_phases`.
     """
-    for e in events:
+    for e in tool_calls:
         if e.tool not in ("write", "edit", "apply_patch"):
             continue
         if e.state.get("status") != "completed" and e.runtime == "opencode":
@@ -527,24 +514,7 @@ def _check_self_verification(
 def _timestamp_ms(e: dict | None) -> float | None:
     if not e:
         return None
-    raw = e.get("timestamp")
-    if isinstance(raw, int | float):
-        return float(raw)
-    if isinstance(raw, str):
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    ts = e.get("ts")
-    if isinstance(ts, int | float):
-        # claude stream-json stamps each event with an epoch-ms integer.
-        return float(ts)
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
-        except ValueError:
-            return None
-    return None
+    return extract_timestamp_ms(e)
 
 
 def _tool_paths(e: ToolUseEvent) -> list[str]:

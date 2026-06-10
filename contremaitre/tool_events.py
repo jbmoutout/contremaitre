@@ -27,6 +27,14 @@ class ToolUseEvent:
     def content(self) -> str:
         return self.input.get("content") or ""
 
+    @property
+    def old_string(self) -> str:
+        return self.input.get("oldString") or self.input.get("old_string") or ""
+
+    @property
+    def new_string(self) -> str:
+        return self.input.get("newString") or self.input.get("new_string") or ""
+
 
 _CLAUDE_TOOL_MAP: dict[str, str] = {
     "Write": "write",
@@ -47,7 +55,7 @@ def _normalise_tool_name(raw_name: str) -> str:
     return _CLAUDE_TOOL_MAP.get(raw_name, raw_name.lower())
 
 
-def _extract_timestamp_ms(event: dict[str, Any]) -> float | None:
+def extract_timestamp_ms(event: dict[str, Any]) -> float | None:
     raw = event.get("timestamp")
     if isinstance(raw, int | float):
         return float(raw)
@@ -83,7 +91,7 @@ def iter_tool_use_events(raw_events: list[dict[str, Any]]) -> list[ToolUseEvent]
                     tool=tool,
                     input=inp,
                     state=state,
-                    timestamp_ms=_extract_timestamp_ms(event),
+                    timestamp_ms=extract_timestamp_ms(event),
                     runtime="opencode",
                     event_index=idx,
                 )
@@ -95,16 +103,40 @@ def iter_tool_use_events(raw_events: list[dict[str, Any]]) -> list[ToolUseEvent]
                 name = block.get("name", "")
                 if not name:
                     continue
-                tool = _normalise_tool_name(name)
                 inp = block.get("input") or {}
-                result.append(
-                    ToolUseEvent(
-                        tool=tool,
-                        input=inp,
-                        state={},
-                        timestamp_ms=_extract_timestamp_ms(event),
-                        runtime="claude",
-                        event_index=idx,
+                ts = extract_timestamp_ms(event)
+                if name == "MultiEdit":
+                    for edit in inp.get("edits") or []:
+                        if not isinstance(edit, dict):
+                            continue
+                        fp = edit.get("file_path") or edit.get("path") or ""
+                        if not fp:
+                            continue
+                        outer = {
+                            "file_path": fp,
+                            "old_string": edit.get("old_string", ""),
+                            "new_string": edit.get("new_string", ""),
+                        }
+                        result.append(
+                            ToolUseEvent(
+                                tool="edit",
+                                input=outer,
+                                state={},
+                                timestamp_ms=ts,
+                                runtime="claude",
+                                event_index=idx,
+                            )
+                        )
+                else:
+                    tool = _normalise_tool_name(name)
+                    result.append(
+                        ToolUseEvent(
+                            tool=tool,
+                            input=inp,
+                            state={},
+                            timestamp_ms=ts,
+                            runtime="claude",
+                            event_index=idx,
+                        )
                     )
-                )
     return result

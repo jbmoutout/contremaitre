@@ -93,8 +93,8 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
             fp = e.file_path
             if not fp:
                 continue
-            old_s = e.input.get("oldString") or ""
-            new_s = e.input.get("newString") or ""
+            old_s = e.old_string
+            new_s = e.new_string
             out = paths.extracted_files_dir / f"{_host_name(fp)}.edits.md"
             block = (
                 "\n---\n## edit (oldString → newString)\n\n"
