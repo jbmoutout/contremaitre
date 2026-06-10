@@ -732,7 +732,7 @@ def _codex_token_line() -> str:
         return f"codex token: valid (~{(exp - int(_time.time())) // 3600}h left)"
     if auth.exists():
         return "codex token: present (opaque expiry)"
-    return "codex token: MISSING — run codex once to log in"
+    return "codex token: MISSING — run `codex login` on the host"
 
 
 def _claude_token_line() -> str:
@@ -740,7 +740,67 @@ def _claude_token_line() -> str:
 
     if os.environ.get(_CLAUDE_OAUTH_ENV):
         return f"claude token: present ({_CLAUDE_OAUTH_ENV} set)"
-    return f"claude token: MISSING — run `claude setup-token` and export {_CLAUDE_OAUTH_ENV}"
+    return f"claude token: MISSING — run `claude setup-token` and add {_CLAUDE_OAUTH_ENV} to .env"
+
+
+def _opencode_key_line(env_var: str) -> str:
+    if os.environ.get(env_var):
+        return f"opencode key: present ({env_var} set)"
+    return f"opencode key: MISSING — add {env_var} to .env (paid/OpenRouter model selected)"
+
+
+def _onboard_claude_token() -> bool:
+    """Guide the operator through `claude setup-token` and persist the result.
+
+    Offers to run the headless OAuth flow (inheriting the terminal so the
+    browser handshake works), prompts for the printed token, validates its
+    shape, writes ``CLAUDE_CODE_OAUTH_TOKEN`` to ``./.env``, and exports it into
+    the current process so the in-flight run can proceed. Returns True only when
+    a token was captured and persisted; False if the operator declined, the
+    claude CLI is absent, or the pasted value is not a setup-token.
+    """
+    import shutil
+    import subprocess
+
+    from .cli_actor import _CLAUDE_OAUTH_ENV
+    from .envfile import upsert_env_var
+
+    print()
+    print(f"  {_b('No claude token found.')} {_d(f'({_CLAUDE_OAUTH_ENV} unset)')}")
+    if shutil.which("claude") is None:
+        print(f"  {_d('claude CLI is not on PATH — install it first, then re-run.')}")
+        return False
+    try:
+        reply = input("  Run `claude setup-token` now? [Y/n] ").strip().lower()
+    except EOFError:
+        return False
+    if reply not in ("", "y", "yes"):
+        return False
+
+    print(f"  {_d('launching claude setup-token (browser OAuth) …')}")
+    try:
+        subprocess.run(["claude", "setup-token"], check=False)
+    except OSError as exc:
+        print(f"  {_d(f'could not launch claude: {exc}')}")
+        return False
+
+    try:
+        token = input("  Paste the token shown above: ").strip()
+    except EOFError:
+        return False
+    if not token.startswith("sk-ant-oat"):
+        print(f"  {_d('not a setup-token (expected sk-ant-oat…) — skipping')}")
+        return False
+
+    env_path = Path.cwd() / ".env"
+    try:
+        upsert_env_var(env_path, _CLAUDE_OAUTH_ENV, token)
+    except ValueError as exc:
+        print(f"  {_d(f'could not write .env: {exc}')}")
+        return False
+    os.environ[_CLAUDE_OAUTH_ENV] = token
+    print(f"  {_b('✓')} wrote {_CLAUDE_OAUTH_ENV} to {env_path}")
+    return True
 
 
 def _agent_name_to_runtime(name: str) -> tuple[ActorMode, str | None]:
@@ -820,23 +880,20 @@ def _pick_zen_model_interactive(role: str, *, default: str | None = None) -> str
 
 
 def _preflight_presence_check(args: argparse.Namespace) -> int:
-    """Quick pre-Y/n token presence check. Returns 0 on pass, 1 on any failure."""
+    """Quick pre-Y/n credential presence check. Returns 0 on pass, 1 on failure.
+
+    For a missing claude token on a TTY, offers guided `claude setup-token`
+    onboarding that persists ``CLAUDE_CODE_OAUTH_TOKEN`` to ``.env`` before it
+    decides pass/fail, so first-run operators don't bounce off a bare message.
+    """
+    from .models import is_zen_model
+
     agent_name = getattr(args, "agent", "fake")
     sim_name = getattr(args, "sim", None) or agent_name
     reviewer = getattr(args, "cli_reviewer", "none")
-    cli_names = [n for n in (agent_name, sim_name) if n in ("claude", "codex")]
-    if reviewer in ("claude", "codex"):
-        cli_names.append(reviewer)
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    unique_cli_names = [n for n in cli_names if not (n in seen or seen.add(n))]
+    env_var = getattr(args, "openrouter_env_var", "OPENROUTER_API_KEY")
 
-    if not unique_cli_names:
-        return 0  # opencode/fake only — no token to check here
-
-    print()
-    print(f"  {_d('pre-flight …')}")
-    failed = False
+    # CLI roles (claude/codex), grouped by tool, role labels preserved.
     roles_by_name: dict[str, list[str]] = {}
     for role_name, name in (
         ("agent", agent_name),
@@ -846,16 +903,42 @@ def _preflight_presence_check(args: argparse.Namespace) -> int:
         if name in ("claude", "codex"):
             roles_by_name.setdefault(name, []).append(role_name)
 
+    # opencode roles on a paid (non-Zen) model need OPENROUTER_API_KEY; Zen
+    # models reach the provider through the opencode binary's built-in access.
+    opencode_paid_roles: list[str] = []
+    for role_name, name, model in (
+        ("agent", agent_name, getattr(args, "agent_model", "")),
+        ("sim", sim_name, getattr(args, "sim_model", "")),
+    ):
+        if name == "opencode" and model and not is_zen_model(model):
+            opencode_paid_roles.append(role_name)
+
+    if not roles_by_name and not opencode_paid_roles:
+        return 0  # opencode/fake on free models only — nothing to check here
+
+    print()
+    print(f"  {_d('pre-flight …')}")
+    failed = False
+
     for tool_name, roles in roles_by_name.items():
         role_label = " + ".join(roles)
-        if tool_name == "claude":
-            line = _claude_token_line()
-            ok = "MISSING" not in line
-        else:
-            line = _codex_token_line()
-            ok = "MISSING" not in line
+        line = _claude_token_line() if tool_name == "claude" else _codex_token_line()
+        ok = "MISSING" not in line
+        if not ok and tool_name == "claude" and sys.stdin.isatty():
+            if _onboard_claude_token():
+                line = _claude_token_line()
+                ok = "MISSING" not in line
         mark = "✓" if ok else "✗"
         print(f"    {role_label:<16}  {tool_name:<8}  {mark}  {_d(line)}")
+        if not ok:
+            failed = True
+
+    if opencode_paid_roles:
+        role_label = " + ".join(opencode_paid_roles)
+        line = _opencode_key_line(env_var)
+        ok = "MISSING" not in line
+        mark = "✓" if ok else "✗"
+        print(f"    {role_label:<16}  {'opencode':<8}  {mark}  {_d(line)}")
         if not ok:
             failed = True
 
@@ -1599,6 +1682,11 @@ def _tui_run_cmd(args: argparse.Namespace) -> int:
     confirm_args = argparse.Namespace(
         agent=agent_name,
         sim=sim_name,
+        agent_model=agent_model,
+        sim_model=sim_model,
+        openrouter_env_var=_extract_flag_value(
+            forwarded, "--openrouter-env-var", "OPENROUTER_API_KEY"
+        ),
         cli_reviewer=_extract_flag_value(forwarded, "--cli-reviewer", "auto"),
         base=base,
         publish_mode=_extract_flag_value(forwarded, "--publish-mode", PublishMode.STUB.value),

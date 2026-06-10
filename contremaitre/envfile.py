@@ -50,6 +50,44 @@ def load_env_file(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def upsert_env_var(path: Path, key: str, value: str) -> None:
+    """Set ``KEY=value`` in the ``.env`` at ``path``, in place.
+
+    Rewrites an existing assignment for ``key`` (matched the same way the loader
+    parses lines, so ``export KEY=`` and quoted forms are recognised) or appends
+    a new line. Creates the file if absent. Only the target key's line changes;
+    comments, blank lines, and other assignments are preserved verbatim. The
+    value is single-quoted so ``#``/whitespace survive the loader round-trip.
+    """
+
+    line = f"{key}={_quote_value(value)}"
+    if not path.exists():
+        path.write_text(line + "\n", encoding="utf-8")
+        return
+
+    out: list[str] = []
+    replaced = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        parsed = _parse_line(raw)
+        if parsed is not None and parsed[0] == key:
+            out.append(line)
+            replaced = True
+        else:
+            out.append(raw)
+    if not replaced:
+        out.append(line)
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def _quote_value(value: str) -> str:
+    # Single-quote; the loader's _strip_value only peels matching outer quotes,
+    # so a value containing a single quote can't round-trip — refuse it loudly
+    # rather than write a file the loader would mis-parse.
+    if "'" in value:
+        raise ValueError("cannot persist a value containing a single quote to .env")
+    return f"'{value}'"
+
+
 def _parse_line(raw_line: str) -> tuple[str, str] | None:
     line = raw_line.strip()
     if not line or line.startswith("#"):

@@ -131,6 +131,53 @@ class TuiRunForwardingTest(unittest.TestCase):
         self.assertIn("--repo-cache", cmd)
 
 
+class TuiPresenceCheckArgsTest(unittest.TestCase):
+    """The Namespace handed to the presence check must carry the model fields.
+
+    Regression: `confirm_args` once omitted `agent_model`/`sim_model`/
+    `openrouter_env_var`, so the opencode paid-model `OPENROUTER_API_KEY` check
+    silently no-op'd on the TUI path — a keyless paid run sailed past pre-flight
+    and only failed inside the container ("run dir not created within 30s").
+    """
+
+    def _captured_ns(self, run_args):
+        seen = {}
+
+        def cap(ns):
+            seen["ns"] = ns
+            return 0
+
+        with (
+            patch.object(cli_mod, "_ensure_local_clone"),
+            patch.object(cli_mod, "_preflight_presence_check", side_effect=cap),
+            patch.object(cli_mod, "_recap_and_confirm", return_value=True),
+            patch.object(cli_mod, "_maybe_provision_cli_egress"),
+            patch.object(cli_mod, "_ensure_image_for", return_value=0),
+            patch("contremaitre.tui.spawn_and_attach", return_value=0),
+        ):
+            cli_mod._tui_run_cmd(_tui_ns(run_args))
+        return seen["ns"]
+
+    def test_presence_check_receives_models_and_key_var(self):
+        ns = self._captured_ns(
+            [
+                "--fork",
+                "git@github.com:o/r.git",
+                "--base",
+                "main",
+                "--agent",
+                "opencode",
+                "--agent-model",
+                "openrouter/qwen/qwen3.7-max",
+                "--sim-model",
+                "opencode/x",
+            ]
+        )
+        self.assertEqual(ns.agent_model, "openrouter/qwen/qwen3.7-max")
+        self.assertEqual(ns.sim_model, "opencode/x")
+        self.assertEqual(ns.openrouter_env_var, "OPENROUTER_API_KEY")
+
+
 class RunCmdConfirmGateTest(unittest.TestCase):
     """`_run_cmd` must NOT prompt when there is no controlling TTY.
 

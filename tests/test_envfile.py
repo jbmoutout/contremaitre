@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from contremaitre.envfile import load_dotenv_defaults, load_env_file
+from contremaitre.envfile import load_dotenv_defaults, load_env_file, upsert_env_var
 
 
 class EnvFileTest(unittest.TestCase):
@@ -64,6 +64,61 @@ class EnvFileTest(unittest.TestCase):
             # NOT appear as a key — that would be the "strip failed silently"
             # regression where the parser fell back to a junk-named key.
             self.assertNotIn("export FRESH_KEY", os.environ)
+
+
+class UpsertEnvVarTest(unittest.TestCase):
+    def test_appends_to_existing_file_preserving_other_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("# secrets\nOPENROUTER_API_KEY=keep-me\n", encoding="utf-8")
+
+            upsert_env_var(path, "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-abc")
+
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("# secrets", text)
+            self.assertIn("OPENROUTER_API_KEY=keep-me", text)
+            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-abc'", text)
+
+    def test_replaces_existing_assignment_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text(
+                "export CLAUDE_CODE_OAUTH_TOKEN=old\nOPENROUTER_API_KEY=k\n", encoding="utf-8"
+            )
+
+            upsert_env_var(path, "CLAUDE_CODE_OAUTH_TOKEN", "new-token")
+
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("old", text)
+            self.assertEqual(text.count("CLAUDE_CODE_OAUTH_TOKEN"), 1)
+            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN='new-token'", text)
+            self.assertIn("OPENROUTER_API_KEY=k", text)
+
+    def test_creates_file_when_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+
+            upsert_env_var(path, "CLAUDE_CODE_OAUTH_TOKEN", "tok")
+
+            self.assertEqual(
+                path.read_text(encoding="utf-8"), "CLAUDE_CODE_OAUTH_TOKEN='tok'\n"
+            )
+
+    def test_written_value_round_trips_through_loader(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
+            path = Path(tmp) / ".env"
+            upsert_env_var(path, "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-x_y-z")
+
+            load_env_file(path)
+
+            self.assertEqual(os.environ["CLAUDE_CODE_OAUTH_TOKEN"], "sk-ant-oat01-x_y-z")
+
+    def test_refuses_value_with_single_quote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            with self.assertRaises(ValueError):
+                upsert_env_var(path, "K", "has'quote")
+            self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":

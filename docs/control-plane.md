@@ -350,8 +350,8 @@ On TTY runs `_run_cmd` walks through:
 1. **Clone** — `_ensure_local_clone` fetches `origin/<base>` into the repo cache (lazy, auto-created).
 2. **Zen model picker** — *opencode roles only, when `--agent-model` / `--sim-model` are absent and stdin is a TTY.* Numbered list of OpenCode Zen free models; a paste box for OpenRouter slugs. Non-TTY + opencode + no model → abort with an explicit error. CLI roles (claude/codex) skip this step entirely.
 3. **Pre-flight presence check** — one line per active role (agent, SIM, cli-reviewer):
-   - opencode role: liveness probe via `_probe_zen_model()` — surfaces `FreeUsageLimitError` before the run starts.
-   - CLI role: token presence check (codex: `~/.codex/auth.json` exists / not about to expire; claude: `CLAUDE_CODE_OAUTH_TOKEN` set). Full auth validation (expiry, key limits, network) runs inside `run()` after confirmation.
+   - opencode role: liveness probe via `_probe_zen_model()` — surfaces `FreeUsageLimitError` before the run starts. A paid (non-Zen) model also gets an `OPENROUTER_API_KEY` presence row; free Zen models need no key.
+   - CLI role: token presence check (codex: `~/.codex/auth.json` exists / not about to expire, else `codex login`; claude: `CLAUDE_CODE_OAUTH_TOKEN` set). On a TTY, a missing claude token triggers guided onboarding — offer to run `claude setup-token`, then write the pasted token to `./.env` (`upsert_env_var`) and export it for the in-flight run. Full auth validation (expiry, key limits, network) runs inside `run()` after confirmation.
 4. **Recap + Y/n** — one-line summary: roles, models, target, branch, network posture. `Continue? [Y/n]` on TTY; non-TTY proceeds automatically.
 5. **Egress provision** — `_maybe_provision_cli_egress` if a CLI role is active with no explicit egress override.
 6. **Run** — `run(config)` — full preflight, worktree, orchestrator.
