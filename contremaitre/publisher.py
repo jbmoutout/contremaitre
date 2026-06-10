@@ -275,13 +275,12 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
         }
 
     # ----- lede -----
-    verdict = (sim.get("verdict") or "?").upper()
     confidence = sim.get("confidence")
     n_rounds = last_round_value or len(sim_cycles)
     n_tests = len(test_runs)
     n_pass = sum(1 for t in test_runs if t.get("returncode") == 0)
 
-    lede_parts = [f"֍ **{verdict}**"]
+    lede_parts: list[str] = []
     if confidence is not None:
         lede_parts.append(f"confidence {confidence:.1f}")
     if phases.get("grilling_exchanges") is not None:
@@ -319,9 +318,11 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
 
     # ----- assemble -----
     parts: list[str] = []
-    parts.append(" · ".join(lede_parts))
+    parts.append("## Contremaitre\n")
+    if lede_parts:
+        parts.append(" · ".join(lede_parts))
     if impl_complete:
-        parts.append("\n" + "\n".join(f"> {ln}" for ln in impl_complete.splitlines()))
+        parts.append("\n" + impl_complete)
     parts.append("\n---\n")
     parts.append("## Design\n")
     parts.append(settled_body.rstrip())

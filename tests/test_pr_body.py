@@ -1,7 +1,7 @@
 """Tests for the PR body assembly and the runs-index blurb.
 
 `_derive_pr_metadata` is the single producer of the PR body — it stitches
-the IMPLEMENTATION_COMPLETE blockquote, the demoted SETTLED_DESIGN, the SIM
+the IMPLEMENTATION_COMPLETE summary, the demoted SETTLED_DESIGN, the SIM
 review, and the eval scorecard into one self-contained document. The
 viewer index uses the same IMPLEMENTATION_COMPLETE marker as the row
 blurb. These tests lock the shape so regressions surface in CI rather
@@ -56,7 +56,7 @@ class DerivePrMetadataTest(unittest.TestCase):
         paths.worktree.mkdir(parents=True, exist_ok=True)
         return paths
 
-    def test_impl_complete_renders_as_blockquote_under_lede(self):
+    def test_impl_complete_renders_as_plain_text_under_lede(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = self._paths(Path(tmp))
             _seed_worktree(
@@ -65,11 +65,13 @@ class DerivePrMetadataTest(unittest.TestCase):
                 impl_complete="Extracted bar; 42/42 tests pass.",
             )
             _, body = _derive_pr_metadata(paths, diff_hash="deadbeef" * 8)
-            self.assertIn("> Extracted bar; 42/42 tests pass.", body)
-            # Blockquote sits between the lede and the `## Design` separator.
-            blockquote_idx = body.index("> Extracted bar")
+            # Header, then summary as plain text (no blockquote), then `## Design`.
+            self.assertTrue(body.startswith("## Contremaitre"))
+            self.assertIn("Extracted bar; 42/42 tests pass.", body)
+            self.assertNotIn("> Extracted bar", body)
+            summary_idx = body.index("Extracted bar")
             design_idx = body.index("## Design")
-            self.assertLess(blockquote_idx, design_idx)
+            self.assertLess(summary_idx, design_idx)
 
     def test_missing_impl_complete_still_renders(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,12 +93,12 @@ class DerivePrMetadataTest(unittest.TestCase):
             # SETTLED's H1 must be gone; demoted to H3.
             self.assertNotIn("\n# SETTLED DESIGN", body)
             self.assertIn("### SETTLED DESIGN — Extract foo into bar", body)
-            # H2 in SETTLED becomes H4. The body's own H2 (## Design, ##
-            # SIM review) must remain — exactly two of them.
+            # H2 in SETTLED becomes H4. The body's own H2s (the Contremaitre
+            # header, ## Design, ## SIM review) must remain.
             h2_lines = [ln for ln in body.splitlines() if re.match(r"^## [^#]", ln)]
             self.assertEqual(
                 {ln.strip() for ln in h2_lines},
-                {"## Design", "## SIM review"},
+                {"## Contremaitre", "## Design", "## SIM review"},
             )
             self.assertIn("#### Seam", body)
 
