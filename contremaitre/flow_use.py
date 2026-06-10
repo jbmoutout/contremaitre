@@ -34,11 +34,11 @@ Added (SIM): sim_read_settled, sim_read_diff, sim_read_diff_partial,
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from typing import Any
 
-from .extract import parse_apply_patch
 from .jsonlog import read_jsonl
+from .extract import parse_apply_patch as _parse_apply_patch
+from .tool_events import ToolUseEvent, extract_timestamp_ms, iter_tool_use_events
 
 
 # ---------------------------------------------------------------------------
@@ -124,12 +124,13 @@ def compute_phases(
     SETTLED write wants the accruing grilling counter; a post-hoc run that never
     settled wants an honest "unknown".
     """
-    # Mode-agnostic write detection: opencode `tool_use` + claude `assistant`
-    # tool_use blocks. (Codex has no per-event timestamp — see below.)
-    settled_event = _find_write_event(agent_events, _SETTLED_RE)
-    impl_event = _find_write_event(agent_events, _IMPL_COMPLETE_RE)
-    settled_ms = _timestamp_ms(settled_event)
-    impl_ms = _timestamp_ms(impl_event)
+    # Mode-agnostic write detection via normalised tool-use events.
+    # (Codex has no per-event timestamp — see below.)
+    tool_events = iter_tool_use_events(agent_events)
+    settled_event = _find_write_to(tool_events, _SETTLED_RE)
+    impl_event = _find_write_to(tool_events, _IMPL_COMPLETE_RE)
+    settled_ms = settled_event.timestamp_ms if settled_event else None
+    impl_ms = impl_event.timestamp_ms if impl_event else None
 
     starts: list[tuple[float, str]] = []
     for g in guardrails:
@@ -210,12 +211,11 @@ def compute_phases(
 
 
 def _agent_metrics(events: list[dict]) -> dict[str, Any]:
-    tool_calls = [e for e in events if e.get("type") == "tool_use"]
+    tool_calls = iter_tool_use_events(events)
 
     by_tool: dict[str, int] = {}
     for e in tool_calls:
-        t = _tool_name(e)
-        by_tool[t] = by_tool.get(t, 0) + 1
+        by_tool[e.tool] = by_tool.get(e.tool, 0) + 1
 
     file_access = _count_file_accesses(tool_calls)
     re_reads = sum(max(0, n - 1) for n in file_access.values())
@@ -231,11 +231,11 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     first_code_edit = _find_first_code_edit(tool_calls)
 
     t0 = event_times[0] if event_times else None
-    settled_ts = _timestamp_ms(settled_event)
+    settled_ts = settled_event.timestamp_ms if settled_event else None
     time_to_settled = (
         round((settled_ts - t0) / 1000, 1) if settled_ts is not None and t0 is not None else None
     )
-    tokens_to_settled = _tokens_before(events, settled_event)
+    tokens_to_settled = _tokens_before(events, settled_event) if settled_event else None
 
     settled_chars: int | None = None
     if settled_event:
@@ -243,7 +243,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
 
     settled_before_edit: bool | None = None
     if settled_event and first_code_edit:
-        first_edit_ts = _timestamp_ms(first_code_edit)
+        first_edit_ts = first_code_edit.timestamp_ms
         settled_before_edit = (
             settled_ts < first_edit_ts
             if settled_ts is not None and first_edit_ts is not None
@@ -316,24 +316,15 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     if not events:
         return {"available": False}
 
-    tool_calls = [e for e in events if e.get("type") == "tool_use"]
+    tool_calls = iter_tool_use_events(events)
 
     by_tool: dict[str, int] = {}
     for e in tool_calls:
-        t = _tool_name(e)
-        by_tool[t] = by_tool.get(t, 0) + 1
+        by_tool[e.tool] = by_tool.get(e.tool, 0) + 1
 
-    sim_read_settled = any(
-        _SETTLED_RE.search(_inp(e).get("filePath", "") or "")
-        for e in tool_calls
-        if _tool_name(e) == "read"
-    )
+    sim_read_settled = any(_SETTLED_RE.search(e.file_path) for e in tool_calls if e.tool == "read")
 
-    diff_reads = [
-        e
-        for e in tool_calls
-        if _tool_name(e) == "read" and _DIFF_RE.search(_inp(e).get("filePath", "") or "")
-    ]
+    diff_reads = [e for e in tool_calls if e.tool == "read" and _DIFF_RE.search(e.file_path)]
     sim_read_diff = len(diff_reads) > 0
     sim_read_diff_partial = any(_read_limit(e) < 200 for e in diff_reads)
 
@@ -355,7 +346,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     if sim_cycles:
         last = sim_cycles[-1]
         verdict_text = last.get("summary", "") + " ".join(last.get("checks_performed", []))
-        grep_calls = [e for e in tool_calls if _tool_name(e) == "grep"]
+        grep_calls = [e for e in tool_calls if e.tool == "grep"]
         if grep_calls:
             cited = sum(1 for e in grep_calls if _grep_args_cited_in(e, verdict_text))
             sim_useful_ratio = round(cited / len(grep_calls), 3)
@@ -390,15 +381,7 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _tool_name(e: dict) -> str:
-    return (e.get("part") or {}).get("tool", "?")
-
-
-def _inp(e: dict) -> dict:
-    return ((e.get("part") or {}).get("state") or {}).get("input") or {}
-
-
-def _count_file_accesses(tool_calls: list[dict]) -> dict[str, int]:
+def _count_file_accesses(tool_calls: list[ToolUseEvent]) -> dict[str, int]:
     acc: dict[str, int] = {}
     for e in tool_calls:
         for fp in _tool_paths(e):
@@ -423,33 +406,8 @@ def _convergence(file_access: dict[str, int]) -> tuple[str, float, int, int]:
     return label, breadth, distinct, total
 
 
-def _find_write_to(tool_calls: list[dict], pattern: re.Pattern) -> dict | None:
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        if (part.get("state") or {}).get("status") != "completed":
-            continue
-        inp = _inp(e)
-        target = (
-            inp.get("filePath") or inp.get("path") or inp.get("patchText") or inp.get("patch") or ""
-        )
-        if pattern.search(str(target)):
-            return e
-    return None
-
-
-# claude stream-json names its file-writing tools with leading caps.
-_CLAUDE_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
-
-
-def _find_write_event(events: list[dict], pattern: re.Pattern) -> dict | None:
-    """First event that WRITES a path matching `pattern`, across runtimes.
-
-    Handles opencode `tool_use` (write/edit/apply_patch) and claude
-    `assistant` events whose `message.content[]` carries a `tool_use` block
-    (Write/Edit/…). Both shapes carry an extractable timestamp, so the
-    caller can time-anchor the phase split.
+def _find_write_to(tool_calls: list[ToolUseEvent], pattern: re.Pattern) -> ToolUseEvent | None:
+    """First tool-use event that WRITES a path matching `pattern`, across runtimes.
 
     Codex is intentionally NOT handled: its `--json` stream carries no
     per-event timestamp (and writes files via opaque `command_execution`
@@ -457,104 +415,92 @@ def _find_write_event(events: list[dict], pattern: re.Pattern) -> dict | None:
     caller treats a missing settled event as "unknown" and emits None
     rather than a wrong number — see `compute_phases`.
     """
-
-    for e in events:
-        etype = e.get("type")
-        if etype == "tool_use":  # opencode
-            part = e.get("part") or {}
-            if part.get("tool") not in ("write", "edit", "apply_patch"):
-                continue
-            if (part.get("state") or {}).get("status") != "completed":
-                continue
-            inp = _inp(e)
-            target = (
-                inp.get("filePath")
-                or inp.get("path")
-                or inp.get("patchText")
-                or inp.get("patch")
-                or ""
-            )
-            if pattern.search(str(target)):
-                return e
-        elif etype == "assistant":  # claude stream-json
-            for block in (e.get("message") or {}).get("content") or []:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                if block.get("name") not in _CLAUDE_WRITE_TOOLS:
-                    continue
-                inp = block.get("input") or {}
-                target = inp.get("file_path") or inp.get("path") or ""
-                if pattern.search(str(target)):
-                    return e
+    for e in tool_calls:
+        if e.tool not in ("write", "edit", "apply_patch"):
+            continue
+        if e.state.get("status") != "completed" and e.runtime == "opencode":
+            continue
+        target = e.file_path or e.input.get("patchText") or e.input.get("patch") or ""
+        if pattern.search(str(target)):
+            return e
     return None
 
 
-def _find_first_code_edit(tool_calls: list[dict]) -> dict | None:
+def _find_first_code_edit(tool_calls: list[ToolUseEvent]) -> ToolUseEvent | None:
     """First write/edit/apply_patch to a path outside .contremaitre/."""
     for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
+        if e.tool not in ("write", "edit", "apply_patch"):
             continue
-        if (part.get("state") or {}).get("status") != "completed":
+        if e.state.get("status") != "completed" and e.runtime == "opencode":
             continue
         if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
             return e
     return None
 
 
-def _tokens_before(events: list[dict], target: dict | None) -> int | None:
-    if not target:
+def _tokens_before(events: list[dict], settled: ToolUseEvent) -> int | None:
+    """Sum step_finish tokens before the raw event at `settled.event_index`.
+
+    Derives the target from the already-found `settled` event instead of
+    re-scanning and re-branching on runtime. The caller already vetted
+    the event through `_find_write_to` which applies the same opencode-only
+    `status == "completed"` filter used elsewhere.
+    """
+    target_idx = settled.event_index
+    if target_idx < 0 or target_idx >= len(events):
         return None
     total = 0
-    for e in events:
-        if e is target:
-            break
+    for e in events[:target_idx]:
         if e.get("type") == "step_finish":
             total += (e.get("part") or {}).get("tokens", {}).get("total", 0)
     return total
 
 
 def _check_self_verification(
-    tool_calls: list[dict], impl_event: dict | None
+    tool_calls: list[ToolUseEvent], impl_event: ToolUseEvent | None
 ) -> tuple[bool, bool | None, bool]:
     """Return (self_verified, output_suggests_pass, runtime_install_required).
 
     self_verified: agent ran a test command between last code edit and
     IMPLEMENTATION_COMPLETE write.
     output_suggests_pass: heuristic — no FAILED/error: in any test output.
+      Skips runtimes whose state doesn't carry output (claude etc.) so
+      those don't report a spurious pass.
     runtime_install_required: agent had to install a runtime (container gap).
     """
-    impl_ts = _timestamp_ms(impl_event) if impl_event else float("inf")
+    impl_ts = impl_event.timestamp_ms if impl_event else float("inf")
 
     last_edit_ts: float | None = None
     for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
+        if e.tool not in ("write", "edit", "apply_patch"):
             continue
-        event_ts = _timestamp_ms(e)
-        if event_ts is None:
+        if e.timestamp_ms is None:
             continue
         if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
-            last_edit_ts = event_ts if last_edit_ts is None else max(last_edit_ts, event_ts)
+            last_edit_ts = (
+                e.timestamp_ms if last_edit_ts is None else max(last_edit_ts, e.timestamp_ms)
+            )
 
     test_outputs: list[str] = []
     runtime_install = False
 
     for e in tool_calls:
-        if _tool_name(e) != "bash":
+        if e.tool != "bash":
             continue
-        cmd = _inp(e).get("command") or ""
+        cmd = e.input.get("command") or ""
         if _RUNTIME_INSTALL_RE.search(cmd):
             runtime_install = True
-        event_ts = _timestamp_ms(e)
-        if event_ts is None:
+        if e.timestamp_ms is None:
             continue
         if (
             _TEST_CMD_RE.search(cmd)
             and last_edit_ts is not None
-            and last_edit_ts < event_ts < impl_ts
+            and last_edit_ts < e.timestamp_ms < impl_ts
         ):
-            test_outputs.append((e.get("part") or {}).get("state", {}).get("output") or "")
+            output = e.state.get("output") or ""
+            if not output and e.runtime != "opencode":
+                continue
+            test_outputs.append(output)
 
     if not test_outputs:
         return False, None, runtime_install
@@ -568,51 +514,32 @@ def _check_self_verification(
 def _timestamp_ms(e: dict | None) -> float | None:
     if not e:
         return None
-    raw = e.get("timestamp")
-    if isinstance(raw, int | float):
-        return float(raw)
-    if isinstance(raw, str):
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    ts = e.get("ts")
-    if isinstance(ts, int | float):
-        # claude stream-json stamps each event with an epoch-ms integer.
-        return float(ts)
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
-        except ValueError:
-            return None
-    return None
+    return extract_timestamp_ms(e)
 
 
-def _tool_paths(e: dict) -> list[str]:
-    inp = _inp(e)
-    tool = _tool_name(e)
-    if tool == "apply_patch":
-        patch = inp.get("patchText") or inp.get("patch") or ""
-        return [fp for _, fp, _ in parse_apply_patch(str(patch))]
-    fp = inp.get("filePath") or inp.get("path") or ""
+def _tool_paths(e: ToolUseEvent) -> list[str]:
+    if e.tool == "apply_patch":
+        patch = e.input.get("patchText") or e.input.get("patch") or ""
+        return [fp for _, fp, _ in _parse_apply_patch(str(patch))]
+    fp = e.file_path
     return [str(fp)] if fp else []
 
 
-def _write_chars(e: dict, pattern: re.Pattern) -> int:
-    inp = _inp(e)
-    tool = _tool_name(e)
-    if tool == "write":
-        return len(inp.get("content") or "")
-    if tool == "edit":
-        return len(inp.get("newString") or "")
-    if tool == "apply_patch":
-        patch = inp.get("patchText") or inp.get("patch") or ""
-        return sum(len(body) for _, fp, body in parse_apply_patch(str(patch)) if pattern.search(fp))
+def _write_chars(e: ToolUseEvent, pattern: re.Pattern) -> int:
+    if e.tool == "write":
+        return len(e.input.get("content") or "")
+    if e.tool == "edit":
+        return len(e.input.get("newString") or "")
+    if e.tool == "apply_patch":
+        patch = e.input.get("patchText") or e.input.get("patch") or ""
+        return sum(
+            len(body) for _, fp, body in _parse_apply_patch(str(patch)) if pattern.search(fp)
+        )
     return 0
 
 
-def _read_limit(e: dict) -> int:
-    raw = _inp(e).get("limit")
+def _read_limit(e: ToolUseEvent) -> int:
+    raw = e.input.get("limit")
     if raw is None:
         return 9999
     try:
@@ -625,7 +552,7 @@ _REGEX_METACHARS = re.compile(r"[\\^$.|?*+(){}\[\]]")
 
 
 def _grep_args_cited_in(
-    grep_event: dict,
+    grep_event: ToolUseEvent,
     verdict_text: str,
     *,
     min_pattern_len: int = 3,
@@ -640,7 +567,7 @@ def _grep_args_cited_in(
     literal fragment between metachars so that a SIM saying
     "all `_compile_` helpers" still credits a grep for `_compile_\\w+`.
     """
-    inp = _inp(grep_event)
+    inp = grep_event.input
     pat = str(inp.get("pattern") or "")
     if pat and len(pat) >= min_pattern_len:
         if pat in verdict_text:

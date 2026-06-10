@@ -19,6 +19,7 @@ from typing import Any
 
 from .jsonlog import read_jsonl
 from .models import RunPaths
+from .tool_events import iter_tool_use_events
 
 
 _APPLY_PATCH_HDR = re.compile(
@@ -69,36 +70,31 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
     """
 
     events = read_jsonl(paths.raw_export) + read_jsonl(paths.sim_raw_export)
+    tool_events = iter_tool_use_events(events)
 
     paths.extracted_files_dir.mkdir(parents=True, exist_ok=True)
     paths.subagents_dir.mkdir(parents=True, exist_ok=True)
 
     written: list[dict[str, Any]] = []
-    for event in events:
-        if event.get("type") != "tool_use":
+    for e in tool_events:
+        if e.tool not in ("write", "edit", "apply_patch"):
             continue
-        part = event.get("part") or {}
-        tool = part.get("tool")
-        if tool not in ("write", "edit", "apply_patch"):
-            continue
-        state = part.get("state") or {}
-        input_ = state.get("input") or {}
-        if tool == "write":
-            fp = input_.get("filePath") or input_.get("path")
+        if e.tool == "write":
+            fp = e.file_path
             if not fp:
                 continue
-            content = input_.get("content") or ""
+            content = e.content
             out = paths.extracted_files_dir / _host_name(fp)
             out.write_text(content, encoding="utf-8")
             written.append(
-                {"original_path": fp, "host_file": str(out), "len": len(content), "tool": tool}
+                {"original_path": fp, "host_file": str(out), "len": len(content), "tool": e.tool}
             )
-        elif tool == "edit":
-            fp = input_.get("filePath") or input_.get("path")
+        elif e.tool == "edit":
+            fp = e.file_path
             if not fp:
                 continue
-            old_s = input_.get("oldString") or ""
-            new_s = input_.get("newString") or ""
+            old_s = e.old_string
+            new_s = e.new_string
             out = paths.extracted_files_dir / f"{_host_name(fp)}.edits.md"
             block = (
                 "\n---\n## edit (oldString → newString)\n\n"
@@ -113,11 +109,11 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
                     "host_file": str(out),
                     "len": len(new_s),
                     "old_len": len(old_s),
-                    "tool": tool,
+                    "tool": e.tool,
                 }
             )
         else:  # apply_patch
-            patch_text = input_.get("patchText") or input_.get("patch") or ""
+            patch_text = e.input.get("patchText") or e.input.get("patch") or ""
             for op, fp, body in parse_apply_patch(patch_text):
                 if op == "Add":
                     out = paths.extracted_files_dir / _host_name(fp)
@@ -127,7 +123,7 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
                             "original_path": fp,
                             "host_file": str(out),
                             "len": len(body),
-                            "tool": f"{tool}:Add",
+                            "tool": f"{e.tool}:Add",
                         }
                     )
                 elif op == "Update":
@@ -139,12 +135,17 @@ def extract_run_artifacts(paths: RunPaths) -> dict[str, Any]:
                             "original_path": fp,
                             "host_file": str(out),
                             "len": len(body),
-                            "tool": f"{tool}:Update",
+                            "tool": f"{e.tool}:Update",
                         }
                     )
                 else:  # Delete
                     written.append(
-                        {"original_path": fp, "host_file": None, "len": 0, "tool": f"{tool}:Delete"}
+                        {
+                            "original_path": fp,
+                            "host_file": None,
+                            "len": 0,
+                            "tool": f"{e.tool}:Delete",
+                        }
                     )
 
     subagents: list[dict[str, Any]] = []
