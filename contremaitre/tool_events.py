@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+from dataclasses import dataclass
 
 
 @dataclass
@@ -11,6 +12,7 @@ class ToolUseEvent:
     state: dict
     timestamp_ms: float | None
     runtime: str
+    event_index: int = -1
 
     @property
     def file_path(self) -> str:
@@ -42,15 +44,32 @@ _CLAUDE_TOOL_MAP: dict[str, str] = {
 
 
 def _normalise_tool_name(raw_name: str) -> str:
-    mapped = _CLAUDE_TOOL_MAP.get(raw_name)
-    if mapped is not None:
-        return mapped
-    return raw_name[0].lower() + raw_name[1:] if raw_name else raw_name
+    return _CLAUDE_TOOL_MAP.get(raw_name, raw_name.lower())
+
+
+def _extract_timestamp_ms(event: dict[str, Any]) -> float | None:
+    raw = event.get("timestamp")
+    if isinstance(raw, int | float):
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    ts = event.get("ts")
+    if isinstance(ts, int | float):
+        return float(ts)
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
+        except ValueError:
+            return None
+    return None
 
 
 def iter_tool_use_events(raw_events: list[dict[str, Any]]) -> list[ToolUseEvent]:
     result: list[ToolUseEvent] = []
-    for event in raw_events:
+    for idx, event in enumerate(raw_events):
         etype = event.get("type")
         if etype == "tool_use":
             part = event.get("part") or {}
@@ -59,14 +78,14 @@ def iter_tool_use_events(raw_events: list[dict[str, Any]]) -> list[ToolUseEvent]
                 continue
             state = part.get("state") or {}
             inp = state.get("input") or {}
-            ts = event.get("timestamp")
             result.append(
                 ToolUseEvent(
                     tool=tool,
                     input=inp,
                     state=state,
-                    timestamp_ms=float(ts) if isinstance(ts, (int, float)) else None,
+                    timestamp_ms=_extract_timestamp_ms(event),
                     runtime="opencode",
+                    event_index=idx,
                 )
             )
         elif etype == "assistant":
@@ -78,14 +97,14 @@ def iter_tool_use_events(raw_events: list[dict[str, Any]]) -> list[ToolUseEvent]
                     continue
                 tool = _normalise_tool_name(name)
                 inp = block.get("input") or {}
-                ts = event.get("ts")
                 result.append(
                     ToolUseEvent(
                         tool=tool,
                         input=inp,
                         state={},
-                        timestamp_ms=float(ts) if isinstance(ts, (int, float)) else None,
+                        timestamp_ms=_extract_timestamp_ms(event),
                         runtime="claude",
+                        event_index=idx,
                     )
                 )
     return result

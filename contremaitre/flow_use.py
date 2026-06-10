@@ -236,7 +236,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     time_to_settled = (
         round((settled_ts - t0) / 1000, 1) if settled_ts is not None and t0 is not None else None
     )
-    tokens_to_settled = _tokens_before(events, _SETTLED_RE) if settled_event else None
+    tokens_to_settled = _tokens_before(events, settled_event) if settled_event else None
 
     settled_chars: int | None = None
     if settled_event:
@@ -420,10 +420,13 @@ def _find_write_to(tool_calls: list[ToolUseEvent], pattern: re.Pattern) -> ToolU
 
 
 def _find_write_event(events: list[ToolUseEvent], pattern: re.Pattern) -> ToolUseEvent | None:
-    """First event that WRITES a path matching `pattern`.
+    """First tool-use event that WRITES a path matching `pattern`, across runtimes.
+
     Codex is intentionally NOT handled: its `--json` stream carries no
-    per-event timestamp, so even a detected write can't anchor a time-based
-    split — the caller treats a missing event as "unknown".
+    per-event timestamp (and writes files via opaque `command_execution`
+    bash), so even a detected write can't anchor a time-based split. The
+    caller treats a missing settled event as "unknown" and emits None
+    rather than a wrong number — see `compute_phases`.
     """
     for e in events:
         if e.tool not in ("write", "edit", "apply_patch"):
@@ -448,36 +451,16 @@ def _find_first_code_edit(tool_calls: list[ToolUseEvent]) -> ToolUseEvent | None
     return None
 
 
-def _tokens_before(events: list[dict], pattern: re.Pattern) -> int | None:
-    """Sum step_finish tokens before the first write event matching `pattern`."""
-    target_idx: int | None = None
-    for i, e in enumerate(events):
-        etype = e.get("type")
-        part = e.get("part") or {}
-        if etype == "tool_use" and part.get("tool") in ("write", "edit", "apply_patch"):
-            inp = (part.get("state") or {}).get("input") or {}
-            raw_target = (
-                inp.get("filePath")
-                or inp.get("path")
-                or inp.get("patchText")
-                or inp.get("patch")
-                or ""
-            )
-            if pattern.search(str(raw_target)):
-                target_idx = i
-                break
-        elif etype == "assistant":
-            for block in (e.get("message") or {}).get("content") or []:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                if block.get("name") in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
-                    inp = block.get("input") or {}
-                    if pattern.search(str(inp.get("file_path") or inp.get("path") or "")):
-                        target_idx = i
-                        break
-            if target_idx is not None:
-                break
-    if target_idx is None:
+def _tokens_before(events: list[dict], settled: ToolUseEvent) -> int | None:
+    """Sum step_finish tokens before the raw event at `settled.event_index`.
+
+    Derives the target from the already-found `settled` event instead of
+    re-scanning and re-branching on runtime. The caller already vetted
+    the event through `_find_write_to` which applies the same opencode-only
+    `status == "completed"` filter used elsewhere.
+    """
+    target_idx = settled.event_index
+    if target_idx < 0 or target_idx >= len(events):
         return None
     total = 0
     for e in events[:target_idx]:
@@ -489,7 +472,15 @@ def _tokens_before(events: list[dict], pattern: re.Pattern) -> int | None:
 def _check_self_verification(
     tool_calls: list[ToolUseEvent], impl_event: ToolUseEvent | None
 ) -> tuple[bool, bool | None, bool]:
-    """Return (self_verified, output_suggests_pass, runtime_install_required)."""
+    """Return (self_verified, output_suggests_pass, runtime_install_required).
+
+    self_verified: agent ran a test command between last code edit and
+    IMPLEMENTATION_COMPLETE write.
+    output_suggests_pass: heuristic — no FAILED/error: in any test output.
+      Skips runtimes whose state doesn't carry output (claude etc.) so
+      those don't report a spurious pass.
+    runtime_install_required: agent had to install a runtime (container gap).
+    """
     impl_ts = impl_event.timestamp_ms if impl_event else float("inf")
 
     last_edit_ts: float | None = None
@@ -519,7 +510,10 @@ def _check_self_verification(
             and last_edit_ts is not None
             and last_edit_ts < e.timestamp_ms < impl_ts
         ):
-            test_outputs.append(e.state.get("output") or "")
+            output = e.state.get("output") or ""
+            if not output and e.runtime != "opencode":
+                continue
+            test_outputs.append(output)
 
     if not test_outputs:
         return False, None, runtime_install
@@ -594,7 +588,15 @@ def _grep_args_cited_in(
     min_pattern_len: int = 3,
     min_path_len: int = 4,
 ) -> bool:
-    """Did the SIM's verdict reference what this grep call searched for?"""
+    """Did the SIM's verdict reference what this grep call searched for?
+
+    Matches grep ARGUMENTS (pattern + path/include/glob) against verdict
+    prose, not grep output lines. SIMs paraphrase output but reliably
+    mention the search terms they ran. Try the pattern as a literal first;
+    if it contains regex metacharacters, fall back to the longest
+    literal fragment between metachars so that a SIM saying
+    "all `_compile_` helpers" still credits a grep for `_compile_\\w+`.
+    """
     inp = grep_event.input
     pat = str(inp.get("pattern") or "")
     if pat and len(pat) >= min_pattern_len:
