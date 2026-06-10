@@ -1154,29 +1154,29 @@ def test_build_event_row_unknown_type():
 
 
 def test_short_repo_ssh_url():
-    assert _short_repo("git@github.com:jbmoutout/itadakimasu.git") == "jbmoutout/itadakimasu"
+    assert _short_repo("git@github.com:octocat/hello-world.git") == "octocat/hello-world"
 
 
 def test_short_repo_ssh_url_no_dotgit():
-    assert _short_repo("git@github.com:jbmoutout/itadakimasu") == "jbmoutout/itadakimasu"
+    assert _short_repo("git@github.com:octocat/hello-world") == "octocat/hello-world"
 
 
 def test_short_repo_https_url():
-    assert _short_repo("https://github.com/jbmoutout/itadakimasu.git") == "jbmoutout/itadakimasu"
+    assert _short_repo("https://github.com/octocat/hello-world.git") == "octocat/hello-world"
 
 
 def test_short_repo_https_url_no_dotgit():
-    assert _short_repo("https://github.com/jbmoutout/itadakimasu") == "jbmoutout/itadakimasu"
+    assert _short_repo("https://github.com/octocat/hello-world") == "octocat/hello-world"
 
 
 def test_short_repo_https_url_trailing_slash():
-    assert _short_repo("https://github.com/jbmoutout/itadakimasu/") == "jbmoutout/itadakimasu"
+    assert _short_repo("https://github.com/octocat/hello-world/") == "octocat/hello-world"
 
 
 def test_short_repo_local_path_falls_back_to_basename():
     # No owner/ tail to recover — show the last segment so the header
     # line isn't blank for local-only runs.
-    assert _short_repo("/Users/jb/code/itadakimasu") == "itadakimasu"
+    assert _short_repo("/path/to/hello-world") == "hello-world"
 
 
 def test_short_repo_empty_returns_placeholder():

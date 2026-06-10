@@ -1471,7 +1471,7 @@ class Orchestrator:
                 base_image=self.config.docker_image,
                 runs_root=self.config.runs_root,
                 # Cache-clone dir name is the canonical project slug
-                # (`github.com-jbmoutout-contremaitre`); used to scope
+                # (`github.com-owner-repo`); used to scope
                 # volume naming + prune so projects don't evict each
                 # other's caches.
                 project_id=self.config.repo.name,

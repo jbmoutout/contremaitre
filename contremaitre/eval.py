@@ -14,7 +14,7 @@ The scorecard has two layers:
   discipline, review depth, cli_review finding breakdown, efficiency.
 
 Signal is sourced from artifacts the orchestrator already produces — no LLM
-judge is invoked. L2/L3 judges stay PENDING per EVAL_ROADMAP.md §6.
+judge is invoked. L2/L3 focused judges stay PENDING (see `evaluator.py`).
 
 Conventions:
 - Real opencode mode only. Fake-mode cases live under `smoke_cases/` and are
@@ -52,8 +52,7 @@ GOLDEN_CASES_DIRNAME = "golden_cases"
 CANARY_FILENAME = "canary.json"
 MIN_BASELINE_N = 3
 
-# Drift envelopes per EVAL_ROADMAP.md §5. Width is per-metric — loose for noisy
-# panels, tight for spend.
+# Drift envelopes. Width is per-metric — loose for noisy panels, tight for spend.
 _DRIFT_ENVELOPES = {
     "cli_review_score": 0.30,  # ≥0.30 = one full grade (Future AGI ≥3pt)
     "terminal_score": 0.0,  # any drop is a regression
@@ -1341,7 +1340,7 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
     # TEMPORARILY DEMOTED to informational-only: the sim_useful_call_ratio
     # input was zero-pinned by a stale matcher and is now real; existing
     # baselines for this metric are pre-fix and not comparable. Re-enable
-    # the gate after baselines are regenerated (see DUMP.md A4 rebaseline).
+    # the gate once baselines are regenerated against the fixed matcher.
     cur_d = _median(h_cur.get("agent_discipline_score"))
     base_d = _median(h_base.get("agent_discipline_score"))
     if cur_d is not None and base_d is not None and cur_d > base_d + 0.10:

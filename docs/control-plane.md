@@ -2,7 +2,7 @@
 
 This is Contremaitre's implementation map. The control plane is deterministic Python on the host; the agent and SIM run inside per-run Docker containers and never hold git or GitHub credentials.
 
-Each role runs one of two real **actor runtimes** — `opencode` (an OpenRouter/Zen model driven by the opencode CLI) or `codex` (the operator's ChatGPT-subscription codex CLI driven headless) — and the two roles can mix (a codex agent with an opencode SIM, or the reverse). The orchestrator, gates, and artifact contract are runtime-agnostic; see [Actor runtimes](#actor-runtimes) and the [CLI actor (codex)](#cli-actor-codex-auth--egress-lock) deep-dive.
+Each role runs one of three real **actor runtimes** — `opencode` (an OpenRouter/Zen model driven by the opencode CLI), `codex` (the operator's ChatGPT-subscription codex CLI driven headless), or `claude` (a Claude subscription via a headless OAuth token) — and the two roles can mix (e.g. a codex agent with an opencode SIM). The orchestrator, gates, and artifact contract are runtime-agnostic; see [Actor runtimes](#actor-runtimes) and the [CLI actor (codex / claude)](#cli-actor-codex--claude-auth--egress-lock) deep-dive.
 
 Audience: humans modifying the orchestrator, and LLMs that need to reason about the system end-to-end. Read it top-to-bottom for orientation; the section anchors are stable for targeted lookup.
 
@@ -52,7 +52,7 @@ Containers are launched detached (`docker run -d`) and labeled with `contremaitr
 The orchestrator is runtime-agnostic: it owns the WORK/REVIEW loop, gates, and container lifecycle, and delegates each turn to an **actor runner** chosen by [`make_actor_runner`](../contremaitre/actors.py). Three runtimes implement one `ActorRunner` protocol (`agent_turn` / `sim_turn` / `sim_review`):
 
 - **`fake`** ([`fake_actor.py`](../contremaitre/fake_actor.py)) — deterministic fixtures for smoke runs; no containers, no model, no network.
-- **`opencode`** ([`OpencodeActorRunner`](../contremaitre/actors.py#L178)) — the opencode CLI driving an OpenRouter/Zen model inside the container. The default for real runs.
+- **`opencode`** ([`OpencodeActorRunner`](../contremaitre/actors.py)) — the opencode CLI driving an OpenRouter/Zen model inside the container. The default for real runs.
 - **`codex` / `claude`** (`ActorMode.CLI`, [`CliActorRunner`](../contremaitre/cli_actor.py)) — a frontier CLI driven headless inside the container on the operator's subscription (no API key, no per-token API billing). `config.cli_tool` (`"codex"` | `"claude"`) selects which; both are baked into the image. The runner owns the shared orchestration and delegates the tool-specific seams (auth, in-container argv, event parsing, home) to a `CliDriver` — `CodexDriver` / `ClaudeDriver`.
 
 **Per-role mixing.** The agent uses `config.actor_mode` + `config.cli_tool`; the SIM uses `config.sim_actor_mode` / `config.sim_cli_tool` when set, else the agent's. When the resolved (runtime, tool) pair differs between roles, `make_actor_runner` returns a [`CompositeActorRunner`](../contremaitre/actors.py) that routes `agent_turn` to one runner and `sim_turn` / `sim_review` to the other. This covers both axes of mixing: a CLI agent + a cheap opencode SIM (or the reverse), **and cross-CLI** — codex agent + claude SIM, or the reverse (two `CliActorRunner`s whose per-run homes are tool-namespaced, `codex-*-home` vs `claude-*-home`, so they never collide). Preflight validates the **union** of requirements: an OpenRouter key only if opencode is in play, and an auth check per *active* CLI tool (`_active_cli_tools`) — so a cross-CLI run validates both the codex token and the claude OAuth token; the egress lock applies if any CLI tool is active.
@@ -271,7 +271,7 @@ POST-PUBLISH CLI REVIEW LOOP  (only when --cli-reviewer != none)
 
 ## State machine reference
 
-The orchestrator's POV. `State` enum in [models.py:14-20](../contremaitre/models.py#L14-L20).
+The orchestrator's POV. `State` enum in [models.py](../contremaitre/models.py).
 
 ```
 INIT  ──►  WORK  ──►  REVIEW  ──►  APPROVED  ──►  (hard gates + publish)
@@ -291,16 +291,16 @@ INIT  ──►  WORK  ──►  REVIEW  ──►  APPROVED  ──►  (hard 
 
 ## Terminal verdicts
 
-All six values from `TerminalVerdict` ([models.py:35-45](../contremaitre/models.py#L35-L45)):
+All six values from `TerminalVerdict` ([models.py](../contremaitre/models.py)); triggers live in [orchestrator.py](../contremaitre/orchestrator.py):
 
-| Verdict | Trigger | Reference |
-|---|---|---|
-| `READY_FOR_DRAFT_PR` | APPROVED + hard gates pass + checks pass + publisher succeeds + CLI review loop all-LOOKS_GOOD (or skipped) | [orchestrator.py:761](../contremaitre/orchestrator.py#L761) |
-| `PR_NEEDS_HUMAN` | PR published but CLI review loop exhausted `max_cli_review_rounds` without all-LOOKS_GOOD, or a post-publish revision could not pass gates / push safely. Yellow: PR exists on GitHub, a human should review before merging. | [orchestrator.py:646](../contremaitre/orchestrator.py#L646) |
-| `NO_PR_CHANGES_REQUESTED` | `max_review_rounds` exhausted on CHANGES_REQUESTED | [orchestrator.py:319](../contremaitre/orchestrator.py#L319) |
-| `NO_PR_NEEDS_HUMAN` | NEEDS_HUMAN verdict / malformed verdict (after retries) / missing SETTLED / missing IMPLEMENTATION_COMPLETE / cap trip / hard-gates fail / executable check fail | [orchestrator.py:243, 249, 257, 278, 287, 804, 811, 815](../contremaitre/orchestrator.py#L243) |
-| `FAILED_INFRA` | Unhandled exception during run; SIGTERM | [orchestrator.py:151, 178](../contremaitre/orchestrator.py#L151) |
-| `QUOTA_EXHAUSTED` | `ActorError` with `kind == PROVIDER_QUOTA_EXHAUSTED` (e.g. OpenCode Zen `FreeUsageLimitError`). Distinct from FAILED_INFRA so the eval canary aborts the n=3 batch instead of retrying. | [orchestrator.py:174-176](../contremaitre/orchestrator.py#L174-L176), [models.py:40-45](../contremaitre/models.py#L40-L45) |
+| Verdict | Trigger |
+|---|---|
+| `READY_FOR_DRAFT_PR` | APPROVED + hard gates pass + checks pass + publisher succeeds + CLI review loop all-LOOKS_GOOD (or skipped) |
+| `PR_NEEDS_HUMAN` | PR published but CLI review loop exhausted `max_cli_review_rounds` without all-LOOKS_GOOD, or a post-publish revision could not pass gates / push safely. Yellow: PR exists on GitHub, a human should review before merging. |
+| `NO_PR_CHANGES_REQUESTED` | `max_review_rounds` exhausted on CHANGES_REQUESTED |
+| `NO_PR_NEEDS_HUMAN` | NEEDS_HUMAN verdict / malformed verdict (after retries) / missing SETTLED / missing IMPLEMENTATION_COMPLETE / cap trip / hard-gates fail / executable check fail |
+| `FAILED_INFRA` | Unhandled exception during run; SIGTERM |
+| `QUOTA_EXHAUSTED` | `ActorError` with `kind == PROVIDER_QUOTA_EXHAUSTED` (e.g. OpenCode Zen `FreeUsageLimitError`). Distinct from FAILED_INFRA so the eval canary aborts the n=3 batch instead of retrying. |
 
 ## Host-owned boundaries
 
@@ -408,7 +408,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 
 ## Artifact contract
 
-Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is additive — readers must use `.get()`-style access. Paths are registered in [models.RunPaths](../contremaitre/models.py#L145-L181).
+Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is additive — readers must use `.get()`-style access. Paths are registered in [models.RunPaths](../contremaitre/models.py).
 
 ### Conversation streams
 
@@ -439,8 +439,8 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 
 - `subagents/agent_NN_<slug>.md` — one per `task` tool-use; populated by `extract.py` in the orchestrator's `finally`
 - `extracted_files/<host_name>` — every file the agent wrote via `write` / `edit` / `apply_patch`
-- `extracted_files/<host_name>.edits.md` — accumulated edit history when the file went through `edit` ([extract.py:100-111](../contremaitre/extract.py#L100-L111))
-- `extracted_files/.contremaitre__<name>` — worktree-scaffold salvage (the `.contremaitre/` markers the agent wrote) ([extract.py:184](../contremaitre/extract.py#L184))
+- `extracted_files/<host_name>.edits.md` — accumulated edit history when the file went through `edit` ([extract.py](../contremaitre/extract.py))
+- `extracted_files/.contremaitre__<name>` — worktree-scaffold salvage (the `.contremaitre/` markers the agent wrote) ([extract.py](../contremaitre/extract.py))
 
 ### Eval (gate-first scorecard)
 
@@ -449,7 +449,7 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 - `eval/settled_diff_report.json`, `eval/architecture_delta_report.json` — currently `PENDING` placeholders
 - `eval/trajectory_report.json`
 - `eval/flow_use.json` — tool-use observability (`time_to_settled_design`, `self_verified`, `grilling_exchanges`, `impl_turns`, `sim_useful_call_ratio`, …)
-- `eval/judge_attempts.jsonl` — path is registered in [models.RunPaths](../contremaitre/models.py#L145-L181) but **not currently written**; reserved for future per-attempt verdict logging (cross-judge replay, malformed-retry audit). Treat as a known gap.
+- `eval/judge_attempts.jsonl` — path is registered in [models.RunPaths](../contremaitre/models.py) but **not currently written**; reserved for future per-attempt verdict logging (cross-judge replay, malformed-retry audit). Treat as a known gap.
 - `eval/cost_report.json`
 - `eval/preflight_report.json`
 - `eval/canary.json` — only when driven by `contremaitre eval run`
@@ -530,8 +530,8 @@ contremaitre cleanup --repos     # also nuke ~/.cache/contremaitre/ clones
 
 `recoveries.jsonl` records degradations the orchestrator handled without aborting. Each entry is mirrored into `guardrail_events.jsonl` as `recovery_<kind>` so a single tail catches both surfaces.
 
-- **`sqlite_recovery_silent_stall`** — opencode occasionally persists message parts to its SQLite store (`<run_dir>/opencode-{agent,sim,review}-state/opencode.db`) but doesn't flush the corresponding `text` event to its `--format=json` stdout before the docker process exits. The data is intact in the DB. [`_recover_text_from_sqlite`](../contremaitre/actors.py#L839) reads the latest message back (`mode=ro`, 2s timeout) and the run continues with the recovered text. The state dirs are kept on purpose for exactly this path.
-- **`sigterm_emergency_write`** — host process receives SIGTERM mid-run. The handler ([orchestrator.py:151](../contremaitre/orchestrator.py#L151)) writes a `FAILED_INFRA` terminal with `reason="killed_via_sigterm"`, runs `_stop_run_containers` to stop label-tagged containers, then exits. Partial artifacts are preserved (raw exports, transcript fragments, any `viewer.html` that had landed) so the run dir stays browsable.
+- **`sqlite_recovery_silent_stall`** — opencode occasionally persists message parts to its SQLite store (`<run_dir>/opencode-{agent,sim,review}-state/opencode.db`) but doesn't flush the corresponding `text` event to its `--format=json` stdout before the docker process exits. The data is intact in the DB. [`_recover_text_from_sqlite`](../contremaitre/actors.py) reads the latest message back (`mode=ro`, 2s timeout) and the run continues with the recovered text. The state dirs are kept on purpose for exactly this path.
+- **`sigterm_emergency_write`** — host process receives SIGTERM mid-run. The handler ([orchestrator.py](../contremaitre/orchestrator.py)) writes a `FAILED_INFRA` terminal with `reason="killed_via_sigterm"`, runs `_stop_run_containers` to stop label-tagged containers, then exits. Partial artifacts are preserved (raw exports, transcript fragments, any `viewer.html` that had landed) so the run dir stays browsable.
 - **`extract_failed`** — `extract.py` raised while harvesting `task` sub-agent files or `extracted_files/*`. Logged; the rest of the artifact contract still lands.
 - **`viewer_build_failed`** — `viewer.build_viewer()` raised. Logged; other artifacts unaffected. Rebuildable later with `contremaitre viewer <run-dir>`.
 - **`cli_review_failed`** — a CLI reviewer tool returned empty output or threw during a round. Logged; the round continues with the remaining tools and the loop is not aborted.

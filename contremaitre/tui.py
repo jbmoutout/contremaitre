@@ -124,7 +124,7 @@ def _short_repo(url_or_path: str | None) -> str:
       git@github.com:owner/repo.git    → owner/repo
       https://github.com/owner/repo.git → owner/repo
       https://github.com/owner/repo    → owner/repo
-      /Users/jb/code/repo              → repo  (basename fallback)
+      /path/to/repo                    → repo  (basename fallback)
 
     Empty / unknown → `?` so the header line never collapses.
 
@@ -139,7 +139,7 @@ def _short_repo(url_or_path: str | None) -> str:
         s = s[:-4]
     # `owner/repo` match only when the input is clearly a URL — SSH
     # (`user@host:…`) or any `scheme://…`. Without this guard, local
-    # paths like `/Users/jb/code/repo` would yield `code/repo`, which
+    # paths like `/path/to/repo` would yield `to/repo`, which
     # reads as a GitHub slug but isn't.
     looks_like_url = "://" in s or bool(re.match(r"^[^/\s]+@[^/\s]+:", s))
     if looks_like_url:

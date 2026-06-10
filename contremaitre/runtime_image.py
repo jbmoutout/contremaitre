@@ -184,7 +184,7 @@ def ensure_deps_volume(
     here silently breaks every Python script in the cache.
 
     Volume naming includes `project_id` (typically the cache-clone slug,
-    e.g. `github.com-jbmoutout-contremaitre`) so two projects with the
+    e.g. `github.com-owner-repo`) so two projects with the
     same lockfile kind don't collide in `_prune_stale_deps_volumes`:
     without the scope, running project A then project B would evict
     A's cache because both have e.g. `package-lock.json` and the prune

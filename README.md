@@ -53,7 +53,7 @@ Inside one multi-turn session — driven by an opencode model or a subscription 
 
 A fresh reviewer container then reads the diff + SETTLED and emits a strict-JSON verdict. `APPROVED` → host hard gates (diff scan, hash match, clean worktree, plus any `--check-cmd`) → `gh pr create --draft`. `CHANGES_REQUESTED` clears the marker and loops back to WORK (up to 3 rounds). If the agent never writes the marker, or any hard gate fails, the run terminates without a PR.
 
-State machine, all five terminal verdicts, and the artifact contract: [docs/control-plane.md](docs/control-plane.md).
+State machine, all six terminal verdicts, and the artifact contract: [docs/control-plane.md](docs/control-plane.md).
 
 ## Configuration
 
@@ -69,7 +69,7 @@ The launcher takes the same flags whether you call `make run …` or `python3 -m
 - `--agent-model` / `--sim-model` — OpenRouter model slug, or an OpenCode Zen model, for an opencode role. Omit to pick interactively (TTY) or set in the Makefile; in headless opencode-agent runs, an omitted `--sim-model` mirrors `--agent-model`.
 - `--codex-model` / `--codex-effort` — codex-native model (default `gpt-5.5`) and reasoning effort (default `high`) for a codex role.
 - `--claude-model` / `--claude-effort` — claude model (empty = `~/.claude` account default) and effort (`low|medium|high|max`, default `high`) for a claude role.
-- `--cli-reviewer auto|codex|claude|none` — after the draft PR opens, run a post-publish revision loop: a CLI reviewer (codex/claude, in a read-only Docker container) reviews host-provided PR context mounted at `/review` plus the read-only worktree at `/app`; GitHub credentials and `gh` calls stay on the host, which posts the returned markdown as the PR comment. `LOOKS_GOOD` → loop exits as `READY_FOR_DRAFT_PR`; `NEEDS_ATTENTION` or `MUST_FIX` → the agent addresses the required changes on the same branch, then the host commits, reruns deterministic gates (`--check-cmd`, diff scan, diff hash stability, clean worktree), pushes only if they pass, and starts the next round. After `--max-cli-review-rounds` (default 3) rounds without `LOOKS_GOOD`, or if a post-publish revision cannot be safely pushed, the run ends as `PR_NEEDS_HUMAN` (PR is published, a human should review before merging). Uses your Claude Pro/Max or ChatGPT Plus subscription (NOT API). `auto` detects what's installed; `none` skips. Also projects the worst verdict as a commit status (context `contremaitre/cli-review`): `MUST_FIX` → `failure`, else `success` — require it in branch protection to gate merge.
+- `--cli-reviewer auto|codex|claude|none` — after the draft PR opens, run a post-publish revision loop: a CLI reviewer (codex/claude) in a read-only container reviews the diff; the host posts the returned markdown as the PR comment. `LOOKS_GOOD` exits; `NEEDS_ATTENTION`/`MUST_FIX` sends the agent back to revise on the same branch, then the host re-runs the deterministic gates and pushes only if they pass. After `--max-cli-review-rounds` (default 3) without `LOOKS_GOOD`, the run ends `PR_NEEDS_HUMAN`. Uses your Claude Pro/Max or ChatGPT Plus subscription (NOT API); `auto` detects what's installed, `none` skips. Also projects the worst verdict as a `contremaitre/cli-review` commit status for branch protection. Full mechanics: [docs/control-plane.md](docs/control-plane.md).
 - `--check-cmd "<command>"` *(repeatable)* — fast deterministic check the post-implementation worktree must pass before publishing (e.g. `"npx tsc --noEmit"`, `"uv run pytest -q"`).
 - `--publish-mode stub|gh` — `stub` (default) is a full dry-run with no `git push` or `gh pr create`; `gh` opens the draft PR.
 - `--max-turns 30` / `--max-wall-minutes 180` / `--max-cost-usd 30` — per-run budgets; the orchestrator aborts cleanly on cap.
@@ -97,7 +97,7 @@ The full flag reference lives in [docs/control-plane.md#cli-reference](docs/cont
 - `contremaitre viewer <run-dir> [--open]` — rebuild the per-run `viewer.html`: transcript, timeline, sub-agents, written files, guardrail events, eval reports. Self-contained — no server needed.
 - `contremaitre index [<runs-root>] [--open]` — rebuild `index.html` across every run under the root: one summary card per run (verdict, models, PR link, cost, duration), newest first, each linking to its viewer. Auto-rebuilt at the end of every run.
 - `contremaitre tui attach <run-dir>` — read-only TUI over a finished run.
-- `contremaitre eval {run|show|compare|promote|all} <case_id>` — v0 regression canary. See [golden_cases/README.md](golden_cases/README.md).
+- `contremaitre eval {run|check|compare|promote|all|show} <case_id>` — v0 regression canary. See [golden_cases/README.md](golden_cases/README.md).
 - `contremaitre image build [--variant base|rust|go]` — build the runtime image. The default-variant image auto-builds on first opencode-mode run and auto-rebuilds when the Dockerfile changes.
 - `contremaitre fixture init <path>` — create a tiny git repo for fake-actor smoke runs.
 
