@@ -461,6 +461,22 @@ def _current_review_round(guardrails: list[dict[str, Any]]) -> int:
     )
 
 
+def _current_cli_review_round(guardrails: list[dict[str, Any]]) -> int:
+    """Post-publish CLI review round, from the highest `round` seen.
+
+    Each revision round re-runs every configured tool and re-emits
+    `cli_review_started` with `round=N`. The max round across those
+    events is the round currently in flight (multiple tools share a
+    round, so counting starts would overcount). Returns 0 before the
+    first CLI reviewer starts.
+    """
+
+    return max(
+        (g.get("round") or 0 for g in guardrails if g.get("event") == "cli_review_started"),
+        default=0,
+    )
+
+
 def _reviewer_status(
     *,
     round_n: int,
@@ -592,6 +608,7 @@ def _current_phase_label(
     pr_number: int | None,
     pr_title: str | None = None,
     current_review_round: int = 0,
+    current_cli_review_round: int = 0,
     sim_review_statuses: list[str] | None = None,
     cli_review_status: str | None = None,
     cli_review_tool: str = "",
@@ -688,7 +705,14 @@ def _current_phase_label(
             else:
                 label = f"{(cli_review_tool or 'CLI').upper()} review"
             text.append(label, style=f"bold {_PAL_BRIGHT}")
-            text.append(" (post-publish)", style=_PAL_TEXT)
+            text.append(" (post-publish", style=_PAL_TEXT)
+            # Surface the revision round the same way the SIM Reviewing
+            # phase does — each loop round re-runs every CLI tool, so the
+            # operator needs to see "round 2" to know a revision is in
+            # flight. Only shown once past the first round to avoid noise.
+            if current_cli_review_round > 1:
+                text.append(f", round {current_cli_review_round}", style=_PAL_TEXT)
+            text.append(")", style=_PAL_TEXT)
         text.append(
             _review_status_tail(
                 sim_review_statuses=sim_review_statuses or [],
@@ -1322,6 +1346,37 @@ def _usage_pct_style(remaining: float) -> str:
     return _PAL_TEXT
 
 
+# Surface the long (weekly / 7d) window next to the short one only once it's
+# the binding constraint: below this much remaining budget the operator needs
+# to see it; above it the short window is the only number that matters and the
+# extra fragment is noise. Applied identically to codex and claude.
+_SECONDARY_WINDOW_SURFACE_BELOW = 30.0
+
+
+def _append_secondary_window(
+    text: "Text",
+    secondary: dict[str, Any] | None,
+    *,
+    now: float,
+    default_win: str = "7d",
+) -> None:
+    """Append ` · {win} {n}% left (↻…)` for the long window when its remaining
+    budget is under `_SECONDARY_WINDOW_SURFACE_BELOW`. No-op otherwise — the
+    common case keeps the footer to just the short window."""
+
+    if not secondary:
+        return
+    rem_s = max(0.0, 100.0 - secondary["used_percent"])
+    if rem_s >= _SECONDARY_WINDOW_SURFACE_BELOW:
+        return
+    win_s = _fmt_window_minutes(secondary.get("window_minutes")) or default_win
+    text.append(f" · {win_s} ", style=_PAL_VDIM)
+    text.append(f"{round(rem_s)}% left", style=_usage_pct_style(rem_s))
+    reset = _fmt_reset(secondary.get("resets_at"), now)
+    if reset:
+        text.append(f" ({reset})", style=_PAL_VDIM)
+
+
 def _codex_usage_token(
     usage: dict[str, Any] | None,
     *,
@@ -1330,9 +1385,9 @@ def _codex_usage_token(
 ) -> "Text | None":
     """The `codex 5h 25% left (↻6m)` footer fragment, or None when no data.
 
-    Codex sometimes emits both rollout windows, but the footer intentionally
-    shows only the primary short window so the label is stable and comparable
-    across turns.
+    Shows the primary short window always, and appends the long (weekly)
+    window only when it drops below the surface threshold — see
+    `_append_secondary_window`.
     """
 
     if not usage:
@@ -1351,6 +1406,7 @@ def _codex_usage_token(
     reset = _fmt_reset(head.get("resets_at"), now)
     if reset:
         text.append(f" ({reset})", style=_PAL_VDIM)
+    _append_secondary_window(text, usage.get("secondary"), now=now)
     return text
 
 
@@ -1531,12 +1587,7 @@ def _claude_usage_token(
     reset = _fmt_reset(head.get("resets_at"), now)
     if reset:
         text.append(f" ({reset})", style=_PAL_VDIM)
-    if other:
-        rem_s = max(0.0, 100.0 - other["used_percent"])
-        if rem_s < rem_p:
-            win_s = _fmt_window_minutes(other.get("window_minutes")) or "7d"
-            text.append(f" · {win_s} ", style=_PAL_VDIM)
-            text.append(f"{round(rem_s)}% left", style=_usage_pct_style(rem_s))
+    _append_secondary_window(text, other, now=now)
     return text
 
 
@@ -1569,7 +1620,7 @@ def _footer_meter_tokens(
         face = "◕‿-" if free_wink else "◕‿◕"
         text = Text()
         text.append(f"{role} ", style=_PAL_DIM)
-        text.append(f"free ({face})", style=_PAL_SUCCESS)
+        text.append(f"free ({face})", style=_PAL_BRIGHT)
         return text
 
     def _paid(role: str, events: list[dict[str, Any]]) -> Text:
@@ -2905,6 +2956,7 @@ if _TEXTUAL_AVAILABLE:
                     pr_number=pr_number,
                     pr_title=pr_title,
                     current_review_round=current_review_round,
+                    current_cli_review_round=_current_cli_review_round(guardrails),
                     sim_review_statuses=sim_review_statuses,
                     cli_review_status=cli_review_status,
                     cli_review_tool=self._cli_review_tool

@@ -32,6 +32,7 @@ from contremaitre.tui import (
     _architecture_review_in,
     _build_event_row,
     _claude_event_rows,
+    _current_cli_review_round,
     _current_phase_label,
     _current_review_round,
     _derive_phase,
@@ -443,6 +444,32 @@ def test_current_review_round_advances_per_loop_back():
         _g(events.ACTOR_START, role="review"),  # round 3 just opened
     ]
     assert _current_review_round(guardrails) == 3
+
+
+# ===== _current_cli_review_round =====
+
+
+def test_current_cli_review_round_zero_when_no_starts():
+    assert _current_cli_review_round([]) == 0
+
+
+def test_current_cli_review_round_takes_max_round():
+    # Two tools per round → max, not count, is the round in flight.
+    guardrails = [
+        _g(events.CLI_REVIEW_STARTED, tool="claude", round=1),
+        _g(events.CLI_REVIEW_STARTED, tool="codex", round=1),
+        _g(events.CLI_REVIEW_STARTED, tool="claude", round=2),
+        _g(events.CLI_REVIEW_STARTED, tool="codex", round=2),
+    ]
+    assert _current_cli_review_round(guardrails) == 2
+
+
+def test_current_cli_review_round_ignores_other_events():
+    guardrails = [
+        _g(events.ACTOR_START, role="review"),
+        _g(events.CLI_REVIEW_STARTED, tool="claude", round=1),
+    ]
+    assert _current_cli_review_round(guardrails) == 1
 
 
 # ===== _reviewer_status =====
@@ -1474,17 +1501,18 @@ def test_codex_usage_token_shows_remaining_and_reset():
     assert _codex_usage_token(usage, now=0.0).plain == "codex 5h 16% left (↻1h02m)"
 
 
-def test_codex_usage_token_never_appends_weekly_window():
+def test_codex_usage_token_appends_weekly_only_below_threshold():
+    # 20% weekly used → 80% left, above the 30% surface floor → 5h only.
     loose = _codex_usage_from_payload(_token_count_event(primary=84.0, secondary=20.0)["payload"])
     loose_plain = _codex_usage_token(loose, now=0.0).plain
     assert "wk" not in loose_plain and "7d" not in loose_plain
     assert loose_plain.count("left") == 1
+    # 95% weekly used → 5% left, below the floor → surface the 7d window.
     tight = _codex_usage_from_payload(
         _token_count_event(primary=10.0, secondary=95.0, resets_at=None)["payload"]
     )
     tok = _codex_usage_token(tight, now=0.0).plain
-    assert tok == "codex 5h 90% left"
-    assert "7d" not in tok
+    assert tok == "codex 5h 90% left · 7d 5% left"
 
 
 def test_codex_usage_token_none_when_no_data():
@@ -1924,9 +1952,10 @@ def test_claude_usage_token_formats_window_and_reset():
     assert plain == "claude sonnet 5h 16% left (↻1h02m)"
 
 
-def test_claude_usage_token_appends_weekly_only_when_tighter():
+def test_claude_usage_token_appends_weekly_only_below_threshold():
     from contremaitre.tui import _claude_usage_token
 
+    # 95% weekly used → 5% left, below the 30% floor → surface the 7d window.
     tok = _claude_usage_token(
         {
             "primary": {"used_percent": 10.0, "window_minutes": 300, "resets_at": 0},
@@ -1938,6 +1967,45 @@ def test_claude_usage_token_appends_weekly_only_when_tighter():
     assert tok is not None
     assert "claude opus 5h 90% left" in tok.plain
     assert "7d 5% left" in tok.plain
+
+
+def test_claude_usage_token_weekly_fragment_shows_reset_countdown():
+    from contremaitre.tui import _claude_usage_token
+
+    # Weekly resets 3 days + 4h out → large-hours countdown on the 7d fragment.
+    tok = _claude_usage_token(
+        {
+            "primary": {"used_percent": 10.0, "window_minutes": 300, "resets_at": 0},
+            "secondary": {
+                "used_percent": 95.0,
+                "window_minutes": 10080,
+                "resets_at": 3 * 86400 + 4 * 3600,
+            },
+        },
+        now=0.0,
+        model_label="opus",
+    )
+    assert tok is not None
+    assert "7d 5% left (↻76h00m)" in tok.plain
+
+
+def test_claude_usage_token_hides_weekly_when_above_threshold():
+    from contremaitre.tui import _claude_usage_token
+
+    # Weekly (50% left) is tighter than the 5h window (95% left) but still
+    # above the 30% floor → the old "tighter wins" rule would show it; the
+    # threshold rule keeps the footer to the 5h window only.
+    tok = _claude_usage_token(
+        {
+            "primary": {"used_percent": 5.0, "window_minutes": 300, "resets_at": 0},
+            "secondary": {"used_percent": 50.0, "window_minutes": 10080, "resets_at": 0},
+        },
+        now=0.0,
+        model_label="opus",
+    )
+    assert tok is not None
+    assert tok.plain == "claude opus 5h 95% left"
+    assert "7d" not in tok.plain
 
 
 def test_claude_usage_token_none_when_empty():
