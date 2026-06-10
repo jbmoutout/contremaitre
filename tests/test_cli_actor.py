@@ -1195,9 +1195,7 @@ class CliActorStartEventTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runner, paths = _make_runner(Path(tmp), allow_open_egress=True)
             runner.driver.parse_events = lambda *a, **k: ("ok", None, None, None)
-            with patch(
-                "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
-            ):
+            with patch("contremaitre.cli_actor.run_detached", return_value=(0, "", None)):
                 runner.agent_turn("hello")
             starts = [
                 e for e in self._guardrails(paths) if e.get("event") == "opencode_actor_start"
@@ -1215,9 +1213,7 @@ class CliActorStartEventTest(unittest.TestCase):
             sd = Path(tmp) / "settled.md"
             sd.write_text("design")
             runner.driver.parse_events = lambda *a, **k: ("LOOKS_GOOD", None, None, None)
-            with patch(
-                "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
-            ):
+            with patch("contremaitre.cli_actor.run_detached", return_value=(0, "", None)):
                 runner.sim_review(
                     diff_file=d,
                     settled_file=sd,
@@ -1257,7 +1253,7 @@ class CliActorStartEventTest(unittest.TestCase):
                 return (0, "", None)
 
             with patch(
-                "contremaitre.cli_actor._run_detached_container", side_effect=_fake_run_container
+                "contremaitre.cli_actor.run_detached", side_effect=_fake_run_container
             ) as run_container:
                 runner.agent_turn("hello")
                 # Join the background initial-probe thread while the patch is still

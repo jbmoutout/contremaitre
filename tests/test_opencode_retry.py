@@ -22,15 +22,17 @@ import unittest
 from pathlib import Path
 
 from contremaitre import events
-from contremaitre.actors import (
+from contremaitre._container import (
     ActorError,
     ActorOutput,
+    _detect_provider_fast_fail,
+    _latest_internal_log_size,
+)
+from contremaitre.actors import (
     OpencodeActorRunner,
     _classify_fast_fail_marker,
     _count_jsonl_events,
-    _detect_provider_fast_fail,
     _latest_error_after_text_count,
-    _latest_internal_log_size,
 )
 from contremaitre.fixture import init_fixture
 from contremaitre.models import ActorMode, RunConfig

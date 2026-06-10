@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import events
-from .actors import ActorError, ActorOutput, _run_detached_container
+from ._container import ActorError, ActorOutput, run_detached
 from .jsonlog import append_jsonl, append_transcript
 from .models import RunConfig, RunPaths
 
@@ -1112,7 +1112,7 @@ class CliActorRunner:
         # Bracket the container with wall-clock so we can back-fill real
         # timestamps onto the (clockless) CLI event slice it appends.
         t_start = time.time()
-        returncode, stderr, _fast_fail = _run_detached_container(
+        returncode, stderr, _fast_fail = run_detached(
             cmd=cmd,
             env=env,
             stdout_path=raw_export,
@@ -1232,7 +1232,7 @@ class CliActorRunner:
             env["CONTREMAITRE_CLAUDE_METER_MODEL"] = model
             env["CONTREMAITRE_CLAUDE_METER_PROMPT"] = "OK"
             env["CONTREMAITRE_CLAUDE_METER_TIMEOUT_SECONDS"] = "75"
-            returncode, stderr, _fast_fail = _run_detached_container(
+            returncode, stderr, _fast_fail = run_detached(
                 cmd=cmd,
                 env=env,
                 stdout_path=stdout_path,
