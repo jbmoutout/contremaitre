@@ -111,7 +111,7 @@ def _shared_run_doctor_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--allow-open-egress",
         action="store_true",
-        help="Allow opencode containers without explicit network/proxy policy",
+        help="Disable the egress lock — containers get open network. Unsafe: the in-container token is long-lived and exfiltratable. Off by default.",
     )
     p.add_argument(
         "--skip-openrouter-key-check",
@@ -707,6 +707,14 @@ def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
     surfaces as a clean "egress not configured" refusal rather than a crash.
     """
 
+    if getattr(args, "allow_open_egress", False):
+        print(
+            "[warn] CLI egress OPEN (--allow-open-egress): the in-container "
+            "subscription token is long-lived, so an injected command could "
+            "exfiltrate it. Lock egress unless you know why you need this.",
+            file=sys.stderr,
+        )
+        return
     if not _cli_egress_is_auto(args):
         return
     from .cli_egress import ensure_egress_proxy
@@ -718,7 +726,10 @@ def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
         return
     args.docker_network = network
     args.https_proxy = proxy
-    print(f"[info] CLI egress: {network} + allowlist proxy ({proxy})")
+    print(
+        f"[info] CLI egress LOCKED: {network} (no route/DNS) + allowlist proxy "
+        f"({proxy}, provider domains only) — the only exit for a long-lived in-container token."
+    )
 
 
 def _codex_token_line() -> str:

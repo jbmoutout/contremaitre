@@ -1,4 +1,4 @@
-Review this pull request (round {round_n} of {round_of}). Do not call `gh` — no GitHub credentials exist in this container.
+Review this pull request (round {round_n} of {round_of}). Do not call `gh` — no GitHub credentials exist in this container. Do not run tests (no deps, no network — tests run as a separate gate).
 
 ```diff
 {diff}
