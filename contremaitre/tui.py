@@ -39,7 +39,7 @@ from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
 from .jsonlog import ts_to_ms
-from .models import ModelSpec, resolved_model_from_events
+from .models import CliReviewVerdict, ModelSpec, resolved_model_from_events
 from .run_artifacts import RunArtifacts
 
 # Unknown identity placeholder for runs whose model dicts can't be read yet.
@@ -501,9 +501,11 @@ def _cli_review_status_glyph(
     """
 
     if status == "completed":
-        if verdict == "MUST_FIX":
+        # 3-way over the verdict (a str, Enum — so `==` against a wire string
+        # holds). Not a bool over `is_blocking`: NEEDS_ATTENTION is its own glyph.
+        if verdict == CliReviewVerdict.MUST_FIX:
             return "✗", _PAL_ERROR
-        if verdict == "NEEDS_ATTENTION":
+        if verdict == CliReviewVerdict.NEEDS_ATTENTION:
             return "!", _PAL_WARN
         return "✓", _PAL_SUCCESS
     if status == "failed":
@@ -1938,32 +1940,6 @@ def _render_event(event: dict[str, Any]):
     return t
 
 
-_CLI_REVIEW_VERDICT_RANK = {
-    "MUST_FIX": 3,
-    "NEEDS_ATTENTION": 2,
-    "LOOKS_GOOD": 1,
-}
-
-
-def _aggregate_cli_review_verdict(verdicts: list[str | None]) -> str | None:
-    """Worst-case verdict across a cli_review round.
-
-    MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD. Drives the aggregate
-    footer glyph — if any reviewer says MUST_FIX the operator should
-    see `✗`, not the rosier result. Returns None when no verdict is in
-    scope (tool not done or didn't surface a key).
-    """
-
-    best_rank = 0
-    best_key: str | None = None
-    for v in verdicts:
-        rank = _CLI_REVIEW_VERDICT_RANK.get(v or "", 0)
-        if rank > best_rank:
-            best_rank = rank
-            best_key = v
-    return best_key
-
-
 def _derive_cli_review_states(
     guardrails: list[dict[str, Any]], choice: str
 ) -> list[tuple[str, str, str | None]]:
@@ -2624,9 +2600,13 @@ if _TEXTUAL_AVAILABLE:
             # footer glyph so `MUST_FIX` renders as `✗` instead of the
             # subprocess-exit-0 `✓`. Worst-case wins for `both`: if
             # either reviewer says MUST_FIX, the aggregate is MUST_FIX.
-            cli_review_verdict: str | None = _aggregate_cli_review_verdict(
-                [v for (_t, st, v) in cli_review_states if st == "completed"]
+            _worst_verdict = CliReviewVerdict.worst(
+                v for (_t, st, v) in cli_review_states if st == "completed"
             )
+            # Keep the footer/glyph contract on the bare wire string ("MUST_FIX"
+            # …): `.value` sidesteps the version-dependent `f"{member}"` of a
+            # (str, Enum), and the glyph compares against the enum either way.
+            cli_review_verdict: str | None = _worst_verdict.value if _worst_verdict else None
 
             agent_turns = _text_event_count(agent_events)
             sim_turns = _text_event_count(sim_events)

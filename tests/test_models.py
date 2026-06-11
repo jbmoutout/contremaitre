@@ -9,7 +9,13 @@ longer verified through each caller's private normalizer.
 
 from __future__ import annotations
 
-from contremaitre.models import ActorMode, ModelSpec, RunConfig, resolved_model_from_events
+from contremaitre.models import (
+    ActorMode,
+    CliReviewVerdict,
+    ModelSpec,
+    RunConfig,
+    resolved_model_from_events,
+)
 
 
 # --------------------------------------------------------------------------
@@ -187,3 +193,79 @@ def test_round_trip_through_dict_and_back():
         claude_effort="max",
     ).with_resolved("claude-opus-4-8")
     assert ModelSpec.from_record(original.to_dict()) == original
+
+
+# --------------------------------------------------------------------------
+# CliReviewVerdict — owns its own severity order, parse, and worst-of-N
+# --------------------------------------------------------------------------
+
+
+def test_severity_orders_looks_good_lt_needs_attention_lt_must_fix():
+    assert (
+        CliReviewVerdict.LOOKS_GOOD.severity
+        < CliReviewVerdict.NEEDS_ATTENTION.severity
+        < CliReviewVerdict.MUST_FIX.severity
+    )
+
+
+def test_is_blocking_only_must_fix():
+    assert CliReviewVerdict.MUST_FIX.is_blocking is True
+    assert CliReviewVerdict.NEEDS_ATTENTION.is_blocking is False
+    assert CliReviewVerdict.LOOKS_GOOD.is_blocking is False
+
+
+def test_parse_each_key_on_line_one():
+    assert (
+        CliReviewVerdict.parse("🟢 LOOKS_GOOD — no blocking issues\n\nfine\n")
+        is CliReviewVerdict.LOOKS_GOOD
+    )
+    assert (
+        CliReviewVerdict.parse("🟠 NEEDS_ATTENTION — non-blocking\n\n…")
+        is CliReviewVerdict.NEEDS_ATTENTION
+    )
+    assert CliReviewVerdict.parse("🔴 MUST_FIX — blocking\n\n…") is CliReviewVerdict.MUST_FIX
+
+
+def test_parse_is_worst_first_within_a_line():
+    # The regression: a justification that *mentions* a milder key must not
+    # outrank the stated verdict. eval's old best-first scan read this as
+    # LOOKS_GOOD and scored it 1.0; worst-first reads MUST_FIX.
+    assert (
+        CliReviewVerdict.parse("✗ MUST_FIX — not LOOKS_GOOD yet\n\n…") is CliReviewVerdict.MUST_FIX
+    )
+
+
+def test_parse_key_without_glyph():
+    assert CliReviewVerdict.parse("MUST_FIX — broken\n\n…") is CliReviewVerdict.MUST_FIX
+
+
+def test_parse_tolerates_leading_blank_lines():
+    assert CliReviewVerdict.parse("\n\n🟢 LOOKS_GOOD — fine\n\n…") is CliReviewVerdict.LOOKS_GOOD
+
+
+def test_parse_none_when_no_key():
+    assert CliReviewVerdict.parse("Looks good, nothing structured\n\n…") is None
+
+
+def test_worst_empty_and_all_none_is_none():
+    assert CliReviewVerdict.worst([]) is None
+    assert CliReviewVerdict.worst([None, None]) is None
+
+
+def test_worst_must_fix_wins_over_clean():
+    assert CliReviewVerdict.worst(["LOOKS_GOOD", "MUST_FIX"]) is CliReviewVerdict.MUST_FIX
+
+
+def test_worst_needs_attention_over_looks_good():
+    assert (
+        CliReviewVerdict.worst(["NEEDS_ATTENTION", "LOOKS_GOOD"])
+        is CliReviewVerdict.NEEDS_ATTENTION
+    )
+
+
+def test_worst_ignores_none_and_unparseable_wire_junk():
+    # Accepts wire strings, members, None, and junk — junk and None are skipped.
+    assert (
+        CliReviewVerdict.worst([None, "BIZARRE", CliReviewVerdict.MUST_FIX])
+        is CliReviewVerdict.MUST_FIX
+    )

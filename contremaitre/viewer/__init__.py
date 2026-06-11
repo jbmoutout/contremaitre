@@ -226,7 +226,8 @@ def _assemble_cli_review(
 
     # Lazy import — `cli_reviewer` imports `jsonlog` etc.; keep the viewer
     # import-cycle clean by deferring to call time.
-    from ..cli_reviewer import extract_model, parse_verdict
+    from ..cli_reviewer import extract_model, strip_header
+    from ..models import CliReviewVerdict
 
     sink_name = f"{tool}_review_raw_export.jsonl"
     sink = paths.run_dir / sink_name
@@ -236,7 +237,10 @@ def _assemble_cli_review(
     if completed_evt is not None:
         verdict = completed_evt.get("verdict")
     if not verdict and markdown:
-        verdict = parse_verdict(markdown)
+        # Posted .md carries the H3 metadata header — strip it before the
+        # header-less parse, and project the member to its bare wire string.
+        parsed = CliReviewVerdict.parse(strip_header(markdown))
+        verdict = parsed.value if parsed else None
 
     duration_s = _event_duration(started_evt, completed_evt or failed_evt)
 
@@ -277,15 +281,17 @@ def _assemble_cli_review_extras(paths: RunPaths) -> list[dict[str, Any]]:
                 markdown = review_md_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 markdown = ""
-            from ..cli_reviewer import extract_model, parse_verdict
+            from ..cli_reviewer import extract_model, strip_header
+            from ..models import CliReviewVerdict
 
+            parsed = CliReviewVerdict.parse(strip_header(markdown)) if markdown else None
             sink = extra_dir / f"{tool}_raw_export.jsonl"
             out.append(
                 {
                     "tool": tool,
                     "source": f"{round_label}-{tool}",
                     "status": "completed" if markdown else "failed",
-                    "verdict": parse_verdict(markdown) if markdown else None,
+                    "verdict": parsed.value if parsed else None,
                     "duration_s": None,
                     "model": extract_model(tool, sink) if sink.is_file() else None,
                     "url": None,

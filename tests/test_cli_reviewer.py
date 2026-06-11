@@ -247,31 +247,6 @@ class PostCommentTest(unittest.TestCase):
             self.assertIn("auth failed", msg)
 
 
-class WorstVerdictTest(unittest.TestCase):
-    def test_empty_is_none(self):
-        self.assertIsNone(cli_reviewer.worst_verdict([]))
-
-    def test_all_none_is_none(self):
-        # Every reviewer failed/drifted — nothing to project.
-        self.assertIsNone(cli_reviewer.worst_verdict([None, None]))
-
-    def test_single(self):
-        self.assertEqual(cli_reviewer.worst_verdict(["LOOKS_GOOD"]), "LOOKS_GOOD")
-
-    def test_must_fix_beats_looks_good(self):
-        # One reviewer clean, one blocking → the block wins.
-        self.assertEqual(cli_reviewer.worst_verdict(["LOOKS_GOOD", "MUST_FIX"]), "MUST_FIX")
-
-    def test_needs_attention_beats_looks_good(self):
-        self.assertEqual(
-            cli_reviewer.worst_verdict(["NEEDS_ATTENTION", "LOOKS_GOOD"]),
-            "NEEDS_ATTENTION",
-        )
-
-    def test_ignores_none_among_real(self):
-        self.assertEqual(cli_reviewer.worst_verdict([None, "MUST_FIX"]), "MUST_FIX")
-
-
 class VerdictCommitStateTest(unittest.TestCase):
     def test_must_fix_blocks(self):
         self.assertEqual(cli_reviewer.verdict_commit_state("MUST_FIX"), "failure")
@@ -376,50 +351,31 @@ class PostCommitStatusTest(unittest.TestCase):
             self.assertLessEqual(len(desc_arg[len("description=") :]), 140)
 
 
-class ParseVerdictTest(unittest.TestCase):
-    """Verdict key drives the TUI footer color — must reflect what the
-    agent wrote (line 1 per the prompt), not the subprocess exit code."""
+class StripHeaderTest(unittest.TestCase):
+    """`strip_header` is the inverse of `format_header` — the one place that
+    knows the H3/blank-line shape, so a reader feeding the header-less
+    `CliReviewVerdict.parse` doesn't re-encode the header literal."""
 
-    def test_looks_good(self):
-        self.assertEqual(
-            cli_reviewer.parse_verdict("🟢 LOOKS_GOOD — no blocking issues\n\nlooks fine\n"),
-            "LOOKS_GOOD",
+    def test_strips_real_posted_header(self):
+        header = cli_reviewer.format_header(
+            tool="codex", model="gpt-5.5", duration_s=83, round_n=1, round_of=3
         )
+        body = "🔴 MUST_FIX — blocking issue\n\ndetails…\n"
+        self.assertEqual(cli_reviewer.strip_header(header + body), body)
 
-    def test_needs_attention(self):
-        self.assertEqual(
-            cli_reviewer.parse_verdict("🟠 NEEDS_ATTENTION — non-blocking concerns\n\n…"),
-            "NEEDS_ATTENTION",
-        )
+    def test_idempotent_on_headerless_body(self):
+        # The raw reviewer stream carries no header — must pass through verbatim.
+        body = "🟢 LOOKS_GOOD — fine\n\n…"
+        self.assertEqual(cli_reviewer.strip_header(body), body)
 
-    def test_must_fix(self):
-        self.assertEqual(
-            cli_reviewer.parse_verdict(
-                "🔴 MUST_FIX — blocking issues found\n\nblocking issue at …"
-            ),
-            "MUST_FIX",
-        )
+    def test_leaves_h2_and_h1_untouched(self):
+        # Only an H3 metadata line is a header; a review that opens with its
+        # own H2 must not be eaten.
+        md = "## Summary\n\nbody\n"
+        self.assertEqual(cli_reviewer.strip_header(md), md)
 
-    def test_returns_none_when_no_key(self):
-        # Agent didn't follow format; better to fall back gracefully than
-        # crash. TUI maps None → ✓ as a permissive default.
-        self.assertIsNone(cli_reviewer.parse_verdict("Looks good\n\n…"))
-
-    def test_tolerates_leading_blanks(self):
-        # Agent sometimes emits a stray blank line before the verdict.
-        # Scan a few lines defensively per the parser comment.
-        self.assertEqual(
-            cli_reviewer.parse_verdict("\n\n🟢 LOOKS_GOOD — fine\n\n…"),
-            "LOOKS_GOOD",
-        )
-
-    def test_key_works_without_glyph(self):
-        # The KEY is the canonical machine-parseable token. If the agent
-        # drops the glyph but still emits the key, we still classify.
-        self.assertEqual(
-            cli_reviewer.parse_verdict("MUST_FIX — broken\n\n…"),
-            "MUST_FIX",
-        )
+    def test_empty_string(self):
+        self.assertEqual(cli_reviewer.strip_header(""), "")
 
 
 class HeaderTest(unittest.TestCase):

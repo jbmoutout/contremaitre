@@ -7,6 +7,7 @@ CLI, the orchestrator, and the actor adapters (fake and opencode).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -29,9 +30,86 @@ class ReviewVerdict(str, Enum):
 
 
 class CliReviewVerdict(str, Enum):
+    """A post-publish CLI reviewer's per-round judgement (see CONTEXT.md).
+
+    Owns its own canonical **severity** order and the parse that recovers it
+    from a reviewer body. Before this enum carried behaviour, the order was
+    re-encoded in three callers (cli_reviewer worst-of-N, the eval scorecard,
+    the TUI glyph) with three different numberings, and the parse existed twice
+    with disagreeing precedence — `cli_reviewer` scanned worst-first, `eval`
+    best-first, so `MUST_FIX — not LOOKS_GOOD yet` parsed two ways. The order
+    lives here once; callers ask.
+    """
+
     MUST_FIX = "MUST_FIX"
     NEEDS_ATTENTION = "NEEDS_ATTENTION"
     LOOKS_GOOD = "LOOKS_GOOD"
+
+    @property
+    def severity(self) -> int:
+        """Higher is worse: LOOKS_GOOD=0 < NEEDS_ATTENTION=1 < MUST_FIX=2.
+
+        The single canonical ordering. Worst-of-N is `max` over this; the eval
+        scorecard normalizes it; the TUI glyph reads it.
+        """
+
+        return _CLI_VERDICT_SEVERITY[self]
+
+    @property
+    def is_blocking(self) -> bool:
+        """Only `MUST_FIX` blocks — gates the commit status, drives the ✗ glyph."""
+
+        return self is CliReviewVerdict.MUST_FIX
+
+    @classmethod
+    def parse(cls, body: str) -> CliReviewVerdict | None:
+        """Recover the verdict from a **header-less** reviewer body.
+
+        The prompt enforces `<glyph> <KEY> — <justification>` on line 1, so the
+        first key found wins (**worst-first**): a justification that *mentions* a
+        milder key — `MUST_FIX — not LOOKS_GOOD yet` — never outranks the stated
+        verdict. A few leading lines are scanned defensively in case the agent
+        prepends stray whitespace. The body must be header-less; stripping a
+        posted-file metadata header is the reader's job
+        (`cli_reviewer.strip_header`). Returns `None` when no key is present.
+        """
+
+        for line in body.lstrip().splitlines()[:5]:
+            # Worst-first within the line: severity-descending, so a line that
+            # names two keys resolves to the more severe one.
+            for verdict in sorted(cls, key=lambda v: v.severity, reverse=True):
+                if verdict.value in line:
+                    return verdict
+        return None
+
+    @classmethod
+    def _coerce(cls, value: object) -> CliReviewVerdict | None:
+        """Tolerant read of a wire value (JSONL string / member / None / junk)."""
+
+        try:
+            return cls(value)
+        except ValueError:
+            return None
+
+    @classmethod
+    def worst(cls, items: Iterable[object]) -> CliReviewVerdict | None:
+        """Highest-severity verdict among `items`, ignoring `None`/unparseable.
+
+        Worst-of-N across reviewers and rounds — any `MUST_FIX` wins. Accepts
+        wire strings or members. Returns `None` when nothing parseable is present.
+        """
+
+        ranked = [v for v in (cls._coerce(i) for i in items) if v is not None]
+        if not ranked:
+            return None
+        return max(ranked, key=lambda v: v.severity)
+
+
+_CLI_VERDICT_SEVERITY: dict[CliReviewVerdict, int] = {
+    CliReviewVerdict.LOOKS_GOOD: 0,
+    CliReviewVerdict.NEEDS_ATTENTION: 1,
+    CliReviewVerdict.MUST_FIX: 2,
+}
 
 
 class TerminalVerdict(str, Enum):

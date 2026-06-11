@@ -111,3 +111,41 @@ extra_reviewer_model = "opencode/big-pickle"
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParseCliReviewVerdictTest(unittest.TestCase):
+    """The scorecard's verdict extraction routes through
+    `CliReviewVerdict.parse` (worst-first) on a header-stripped body — fixing
+    eval's old best-first scan that mis-scored a stated MUST_FIX as LOOKS_GOOD."""
+
+    def _parse(self, posted_md: str) -> dict:
+        from contremaitre.eval import _parse_cli_review
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run_dir = Path(tmp.name)
+        # Only the posted .md (with its H3 header) — no raw stream — so we
+        # exercise the header-stripping fallback path.
+        (run_dir / "codex_review.md").write_text(posted_md, encoding="utf-8")
+        return _parse_cli_review(run_dir, "codex")
+
+    def test_must_fix_mentioning_looks_good_scores_zero(self):
+        # The regression line, behind the real posted-file H3 header.
+        posted = (
+            "### reviewed by `codex` · `gpt-5.5` · round 1/3 · 1m 23s\n\n"
+            "✗ MUST_FIX — not LOOKS_GOOD yet\n\n"
+            "## Required changes\n\n1. lib/x.py:9 — fix it\n"
+        )
+        result = self._parse(posted)
+        self.assertEqual(result["verdict_key"], "MUST_FIX")
+        self.assertEqual(result["verdict_score"], 0.0)
+        self.assertTrue(result["parse_ok"])
+
+    def test_looks_good_scores_one(self):
+        posted = (
+            "### reviewed by `codex` · `gpt-5.5` · round 1/1 · 12s\n\n"
+            "🟢 LOOKS_GOOD — no blocking issues\n\nlooks fine\n"
+        )
+        result = self._parse(posted)
+        self.assertEqual(result["verdict_key"], "LOOKS_GOOD")
+        self.assertEqual(result["verdict_score"], 1.0)

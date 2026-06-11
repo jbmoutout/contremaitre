@@ -59,7 +59,7 @@ from contremaitre.tui import (
     _warnings_token,
 )
 from contremaitre.tui import (
-    _aggregate_cli_review_verdict,
+    _cli_review_status_glyph,
     _cli_review_tool_header,
     _derive_cli_review_states,
     _review_status_tail,
@@ -1212,26 +1212,23 @@ def test_short_repo_empty_returns_placeholder():
 
 
 # ===== cli_reviewer multi-tool helpers =====
+#
+# Worst-of-N aggregation now lives on `CliReviewVerdict.worst` (see
+# test_models); the TUI's only verdict logic is the glyph, a 3-way over the
+# verdict — which must stay a 3-way (not collapse NEEDS_ATTENTION into the
+# MUST_FIX/✗ bucket) and accept the bare wire string off the event payload.
 
 
-def test_aggregate_verdict_picks_worst():
-    # MUST_FIX > NEEDS_ATTENTION > LOOKS_GOOD. If either reviewer
-    # found a blocker the operator must see `MUST_FIX` in the footer,
-    # not the rosier of the two.
-    assert _aggregate_cli_review_verdict(["LOOKS_GOOD", "MUST_FIX"]) == "MUST_FIX"
-    assert _aggregate_cli_review_verdict(["NEEDS_ATTENTION", "LOOKS_GOOD"]) == "NEEDS_ATTENTION"
-    assert _aggregate_cli_review_verdict(["LOOKS_GOOD", "LOOKS_GOOD"]) == "LOOKS_GOOD"
+def test_cli_review_glyph_is_three_way_over_verdict():
+    assert _cli_review_status_glyph("completed", "MUST_FIX")[0] == "✗"
+    assert _cli_review_status_glyph("completed", "NEEDS_ATTENTION")[0] == "!"
+    assert _cli_review_status_glyph("completed", "LOOKS_GOOD")[0] == "✓"
 
 
-def test_aggregate_verdict_empty_is_none():
-    assert _aggregate_cli_review_verdict([]) is None
-    assert _aggregate_cli_review_verdict([None, None]) is None
-
-
-def test_aggregate_verdict_ignores_unknown_keys():
-    # Defensive — a renamed verdict in a future review prompt shouldn't
-    # silently outrank the known keys.
-    assert _aggregate_cli_review_verdict(["BIZARRE", "MUST_FIX"]) == "MUST_FIX"
+def test_cli_review_glyph_unparseable_verdict_falls_back_to_ok():
+    # A completed review with no parseable verdict must not read as a failure.
+    assert _cli_review_status_glyph("completed", None)[0] == "✓"
+    assert _cli_review_status_glyph("completed", "BIZARRE")[0] == "✓"
 
 
 def test_derive_cli_review_states_streaming():

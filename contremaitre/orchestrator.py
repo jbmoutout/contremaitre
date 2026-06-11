@@ -46,6 +46,7 @@ from .jsonlog import append_jsonl, write_json
 from .manifest import build_manifest
 from .models import (
     ActorMode,
+    CliReviewVerdict,
     ModelSpec,
     ParsedVerdict,
     ReviewVerdict,
@@ -507,12 +508,12 @@ class Orchestrator:
             self._last_cli_review_reason = None
             return TerminalVerdict.READY_FOR_DRAFT_PR
 
-        last_round_verdicts: list[tuple[str, str | None]] = []
+        last_round_verdicts: list[tuple[str, CliReviewVerdict | None]] = []
         self._last_cli_review_reason = "post-publish CLI review did not reach LOOKS_GOOD"
 
         for cli_round in range(1, max_rounds + 1):
             self._transition(State.APPROVED, f"CLI review round {cli_round}/{max_rounds}")
-            round_verdicts: list[tuple[str, str | None]] = []
+            round_verdicts: list[tuple[str, CliReviewVerdict | None]] = []
             round_needs_revision = False
             round_reviewer_failed = False
             all_required_changes: list[str] = []
@@ -617,7 +618,7 @@ class Orchestrator:
                         round=cli_round,
                     )
 
-                verdict = _cli_reviewer.parse_verdict(markdown)
+                verdict = CliReviewVerdict.parse(markdown)
                 round_verdicts.append((tool, verdict))
 
                 if verdict is None:
@@ -638,7 +639,7 @@ class Orchestrator:
                     verdict=verdict,
                     round=cli_round,
                 )
-                if verdict != "LOOKS_GOOD":
+                if verdict is not CliReviewVerdict.LOOKS_GOOD:
                     round_needs_revision = True
                     all_required_changes.extend(_cli_reviewer.extract_required_changes(markdown))
 
@@ -916,7 +917,7 @@ class Orchestrator:
         *,
         worktree_git: GitRepo,
         outcome: PublishOutcome,
-        verdicts: list[tuple[str, str | None]],
+        verdicts: list[tuple[str, CliReviewVerdict | None]],
     ) -> None:
         """Project the cli_review verdict onto a GitHub commit status.
 
@@ -930,7 +931,7 @@ class Orchestrator:
 
         from . import cli_reviewer as _cli_reviewer
 
-        worst = _cli_reviewer.worst_verdict([v for _, v in verdicts])
+        worst = CliReviewVerdict.worst([v for _, v in verdicts])
         if worst is None:
             # No reviewer produced a parseable verdict (all failed/drifted).
             # Skip rather than post a misleading success — branch protection
@@ -943,7 +944,10 @@ class Orchestrator:
         # e.g. "claude MUST_FIX · codex LOOKS_GOOD" — the per-tool split, so
         # the merge box shows which reviewer objected even though the state
         # is worst-of-N.
-        description = " · ".join(f"{tool} {v or 'unparsed'}" for tool, v in verdicts)
+        # `v` is a CliReviewVerdict member (a str, Enum) or None. Format via
+        # `.value` — `f"{member}"` is version-dependent for a (str, Enum), but
+        # `.value` is always the bare "MUST_FIX"/… string.
+        description = " · ".join(f"{tool} {v.value if v else 'unparsed'}" for tool, v in verdicts)
         posted, message = _cli_reviewer.post_commit_status(
             pr_url=outcome.url,
             sha=sha,
