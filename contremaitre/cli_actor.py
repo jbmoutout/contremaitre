@@ -1333,7 +1333,9 @@ class CliActorRunner:
         Proxy vars are set here (the value) and referenced by name in the argv
         (`-e HTTPS_PROXY`), so docker forwards the value into the container
         without it appearing on the command line. Driver-specific vars (e.g.
-        claude's OAuth token) are layered on by `driver.container_env`.
+        claude's proxy base-url + dummy bearer) are layered on by
+        `driver.container_env` and picked up the same way: `-e NAME` in the
+        argv reads from this dict (the subprocess env), not from os.environ.
         """
 
         env = os.environ.copy()

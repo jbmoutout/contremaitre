@@ -34,6 +34,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 # The container reaches the host orchestrator process here. Docker Desktop maps
 # host.docker.internal to the host (incl. loopback-bound services); on Linux the
@@ -125,7 +126,7 @@ class Provider:
     """How to inject auth for one CLI tool's provider API."""
 
     upstream_host: str  # pinned HTTPS upstream (allowlist-of-one)
-    resolve_token: "callable"  # () -> str, called live per request
+    resolve_token: Callable[[], str]  # called live per request
 
     def identity_headers(self) -> dict[str, str]:  # pragma: no cover - claude needs none
         return {}
