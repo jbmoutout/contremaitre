@@ -143,3 +143,56 @@ def test_reads_are_memoized_per_instance(tmp_path):
     (run_dir / "guardrail_events.jsonl").write_text("", encoding="utf-8")
     assert arts.guardrail_events() is first
     assert RunArtifacts.from_run_dir(run_dir).guardrail_events() == []
+
+
+def test_flow_use_composes_over_memoized_streams(tmp_path):
+    # The reader owns reading; `flow_use` is a pure interpreter it feeds.
+    arts = RunArtifacts.from_run_dir(_seed_run(tmp_path))
+    fu = arts.flow_use()
+    assert fu["schema"] == "flow_use v1"
+    assert fu["phases"]["review_rounds"] == 1
+    assert fu["sim"]["available"] is True
+
+
+def test_flow_use_reads_review_cycles_once(tmp_path, monkeypatch):
+    # The old path-reader read review_cycles twice per call (compute_flow_use
+    # at :80 + _sim_metrics at :342). Routing through the memoized reader
+    # collapses it to one read — this locks that fix.
+    import contremaitre.run_artifacts as ra
+
+    run_dir = _seed_run(tmp_path)
+    counts: dict[str, int] = {}
+    real = ra.read_jsonl
+
+    def counting(path):
+        counts[path.name] = counts.get(path.name, 0) + 1
+        return real(path)
+
+    monkeypatch.setattr(ra, "read_jsonl", counting)
+    ra.RunArtifacts.from_run_dir(run_dir).flow_use()
+    assert counts["review_cycles.jsonl"] == 1
+
+
+def test_flow_use_relocates_iso_timestamp_tolerance(tmp_path):
+    # The wall-time-from-ISO-`ts` assertion that lived in test_flow_use.py's
+    # path-reader lands here, where a file is actually read + coerced through
+    # the seam (the pure-list version still lives in test_flow_use.py).
+    paths = build_run_paths(tmp_path, "run_iso")
+    _write_jsonl(
+        paths.raw_export,
+        [
+            {"type": "text", "ts": "2026-01-01T00:00:00Z", "part": {"text": "one"}},
+            {"type": "text", "ts": "2026-01-01T00:00:02Z", "part": {"text": "two"}},
+        ],
+    )
+    fu = RunArtifacts.from_run_dir(tmp_path / "run_iso").flow_use()
+    assert fu["agent"]["wall_seconds_total"]["value"] == 2.0
+
+
+def test_worktree_state_accessor(tmp_path):
+    paths = build_run_paths(tmp_path, "run_wt")
+    _write_jsonl(paths.worktree_state, [{"diff_stat": "1 file changed, 3 insertions(+)"}])
+    arts = RunArtifacts.from_run_dir(tmp_path / "run_wt")
+    assert arts.worktree_state() == [{"diff_stat": "1 file changed, 3 insertions(+)"}]
+    # Missing stream → [] (snapshot semantics, same as the other accessors).
+    assert RunArtifacts.from_run_dir(tmp_path / "run_absent").worktree_state() == []

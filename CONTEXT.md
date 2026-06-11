@@ -33,9 +33,25 @@ runs that resolved to different models do not collide in grouping.
 **Artifact reader**
 The single Module that reads a run's **artifact contract** (the JSONL/JSON
 streams under `<run-id>/` — `raw_export`, `guardrail_events`, `review_cycles`,
-…) off disk. Owns the file I/O and the low-level coercion (timestamps), and
-*composes* the pure interpreters (`compute_phases`, `sum_*_in_events`,
-`resolved_model_from_events`) over its own memoized streams — it does not
-re-home them. Carried by `RunArtifacts` in `run_artifacts.py`. Snapshot
-semantics: lazy + per-instance memoization, a fresh instance to re-read (the
-live TUI builds one per refresh tick).
+`worktree_state`, …) off disk. Owns the file I/O and the low-level coercion
+(timestamps), and *composes* the pure interpreters (`compute_phases`,
+`compute_flow_use`, `sum_*_in_events`, `resolved_model_from_events`) over its
+own memoized streams — it does not re-home them. Carried by `RunArtifacts` in
+`run_artifacts.py`. Snapshot semantics: lazy + per-instance memoization, a fresh
+instance to re-read (the live TUI builds one per refresh tick).
+
+It is the sole reader among the **upper layer** — the live TUI, eval scorecard,
+viewer index, and PR-body builder all read through `RunArtifacts`, where the
+reach-arounds used to be. `flow_use` is a **pure interpreter** the reader
+composes (no file I/O — the edge `run_artifacts → flow_use` stays acyclic). Three
+reads stay outside, each for a structural reason, not oversight:
+
+- a *live tail* (`eval._emit_new_events` seeks `guardrail_events.jsonl` during a
+  running subprocess) must keep its own handle — a memoized snapshot reader would
+  never see new lines;
+- `extract` is an **acyclic leaf below the reader** (`run_artifacts → flow_use →
+  extract`, since `flow_use` imports `extract.parse_apply_patch`), so it reads
+  its own streams rather than closing that import loop;
+- a **parse-validity check** (`eval._sim_verdicts_parse_ok`) reads the bytes
+  directly because the tolerant reader (`read_jsonl`) silently drops the
+  malformed / non-object lines the check exists to fail on.

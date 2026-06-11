@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from contremaitre.models import ModelSpec
+from contremaitre.run_artifacts import RunArtifacts
 from contremaitre.viewer.index import (
     _collect_pipeline_pairings,
     _diffstat_loc,
@@ -161,7 +162,7 @@ def test_collect_pairings_merges_differently_spelled_same_model(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Pure extractors
+# Reader-fed extractors (take a RunArtifacts; read through the single seam)
 # --------------------------------------------------------------------------
 
 
@@ -173,19 +174,19 @@ def test_diffstat_loc_parses_last_snapshot(tmp_path):
             {"diff_stat": " 3 files changed, 80 insertions(+), 12 deletions(-)\n"},
         ],
     )
-    assert _diffstat_loc(tmp_path) == (80, 12)
+    assert _diffstat_loc(RunArtifacts.from_run_dir(tmp_path)) == (80, 12)
 
 
 def test_diffstat_loc_handles_insertions_only(tmp_path):
     _write_jsonl(
         tmp_path / "worktree_state.jsonl", [{"diff_stat": " 1 file changed, 7 insertions(+)\n"}]
     )
-    assert _diffstat_loc(tmp_path) == (7, 0)
+    assert _diffstat_loc(RunArtifacts.from_run_dir(tmp_path)) == (7, 0)
 
 
 def test_diffstat_loc_none_without_diffstat(tmp_path):
     _write_jsonl(tmp_path / "worktree_state.jsonl", [{"diff_stat": "", "status": "?? x\n"}])
-    assert _diffstat_loc(tmp_path) is None
+    assert _diffstat_loc(RunArtifacts.from_run_dir(tmp_path)) is None
 
 
 def test_pr_review_verdict_keeps_worst(tmp_path):
@@ -197,12 +198,12 @@ def test_pr_review_verdict_keeps_worst(tmp_path):
             {"event": "turn", "turn": 1},
         ],
     )
-    assert _pr_review_verdict(tmp_path) == "MUST_FIX"
+    assert _pr_review_verdict(RunArtifacts.from_run_dir(tmp_path)) == "MUST_FIX"
 
 
 def test_pr_review_verdict_none_when_no_review(tmp_path):
     _write_jsonl(tmp_path / "guardrail_events.jsonl", [{"event": "turn", "turn": 1}])
-    assert _pr_review_verdict(tmp_path) is None
+    assert _pr_review_verdict(RunArtifacts.from_run_dir(tmp_path)) is None
 
 
 def test_review_signals_sim_rounds_and_changes(tmp_path):
@@ -213,13 +214,13 @@ def test_review_signals_sim_rounds_and_changes(tmp_path):
             {"reviewer": "sim", "round": 2, "verdict": "APPROVED"},
         ],
     )
-    sig = _review_signals(tmp_path)
+    sig = _review_signals(RunArtifacts.from_run_dir(tmp_path))
     assert sig["sim_rounds"] == 2
     assert sig["sim_changes"] is True  # round 1 bounced
 
 
 def test_review_signals_all_none_without_cycles(tmp_path):
-    sig = _review_signals(tmp_path)
+    sig = _review_signals(RunArtifacts.from_run_dir(tmp_path))
     assert sig["sim_rounds"] is None
     assert sig["sim_changes"] is None
 

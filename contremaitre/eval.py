@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from .manifest import manifest_digest
+from .run_artifacts import RunArtifacts
 
 
 GOLDEN_CASES_DIRNAME = "golden_cases"
@@ -757,6 +758,12 @@ def _diff_stats(run_dir: Path) -> dict[str, int | None]:
 
 
 def _sim_verdicts_parse_ok(run_dir: Path) -> bool:
+    # A parse-VALIDITY check on raw content: a malformed or non-object line is a
+    # FAILURE. The tolerant `RunArtifacts` reader would silently skip exactly
+    # those lines (`read_jsonl` drops unparseable + non-dict rows), so this reads
+    # the bytes directly — the same reason the live tail keeps its own handle.
+    # (Contrast `_review_depth`, which consumes parsed rows and routes through
+    # the reader.) Missing file is a failure; an empty file passes.
     path = run_dir / "review_cycles.jsonl"
     if not path.exists():
         return False
@@ -765,7 +772,7 @@ def _sim_verdicts_parse_ok(run_dir: Path) -> bool:
             if not line.strip():
                 continue
             obj = json.loads(line)
-            if "verdict" not in obj or "confidence" not in obj:
+            if not isinstance(obj, dict) or "verdict" not in obj or "confidence" not in obj:
                 return False
     except (json.JSONDecodeError, OSError):
         return False
@@ -773,24 +780,15 @@ def _sim_verdicts_parse_ok(run_dir: Path) -> bool:
 
 
 def _review_depth(run_dir: Path) -> dict[str, int]:
-    path = run_dir / "review_cycles.jsonl"
-    if not path.exists():
-        return {"total_checks_performed": 0, "total_required_changes": 0, "rounds": 0}
     total_checks = 0
     total_changes = 0
     rounds: set[int] = set()
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            obj = json.loads(line)
-            total_checks += len(obj.get("checks_performed") or [])
-            total_changes += len(obj.get("required_changes") or [])
-            r = obj.get("round")
-            if isinstance(r, int):
-                rounds.add(r)
-    except (json.JSONDecodeError, OSError):
-        pass
+    for obj in RunArtifacts.from_run_dir(run_dir).review_cycles():
+        total_checks += len(obj.get("checks_performed") or [])
+        total_changes += len(obj.get("required_changes") or [])
+        r = obj.get("round")
+        if isinstance(r, int):
+            rounds.add(r)
     return {
         "total_checks_performed": total_checks,
         "total_required_changes": total_changes,

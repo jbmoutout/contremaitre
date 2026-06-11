@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from contremaitre.eval import CaseDef, ConfigDef, check_run, load_config
+from contremaitre.eval import (
+    CaseDef,
+    ConfigDef,
+    _sim_verdicts_parse_ok,
+    check_run,
+    load_config,
+)
 from contremaitre.jsonlog import write_json
 
 
@@ -107,6 +113,45 @@ extra_reviewer_model = "opencode/big-pickle"
         self.assertTrue(report.ok)
         self.assertEqual(report.headline["terminal_verdict"], "PR_NEEDS_HUMAN")
         self.assertEqual(report.headline["terminal_score"], 0.5)
+
+
+class SimVerdictsParseOkTest(unittest.TestCase):
+    """`_sim_verdicts_parse_ok` is a parse-VALIDITY check: a malformed or
+    non-object review-cycle line must fail (the tolerant reader would skip it)."""
+
+    def _write(self, body: str) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run_dir = Path(tmp.name)
+        (run_dir / "review_cycles.jsonl").write_text(body, encoding="utf-8")
+        return run_dir
+
+    def test_well_formed_rows_pass(self):
+        run_dir = self._write(
+            '{"verdict": "APPROVED", "confidence": 0.9}\n'
+            '{"verdict": "CHANGES_REQUESTED", "confidence": 0.5}\n'
+        )
+        self.assertTrue(_sim_verdicts_parse_ok(run_dir))
+
+    def test_row_missing_required_field_fails(self):
+        run_dir = self._write('{"verdict": "APPROVED"}\n')  # no confidence
+        self.assertFalse(_sim_verdicts_parse_ok(run_dir))
+
+    def test_malformed_json_line_fails(self):
+        run_dir = self._write('{"verdict": "APPROVED", "confidence": 0.9}\n{not json\n')
+        self.assertFalse(_sim_verdicts_parse_ok(run_dir))
+
+    def test_non_object_line_fails(self):
+        # A bare JSON array/string parses but is not a verdict row → failure,
+        # not silently skipped (which is what the tolerant reader would do).
+        run_dir = self._write('["verdict", "confidence"]\n')
+        self.assertFalse(_sim_verdicts_parse_ok(run_dir))
+
+    def test_empty_file_passes_but_missing_file_fails(self):
+        self.assertTrue(_sim_verdicts_parse_ok(self._write("")))
+        missing = tempfile.TemporaryDirectory()
+        self.addCleanup(missing.cleanup)
+        self.assertFalse(_sim_verdicts_parse_ok(Path(missing.name)))
 
 
 if __name__ == "__main__":
