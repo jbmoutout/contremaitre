@@ -37,7 +37,7 @@ import re
 from typing import Any
 
 from .extract import parse_apply_patch
-from .jsonlog import event_ms, read_jsonl
+from .jsonlog import event_ms
 
 
 # ---------------------------------------------------------------------------
@@ -66,27 +66,25 @@ _ZERO_TESTS_RE = re.compile(r"0 passed|no tests ran|collected 0 items|Ran 0 test
 # ---------------------------------------------------------------------------
 
 
-def compute_flow_use(paths: Any) -> dict[str, Any]:
+def compute_flow_use(
+    *,
+    agent_events: list[dict],
+    sim_events: list[dict],
+    guardrails: list[dict],
+    review_cycles: list[dict],
+) -> dict[str, Any]:
     """Compute agent + SIM tool-use metrics for a completed run.
 
-    `paths` is a RunPaths instance; fields used:
-      raw_export, sim_raw_export, review_cycles, guardrail_events.
+    Pure over already-parsed event lists — `flow_use` does no file I/O. The
+    `RunArtifacts` Artifact reader owns reading and composes this interpreter
+    over its memoized streams (`RunArtifacts.flow_use()`); this keeps the edge
+    `run_artifacts → flow_use` acyclic (flow_use never imports the reader).
     """
-    agent_events = read_jsonl(paths.raw_export)
-    sim_events = read_jsonl(paths.sim_raw_export)
-    agent = _agent_metrics(agent_events)
-    guardrails_path = getattr(paths, "guardrail_events", None)
-    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
-    cycles = read_jsonl(paths.review_cycles)
     return {
         "schema": "flow_use v1",
-        "agent": agent,
-        "sim": _sim_metrics(sim_events, paths),
-        # The pure interpreter, read in place. Post-hoc readers that hold only a
-        # run dir (the viewer index, the PR-body builder) go through the
-        # `RunArtifacts` reader's `.phases()`; flow_use keeps the edge acyclic
-        # by reading its own streams rather than importing the reader.
-        "phases": compute_phases(agent_events, guardrails, cycles),
+        "agent": _agent_metrics(agent_events),
+        "sim": _sim_metrics(sim_events, review_cycles),
+        "phases": compute_phases(agent_events, guardrails, review_cycles),
     }
 
 
@@ -303,7 +301,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
+def _sim_metrics(events: list[dict], review_cycles: list[dict]) -> dict[str, Any]:
     if not events:
         return {"available": False}
 
@@ -339,7 +337,6 @@ def _sim_metrics(events: list[dict], paths: Any) -> dict[str, Any]:
     # Match against the SIM's own last verdict (not an `unavailable` marker
     # row) so the ratio reflects SIM tool-use → SIM verdict alignment.
     sim_useful_ratio: float | None = None
-    review_cycles = read_jsonl(paths.review_cycles)
     sim_cycles = [
         c for c in review_cycles if c.get("reviewer", "sim") == "sim" and not c.get("unavailable")
     ]

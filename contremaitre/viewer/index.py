@@ -16,7 +16,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..costs import sum_token_usage_in_events
-from ..jsonlog import read_jsonl
 from ..models import ModelSpec
 from ..run_artifacts import RunArtifacts
 from . import VIEWER_FILENAME
@@ -542,7 +541,7 @@ _DELETIONS_RE = re.compile(r"(\d+)\s+deletions?\(-\)")
 _INFRA_VERDICTS = frozenset({"FAILED_INFRA", "QUOTA_EXHAUSTED"})
 
 
-def _diffstat_loc(run_dir: Path) -> tuple[int, int] | None:
+def _diffstat_loc(arts: RunArtifacts) -> tuple[int, int] | None:
     """(insertions, deletions) from the last diff_stat snapshot, or None.
 
     `worktree_state.jsonl` records a `git diff --stat base...HEAD` text per
@@ -553,7 +552,7 @@ def _diffstat_loc(run_dir: Path) -> tuple[int, int] | None:
     """
 
     result: tuple[int, int] | None = None
-    for row in read_jsonl(run_dir / "worktree_state.jsonl"):
+    for row in arts.worktree_state():
         diff_stat = row.get("diff_stat") or ""
         ins_m = _INSERTIONS_RE.search(diff_stat)
         del_m = _DELETIONS_RE.search(diff_stat)
@@ -565,7 +564,7 @@ def _diffstat_loc(run_dir: Path) -> tuple[int, int] | None:
     return result
 
 
-def _pr_review_verdict(run_dir: Path) -> str | None:
+def _pr_review_verdict(arts: RunArtifacts) -> str | None:
     """Worst post-publish CLI-review verdict across all rounds, or None if no review ran.
 
     Read from the structured `cli_review_completed` guardrail event rather
@@ -578,7 +577,7 @@ def _pr_review_verdict(run_dir: Path) -> str | None:
 
     order = {"LOOKS_GOOD": 1, "NEEDS_ATTENTION": 2, "MUST_FIX": 3}
     worst: str | None = None
-    for event in read_jsonl(run_dir / "guardrail_events.jsonl"):
+    for event in arts.guardrail_events():
         if event.get("event") != "cli_review_completed":
             continue
         verdict = event.get("verdict")
@@ -587,7 +586,7 @@ def _pr_review_verdict(run_dir: Path) -> str | None:
     return worst
 
 
-def _review_signals(run_dir: Path) -> dict[str, Any]:
+def _review_signals(arts: RunArtifacts) -> dict[str, Any]:
     """SIM review signals from `review_cycles.jsonl` for one run.
 
     `sim_rounds` is the highest round the primary reviewer reached;
@@ -599,7 +598,7 @@ def _review_signals(run_dir: Path) -> dict[str, Any]:
 
     sim_verdicts: list[str] = []
     sim_rounds = 0
-    for row in read_jsonl(run_dir / "review_cycles.jsonl"):
+    for row in arts.review_cycles():
         if row.get("unavailable"):
             continue
         verdict = row.get("verdict")
@@ -641,21 +640,23 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     # fix). grilling/impl come back None when unrecoverable — codex streams
     # carry no timestamps, and pre-actor-start CLI runs logged no agent
     # turns — so the dashboard shows "—" rather than wrong numbers.
-    phases = RunArtifacts.from_run_dir(run_dir).phases()
-    loc = _diffstat_loc(run_dir)
-    review = _review_signals(run_dir)
-    pr_verdict = _pr_review_verdict(run_dir)
+    # One reader per run: memoization collapses the streams these helpers share
+    # (raw_export, review_cycles, guardrail_events) to one read each.
+    arts = RunArtifacts.from_run_dir(run_dir)
+    phases = arts.phases()
+    loc = _diffstat_loc(arts)
+    review = _review_signals(arts)
+    pr_verdict = _pr_review_verdict(arts)
 
     # Agent output tokens — the code-production signal (cost is $0 for
     # subscription runs, so tokens are the real spend). Recomputed from the
     # raw stream via the canonical summer, which handles all three runtime
     # event shapes; eval/cost_report.json is too sparse to rely on.
     out_tokens: int | None = None
-    if (run_dir / "raw_export.jsonl").is_file():
-        out_tokens = (
-            sum_token_usage_in_events(RunArtifacts.from_run_dir(run_dir).raw_export()).get("output")
-            or None
-        )
+    if arts.raw_export():
+        # Single-stream output tokens — deliberately NOT arts.token_usage(),
+        # which sums agent+SIM. This is the agent's code-production signal.
+        out_tokens = sum_token_usage_in_events(arts.raw_export()).get("output") or None
 
     return {
         "agent": agent,

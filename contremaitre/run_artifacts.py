@@ -27,7 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .costs import sum_costs_in_events, sum_token_usage_in_events
-from .flow_use import compute_phases
+from .flow_use import compute_flow_use, compute_phases
 from .jsonlog import read_jsonl
 from .models import RunPaths, resolved_model_from_events
 from .paths import build_run_paths
@@ -76,6 +76,11 @@ class RunArtifacts:
     def test_runs(self) -> list[dict]:
         return self._read(self.paths.test_runs)
 
+    def worktree_state(self) -> list[dict]:
+        """Per-snapshot `git diff --stat base...HEAD` rows (`worktree_state.jsonl`)."""
+
+        return self._read(self.paths.worktree_state)
+
     def cli_review_raw(self, tool: str) -> list[dict]:
         """The post-publish CLI reviewer stream for `tool` (`claude` / `codex`)."""
 
@@ -89,6 +94,19 @@ class RunArtifacts:
 
         return compute_phases(
             self.raw_export(), self.guardrail_events(), self.review_cycles(), live=live
+        )
+
+    def flow_use(self) -> dict:
+        """Agent + SIM tool-use metrics for the run. Composes the pure
+        `flow_use.compute_flow_use` over the reader's memoized streams — so the
+        `review_cycles` read it shares with `phases()` happens once per
+        instance, not the twice the old path-reader incurred."""
+
+        return compute_flow_use(
+            agent_events=self.raw_export(),
+            sim_events=self.sim_raw_export(),
+            guardrails=self.guardrail_events(),
+            review_cycles=self.review_cycles(),
         )
 
     def cost(self) -> float:

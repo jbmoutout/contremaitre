@@ -23,9 +23,9 @@ from typing import Any
 
 from .checks import CheckResult
 from .diffscan import DiffScanResult
-from .flow_use import compute_flow_use
 from .jsonlog import write_json
 from .models import RunPaths, TerminalVerdict
+from .run_artifacts import RunArtifacts
 
 
 def write_eval_reports(
@@ -63,7 +63,7 @@ def write_eval_reports(
     write_json(paths.trajectory_report, trajectory)
 
     try:
-        flow_use = compute_flow_use(paths)
+        flow_use = RunArtifacts(paths).flow_use()
         write_json(paths.flow_use_report, flow_use)
     except Exception as exc:
         flow_use = {"status": "error", "reason": repr(exc), "agent": {}, "sim": {}}

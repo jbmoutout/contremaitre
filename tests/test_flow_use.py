@@ -219,14 +219,6 @@ def test_compute_phases_review_rounds_use_max_round_not_row_count():
     assert phases["review_rounds"] == 2  # not len(cycles) == 3
 
 
-def _paths(tmp_path: Path):
-    return SimpleNamespace(
-        raw_export=tmp_path / "raw_export.jsonl",
-        sim_raw_export=tmp_path / "sim_raw_export.jsonl",
-        review_cycles=tmp_path / "review_cycles.jsonl",
-    )
-
-
 def _tool_event(
     *,
     tool: str,
@@ -248,28 +240,34 @@ def _tool_event(
     }
 
 
-def test_compute_flow_use_handles_text_events_without_numeric_timestamp(tmp_path):
-    paths = _paths(tmp_path)
-    _write_jsonl(
-        paths.raw_export,
-        [
+# --- compute_flow_use: pure over event lists (no paths / no disk) -----------
+# `flow_use` does no file I/O; the `RunArtifacts` reader owns reading and feeds
+# these interpreters its memoized streams. Read + timestamp-coercion tolerance
+# is asserted on the reader/coercer side (test_run_artifacts.py, test_jsonlog.py).
+
+
+def test_compute_flow_use_handles_text_events_without_numeric_timestamp():
+    # ISO `ts` strings must coerce so wall-time is computed — the pure
+    # interpreter exercises the same `event_ms` path the reader feeds it.
+    flow_use = compute_flow_use(
+        agent_events=[
             {"type": "text", "ts": "2026-01-01T00:00:00Z", "part": {"text": "one"}},
             {"type": "text", "ts": "2026-01-01T00:00:02Z", "part": {"text": "two"}},
         ],
+        sim_events=[],
+        guardrails=[],
+        review_cycles=[],
     )
-
-    flow_use = compute_flow_use(paths)
 
     assert flow_use["schema"] == "flow_use v1"
     assert flow_use["agent"]["tool_call_count"]["value"] == 0
     assert flow_use["agent"]["wall_seconds_total"]["value"] == 2.0
 
 
-def test_sim_read_diff_accepts_review_mount_diff_path(tmp_path):
-    paths = _paths(tmp_path)
-    _write_jsonl(
-        paths.sim_raw_export,
-        [
+def test_sim_read_diff_accepts_review_mount_diff_path():
+    flow_use = compute_flow_use(
+        agent_events=[],
+        sim_events=[
             _tool_event(
                 tool="read",
                 timestamp=1_000,
@@ -281,20 +279,18 @@ def test_sim_read_diff_accepts_review_mount_diff_path(tmp_path):
                 input_={"filePath": "/review/diff.patch", "limit": 120},
             ),
         ],
+        guardrails=[],
+        review_cycles=[],
     )
-
-    flow_use = compute_flow_use(paths)
 
     assert flow_use["sim"]["sim_read_settled"]["value"] is True
     assert flow_use["sim"]["sim_read_diff"]["value"] is True
     assert flow_use["sim"]["sim_read_diff_partial"]["value"] is True
 
 
-def test_apply_patch_is_code_edit_for_order_and_self_verification(tmp_path):
-    paths = _paths(tmp_path)
-    _write_jsonl(
-        paths.raw_export,
-        [
+def test_apply_patch_is_code_edit_for_order_and_self_verification():
+    flow_use = compute_flow_use(
+        agent_events=[
             _tool_event(
                 tool="bash",
                 timestamp=1_000,
@@ -329,65 +325,57 @@ def test_apply_patch_is_code_edit_for_order_and_self_verification(tmp_path):
                 input_={"filePath": "/app/.contremaitre/IMPLEMENTATION_COMPLETE"},
             ),
         ],
+        sim_events=[],
+        guardrails=[],
+        review_cycles=[],
     )
-
-    flow_use = compute_flow_use(paths)
 
     assert flow_use["agent"]["settled_write_before_first_code_edit"]["value"] is False
     assert flow_use["agent"]["self_verified"]["value"] is False
 
 
-def _sim_grep_setup(tmp_path: Path, *, greps: list[dict], verdict: str):
-    """Helper: write a SIM raw export with the given grep calls and a
-    review_cycles file with a single SIM cycle whose summary is `verdict`."""
-    paths = _paths(tmp_path)
+def _sim_grep_flow_use(*, greps: list[dict], verdict: str) -> dict:
+    """Run `compute_flow_use` over a SIM stream of the given grep calls and a
+    single SIM review cycle whose summary is `verdict` — all in-memory."""
     events = [
         _tool_event(tool="grep", timestamp=1_000 + i, input_=inp, output="ignored")
         for i, inp in enumerate(greps)
     ]
-    _write_jsonl(paths.sim_raw_export, events)
-    _write_jsonl(
-        paths.review_cycles,
-        [{"reviewer": "sim", "summary": verdict, "checks_performed": []}],
+    return compute_flow_use(
+        agent_events=[],
+        sim_events=events,
+        guardrails=[],
+        review_cycles=[{"reviewer": "sim", "summary": verdict, "checks_performed": []}],
     )
-    return paths
 
 
-def test_sim_useful_call_ratio_counts_pattern_mentions_not_output(tmp_path):
-    paths = _sim_grep_setup(
-        tmp_path,
+def test_sim_useful_call_ratio_counts_pattern_mentions_not_output():
+    flow_use = _sim_grep_flow_use(
         greps=[{"pattern": "_compile_code"}, {"pattern": "render_html"}],
         verdict="reviewed _compile_code path, looks fine",
     )
-    flow_use = compute_flow_use(paths)
     assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 0.5
 
 
-def test_sim_useful_call_ratio_falls_back_through_regex_metachars(tmp_path):
-    paths = _sim_grep_setup(
-        tmp_path,
+def test_sim_useful_call_ratio_falls_back_through_regex_metachars():
+    flow_use = _sim_grep_flow_use(
         greps=[{"pattern": r"_compile_\w+"}],
         verdict="all _compile_ helpers are covered",
     )
-    flow_use = compute_flow_use(paths)
     assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 1.0
 
 
-def test_sim_useful_call_ratio_ignores_short_patterns(tmp_path):
-    paths = _sim_grep_setup(
-        tmp_path,
+def test_sim_useful_call_ratio_ignores_short_patterns():
+    flow_use = _sim_grep_flow_use(
         greps=[{"pattern": "id"}],
         verdict="id appears all over the place",
     )
-    flow_use = compute_flow_use(paths)
     assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 0.0
 
 
-def test_sim_useful_call_ratio_credits_path_or_include_args(tmp_path):
-    paths = _sim_grep_setup(
-        tmp_path,
+def test_sim_useful_call_ratio_credits_path_or_include_args():
+    flow_use = _sim_grep_flow_use(
         greps=[{"pattern": "x", "include": "tests/test_extract.py"}],
         verdict="checked tests/test_extract.py for coverage",
     )
-    flow_use = compute_flow_use(paths)
     assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 1.0
