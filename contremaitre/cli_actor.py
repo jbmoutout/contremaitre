@@ -32,26 +32,29 @@ AUTH — codex (subscription, hard-minimised — read before touching CodexDrive
       hard-fails). Writes land on the per-run copy, never the operator's
       `~/.codex`.
 
-AUTH — claude (subscription via a headless OAuth token)
-  On macOS the operator's interactive creds live in Keychain (no readable
-  credentials file), so the in-container path uses `claude setup-token`'s
-  long-lived `CLAUDE_CODE_OAUTH_TOKEN`, forwarded into the container by NAME
-  (`-e CLAUDE_CODE_OAUTH_TOKEN`, value in the docker-run env, never on argv —
-  the proxy-var pattern). The per-run state mounts at /root/.claude/PROJECTS
+AUTH — claude (subscription, host-injected — NO in-container token)
+  claude carries no credential inside the container. The host auth-inject proxy
+  (`cli_auth_proxy.py`) holds the token and swaps it in per request; the
+  container gets only `ANTHROPIC_BASE_URL` (→ the proxy via host.docker.internal)
+  + a DUMMY `CLAUDE_CODE_OAUTH_TOKEN` (keeps claude in subscription/OAuth mode
+  so interactive sessions track rate_limits.five_hour/seven_day) + emptied
+  `ANTHROPIC_AUTH_TOKEN` (prevents API-key-mode override) + emptied
+  `ANTHROPIC_API_KEY` (no billed-API fall-through). The proxy resolves
+  the real token live from `CLAUDE_CODE_OAUTH_TOKEN` / macOS keychain /
+  ~/.claude/.credentials.json. The per-run state mounts at /root/.claude/PROJECTS
   (claude's session store) — NOT all of /root/.claude, which would shadow the
   image's baked /root/.claude/skills (→ "Unknown skill"); a projects-only mount
   keeps skills visible AND persists sessions so `--resume` works across turns.
-  No credential file is ever written. `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`
-  are forwarded empty to override any image-baked key and keep claude on the
-  OAuth subscription. Unlike codex's refresh token, this OAuth token is NOT
-  neuterable — it is the credential, and it is long-lived (~1yr), so the egress
-  lock is doubly load-bearing for a claude run.
+  No credential file is ever written. So a compromised claude container can leak
+  only the dummy — the durable credential never enters it, which is why claude
+  runs OPEN egress (nothing to exfiltrate but ordinary repo data).
 
-EGRESS (the load-bearing control — `_assert_egress_locked`)
-  The in-container credential outlives any single run (codex: a ~10-day JWT;
-  claude: a ~1yr OAuth token). By default exfiltration is prevented by a
-  two-layer lock the runner refuses to launch without (auto-provisioned for any
-  CLI role; `allow_open_egress` is the explicit, warned escape hatch):
+EGRESS (per tool — `_assert_egress_locked` / `_egress_docker_flags`)
+  Posture follows what the container holds. claude holds no token → OPEN egress
+  (only needs host.docker.internal to reach the host proxy). codex still mounts a
+  short-lived in-container JWT, so it stays LOCKED behind a two-layer lock the
+  runner refuses to launch without (auto-provisioned for codex roles;
+  `allow_open_egress` is the explicit, warned escape hatch):
     1. an `--internal` `docker_network` — kills direct egress AND external DNS,
     2. an allowlisting `https_proxy` (provider domains only) as the sole exit.
 
@@ -746,18 +749,21 @@ class ClaudeDriver:
         self.config = config
 
     def ensure_ready(self) -> None:
-        """Refuse to launch without the headless OAuth token.
+        """Refuse to launch unless a claude credential resolves + the proxy is up.
 
-        The token is opaque and long-lived (~1yr), so we check presence, not
-        expiry. It must be set on the HOST (`claude setup-token`) and is
-        forwarded into the container by name.
+        The token never enters the container: it stays on the host, where the
+        auth-inject proxy swaps it in per request. We confirm a credential
+        source exists (env `CLAUDE_CODE_OAUTH_TOKEN` / macOS keychain /
+        ~/.claude/.credentials.json) and start the proxy here, so a
+        misconfigured run fails before any container launches.
         """
 
-        if not os.environ.get(_CLAUDE_OAUTH_ENV):
-            raise ActorError(
-                f"{_CLAUDE_OAUTH_ENV} not set; run `claude setup-token` on the host "
-                f"and export {_CLAUDE_OAUTH_ENV} (the claude CLI actor's subscription auth)."
-            )
+        from . import cli_auth_proxy
+
+        try:
+            cli_auth_proxy.ensure_auth_proxy("claude")
+        except cli_auth_proxy.AuthProxyError as exc:
+            raise ActorError(str(exc)) from exc
 
     def prepare_home(self, home: Path) -> Path:
         """Per-run claude session store — empty, mounted at /root/.claude/projects.
@@ -854,22 +860,37 @@ class ClaudeDriver:
         return inner
 
     def container_env(self, base: dict[str, str]) -> dict[str, str]:
-        # Inject the OAuth token (value stays in the docker-run env, off argv) and
-        # force-empty any API key so claude can't fall through to paid API usage.
-        base[_CLAUDE_OAUTH_ENV] = os.environ.get(_CLAUDE_OAUTH_ENV, "")
-        base["ANTHROPIC_API_KEY"] = ""
+        # No credential enters the container. Point claude at the host
+        # auth-inject proxy and hand it a dummy CLAUDE_CODE_OAUTH_TOKEN — the
+        # proxy swaps it for the real token per request. CLAUDE_CODE_OAUTH_TOKEN
+        # keeps claude in subscription/OAuth mode (not API-key mode) so the
+        # interactive usage meter tracks rate_limits.five_hour/seven_day.
+        # ANTHROPIC_AUTH_TOKEN is force-emptied so it can't override to API-key
+        # mode; ANTHROPIC_API_KEY is force-emptied for no billed-API fall-through.
+        from . import cli_auth_proxy
+
+        base["ANTHROPIC_BASE_URL"] = cli_auth_proxy.ensure_auth_proxy("claude")
+        base[_CLAUDE_OAUTH_ENV] = "contremaitre-injected"
         base["ANTHROPIC_AUTH_TOKEN"] = ""
+        base["ANTHROPIC_API_KEY"] = ""
         # claude refuses `--permission-mode bypassPermissions` when running as
         # root unless it's told it's in a sandbox (it exits with "cannot be used
         # with root/sudo privileges"). The per-run container runs as root and IS
-        # a sandbox (egress-locked, isolated, ephemeral), so set the documented
-        # escape — exactly the guard claude checks: `IS_SANDBOX === "1"`.
+        # a sandbox (isolated, ephemeral, no usable credential), so set the
+        # documented escape — exactly the guard claude checks: `IS_SANDBOX === "1"`.
         base["IS_SANDBOX"] = "1"
         return base
 
     def container_env_names(self) -> list[str]:
         # Forwarded `-e NAME` (value from the docker-run env, never inlined on argv).
-        return [_CLAUDE_OAUTH_ENV, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "IS_SANDBOX"]
+        # No real token here — the credential lives in the host auth-inject proxy.
+        return [
+            "ANTHROPIC_BASE_URL",
+            _CLAUDE_OAUTH_ENV,
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "IS_SANDBOX",
+        ]
 
     def parse_events(
         self, events_path: Path, *, start_offset: int
@@ -1020,15 +1041,21 @@ class CliActorRunner:
     # ----- security-critical seam ------------------------------------------
 
     def _assert_egress_locked(self) -> None:
-        """Refuse to launch unless egress is locked OR explicitly opened.
+        """Refuse to launch a token-carrying CLI container without locked egress.
 
-        The in-container subscription credential outlives the run, so the only
-        thing standing between an injected `cat`/`printenv` and an attacker is the
-        egress lock. By default require an `--internal` docker_network (no route,
-        no external DNS) AND an allowlisting https_proxy (the sole exit).
-        `allow_open_egress` is the explicit, warned escape hatch.
+        Only codex carries an in-container credential (a short-lived access
+        token in the mounted home) that outlives the turn, so only codex needs
+        the lock: an `--internal` docker_network (no route, no external DNS) AND
+        an allowlisting https_proxy (the sole exit). `allow_open_egress` is the
+        explicit, warned escape hatch.
+
+        claude holds no usable credential — the host auth-inject proxy adds the
+        bearer per request — so there is nothing to exfiltrate and it returns
+        early, free to run open egress.
         """
 
+        if self.driver.name == "claude":
+            return
         if self.config.allow_open_egress:
             return
         if not (self.config.docker_network and self.config.https_proxy):
@@ -1186,8 +1213,7 @@ class CliActorRunner:
             "--label",
             f"contremaitre.role={role}",
         ]
-        if self.config.docker_network:
-            cmd += ["--network", self.config.docker_network]
+        cmd += self._egress_docker_flags()
         if self.config.container_user:
             cmd += ["--user", self.config.container_user]
         cmd += [
@@ -1198,17 +1224,38 @@ class CliActorRunner:
         ]
         for host_path, container_path, mode in extra_mounts:
             cmd += ["-v", f"{host_path}:{container_path}:{mode}"]
+        for name in self.driver.container_env_names():
+            cmd += ["-e", name]
+        cmd += ["-w", "/app", self.config.docker_image, *inner]
+        return cmd
+
+    def _egress_docker_flags(self) -> list[str]:
+        """Per-tool network + proxy docker flags for a CLI container.
+
+        Resolved by the role's driver (each runner is bound to one tool):
+
+        - **claude** carries no in-container credential — the host auth-inject
+          proxy adds the bearer — so it runs OPEN egress and only needs
+          `host.docker.internal` to reach that proxy. It must NOT join the
+          internal egress-lock network (a codex reviewer in the same run sets
+          `docker_network`), which has no route to the host.
+        - **codex** still mounts a short-lived access token, so it stays on the
+          locked internal network + allowlisting HTTPS proxy (the egress lock).
+        """
+
+        if self.driver.name == "claude":
+            return ["--add-host", "host.docker.internal:host-gateway"]
+        flags: list[str] = []
+        if self.config.docker_network:
+            flags += ["--network", self.config.docker_network]
         for var, val in (
             ("HTTP_PROXY", self.config.http_proxy),
             ("HTTPS_PROXY", self.config.https_proxy),
             ("NO_PROXY", self.config.no_proxy),
         ):
             if val:
-                cmd += ["-e", var]
-        for name in self.driver.container_env_names():
-            cmd += ["-e", name]
-        cmd += ["-w", "/app", self.config.docker_image, *inner]
-        return cmd
+                flags += ["-e", var]
+        return flags
 
     def _refresh_claude_statusline_usage(self, *, home: Path, role: str, model: str) -> None:
         """Best-effort exact Claude.ai subscription meter refresh.
@@ -1261,8 +1308,7 @@ class CliActorRunner:
             "--label",
             f"contremaitre.role={role}-claude-meter",
         ]
-        if self.config.docker_network:
-            cmd += ["--network", self.config.docker_network]
+        cmd += self._egress_docker_flags()
         if self.config.container_user:
             cmd += ["--user", self.config.container_user]
         cmd += [
@@ -1273,13 +1319,6 @@ class CliActorRunner:
             "-v",
             f"{self.worktree}:/app:ro",
         ]
-        for var, val in (
-            ("HTTP_PROXY", self.config.http_proxy),
-            ("HTTPS_PROXY", self.config.https_proxy),
-            ("NO_PROXY", self.config.no_proxy),
-        ):
-            if val:
-                cmd += ["-e", var]
         for name in self.driver.container_env_names():
             cmd += ["-e", name]
         cmd += [
@@ -1305,7 +1344,9 @@ class CliActorRunner:
         Proxy vars are set here (the value) and referenced by name in the argv
         (`-e HTTPS_PROXY`), so docker forwards the value into the container
         without it appearing on the command line. Driver-specific vars (e.g.
-        claude's OAuth token) are layered on by `driver.container_env`.
+        claude's proxy base-url + dummy bearer) are layered on by
+        `driver.container_env` and picked up the same way: `-e NAME` in the
+        argv reads from this dict (the subprocess env), not from os.environ.
         """
 
         env = os.environ.copy()

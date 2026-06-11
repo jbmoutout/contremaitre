@@ -672,24 +672,35 @@ def _d(s: str) -> str:
     return f"\033[2m{s}\033[0m" if sys.stdout.isatty() else s
 
 
-def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
-    """True when a CLI role should auto-provision its locked egress.
+def _active_codex_roles(args: argparse.Namespace) -> bool:
+    """True when codex drives any role (agent / SIM / post-publish CLI reviewer).
 
-    Checks agent, SIM, and post-publish CLI reviewer: a CLI tool in any of
-    those positions carries an exfiltratable in-container subscription token,
-    so the *default* is to lock. The lock is the secure default, not mandatory
-    — `--allow-open-egress` is the explicit, warned override (the operator
-    accepts the token risk, e.g. so the agent can install deps from PyPI/npm
-    that the provider-only allowlist would block). Explicit
-    `--docker-network`/`--https-proxy` also win (operator's own policy).
+    Only codex carries a short-lived access token *inside* its container, so a
+    codex role is what triggers the locked egress. claude carries no in-container
+    credential — the host auth-inject proxy (`cli_auth_proxy`) adds the bearer —
+    so claude roles need no lock and run open egress. `auto` reviewer is treated
+    as possibly-codex (it picks the cross-family tool, which is codex when the
+    agent is claude); over-provisioning the lock is harmless because claude
+    containers ignore the internal network anyway.
     """
 
     agent_name = getattr(args, "agent", "fake")
     sim_name = getattr(args, "sim", None) or agent_name
-    cli_names = {agent_name, sim_name}
     reviewer = getattr(args, "cli_reviewer", "none")
-    reviewer_cli_active = reviewer in {"codex", "claude", "auto"}
-    if not cli_names.intersection({"claude", "codex"}) and not reviewer_cli_active:
+    return "codex" in {agent_name, sim_name} or reviewer in {"codex", "auto"}
+
+
+def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
+    """True when a codex role should auto-provision its locked egress.
+
+    Only codex carries an exfiltratable in-container token, so only a codex role
+    triggers the lock — the secure default. `--allow-open-egress` is the
+    explicit, warned override (the operator accepts the codex token risk, e.g. so
+    codex can install deps from PyPI/npm the provider-only allowlist would
+    block). Explicit `--docker-network`/`--https-proxy` also win.
+    """
+
+    if not _active_codex_roles(args):
         return False
     if getattr(args, "allow_open_egress", False):
         return False
@@ -697,23 +708,25 @@ def _cli_egress_is_auto(args: argparse.Namespace) -> bool:
 
 
 def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
-    """Stand up the shared allowlist egress proxy and point the run at it.
+    """Stand up the shared allowlist egress proxy for codex roles.
 
-    Fires whenever a CLI role or post-publish CLI reviewer is active with no explicit
-    `--docker-network`/`--https-proxy` and without `--allow-open-egress` (the
-    explicit open-egress override). Mutates `args` so the resolved config (and
-    the runner) see a locked egress. Failure is non-fatal here — preflight and
-    the runner still enforce the egress requirement, so a provision failure
-    surfaces as a clean "egress not configured" refusal rather than a crash.
+    claude roles need no lock (the host auth-inject proxy holds the credential;
+    the container has none), so this fires only when a codex role is active with
+    no explicit `--docker-network`/`--https-proxy` and without
+    `--allow-open-egress`. Mutates `args` so the resolved config and the runner
+    see a locked egress for codex. Failure is non-fatal — preflight and the
+    runner still enforce the codex egress requirement, so a provision failure
+    surfaces as a clean refusal rather than a crash.
     """
 
     if getattr(args, "allow_open_egress", False):
-        print(
-            "[warn] CLI egress OPEN (--allow-open-egress): the in-container "
-            "subscription token is long-lived, so an injected command could "
-            "exfiltrate it. Lock egress unless you know why you need this.",
-            file=sys.stderr,
-        )
+        if _active_codex_roles(args):
+            print(
+                "[warn] codex egress OPEN (--allow-open-egress): codex mounts a "
+                "short-lived in-container token, so an injected command could "
+                "exfiltrate it. Lock egress unless you know why you need this.",
+                file=sys.stderr,
+            )
         return
     if not _cli_egress_is_auto(args):
         return
@@ -727,8 +740,8 @@ def _maybe_provision_cli_egress(args: argparse.Namespace) -> None:
     args.docker_network = network
     args.https_proxy = proxy
     print(
-        f"[info] CLI egress LOCKED: {network} (no route/DNS) + allowlist proxy "
-        f"({proxy}, provider domains only) — the only exit for a long-lived in-container token."
+        f"[info] codex egress LOCKED: {network} (no route/DNS) + allowlist proxy "
+        f"({proxy}, provider domains only) — the only exit for codex's in-container token."
     )
 
 
@@ -748,10 +761,17 @@ def _codex_token_line() -> str:
 
 def _claude_token_line() -> str:
     from .cli_actor import _CLAUDE_OAUTH_ENV
+    from .cli_auth_proxy import AuthProxyError, resolve_claude_token
 
-    if os.environ.get(_CLAUDE_OAUTH_ENV):
-        return f"claude token: present ({_CLAUDE_OAUTH_ENV} set)"
-    return f"claude token: MISSING — run `claude setup-token` and add {_CLAUDE_OAUTH_ENV} to .env"
+    try:
+        resolve_claude_token()
+    except AuthProxyError:
+        return (
+            f"claude token: MISSING — run `claude setup-token` and add {_CLAUDE_OAUTH_ENV} "
+            "to .env (or log in with `claude`)"
+        )
+    src = "env" if os.environ.get(_CLAUDE_OAUTH_ENV) else "keychain / ~/.claude/.credentials.json"
+    return f"claude token: present (host-injected, never in container; source: {src})"
 
 
 def _opencode_key_line(env_var: str) -> str:

@@ -275,3 +275,22 @@ class CliNetworkPolicyTest(unittest.TestCase):
             docker_network="net",
         )
         self.assertEqual(_check_network_policy(cfg).status, "PASS")
+
+    def test_claude_only_passes_open(self):
+        # claude carries no in-container credential (host auth-inject proxy), so
+        # a claude-only run passes with open egress — no lock required.
+        cfg = self._cfg(cli_tool="claude")
+        self.assertEqual(_check_network_policy(cfg).status, "PASS")
+
+    def test_claude_agent_codex_reviewer_requires_lock(self):
+        # The default mix: a codex reviewer in the run still requires the lock,
+        # even though the claude agent runs open.
+        cfg = self._cfg(cli_tool="claude", cli_reviewer="codex")
+        self.assertEqual(_check_network_policy(cfg).status, "FAIL")
+        locked = self._cfg(
+            cli_tool="claude",
+            cli_reviewer="codex",
+            docker_network="net",
+            https_proxy="http://p:3128",
+        )
+        self.assertEqual(_check_network_policy(locked).status, "PASS")
