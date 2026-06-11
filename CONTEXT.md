@@ -39,3 +39,17 @@ streams under `<run-id>/` — `raw_export`, `guardrail_events`, `review_cycles`,
 re-home them. Carried by `RunArtifacts` in `run_artifacts.py`. Snapshot
 semantics: lazy + per-instance memoization, a fresh instance to re-read (the
 live TUI builds one per refresh tick).
+
+**CLI review verdict**
+The post-publish CLI reviewer's per-round judgement: one of `LOOKS_GOOD` /
+`NEEDS_ATTENTION` / `MUST_FIX`. Carries a canonical **severity** order
+(`LOOKS_GOOD < NEEDS_ATTENTION < MUST_FIX`) — the load-bearing fact behind
+worst-of-N aggregation, the eval scorecard, and the TUI glyph. Owned by the
+`CliReviewVerdict` enum in `models.py`, which parses it from a reviewer body
+(**worst-first**: the first key found wins, so a justification that *mentions*
+a milder key never outranks the stated verdict), ranks it (`severity`),
+aggregates it (`worst`), and exposes whether it blocks (`is_blocking` —
+`MUST_FIX`). The parser reads a **header-less** body: stripping any posted-file
+metadata header is the reader's job, not the verdict's. Distinct from the SIM
+**review verdict** (`ReviewVerdict`: APPROVED / CHANGES_REQUESTED /
+NEEDS_HUMAN) and the run's **terminal verdict** (`TerminalVerdict`).

@@ -33,6 +33,7 @@ import subprocess
 from pathlib import Path
 
 from .jsonlog import append_jsonl
+from .models import CliReviewVerdict
 
 
 VALID_TOOLS = ("codex", "claude")
@@ -203,9 +204,6 @@ def post_comment(
     return True, proc.stdout.strip()
 
 
-VERDICT_KEYS = ("MUST_FIX", "NEEDS_ATTENTION", "LOOKS_GOOD")
-
-
 def extract_required_changes(markdown: str) -> list[str]:
     """Extract numbered items from the `## Required changes` section.
 
@@ -231,24 +229,6 @@ def extract_required_changes(markdown: str) -> list[str]:
     return items
 
 
-def parse_verdict(markdown: str) -> str | None:
-    """Return the verdict key (MUST_FIX / NEEDS_ATTENTION / LOOKS_GOOD).
-
-    The prompt enforces `<glyph> <KEY> — <justification>` on line 1, so
-    the first non-blank line carries one of the three SCREAMING_SNAKE_CASE
-    keys. We scan a few extra lines defensively in case the agent prepends
-    stray whitespace — the verdict needs to be findable even if the agent
-    isn't 100% compliant with the format spec. The keys are mutually
-    disjoint substrings, so a containment check is unambiguous.
-    """
-
-    for line in markdown.lstrip().splitlines()[:5]:
-        for key in VERDICT_KEYS:
-            if key in line:
-                return key
-    return None
-
-
 # ---------- commit-status projection ----------
 #
 # The cli_review verdict is otherwise only visible as line 1 of a PR comment
@@ -264,36 +244,21 @@ def parse_verdict(markdown: str) -> str | None:
 # Stable context string so branch protection can require exactly this check.
 CLI_REVIEW_STATUS_CONTEXT = "contremaitre/cli-review"
 
-# Severity order: a higher rank is a worse verdict. Used for worst-of-N across
-# multiple review rounds — any MUST_FIX wins.
-_VERDICT_RANK = {"LOOKS_GOOD": 0, "NEEDS_ATTENTION": 1, "MUST_FIX": 2}
 
-
-def worst_verdict(verdicts: list[str | None]) -> str | None:
-    """Return the highest-severity verdict among `verdicts`.
-
-    Ignores `None` (a reviewer that failed or produced an unparseable
-    verdict). Returns `None` only when nothing parseable is present.
-    `MUST_FIX` > `NEEDS_ATTENTION` > `LOOKS_GOOD`.
-    """
-
-    ranked = [v for v in verdicts if v in _VERDICT_RANK]
-    if not ranked:
-        return None
-    return max(ranked, key=lambda v: _VERDICT_RANK[v])
-
-
-def verdict_commit_state(verdict: str | None) -> str:
+def verdict_commit_state(verdict: str | CliReviewVerdict | None) -> str:
     """Map a verdict to a GitHub commit-status `state`.
 
-    Only `MUST_FIX` blocks (`failure`). `NEEDS_ATTENTION` is non-blocking by
-    definition, `LOOKS_GOOD` is clean, and an unparseable/missing verdict
-    (`None`) passes too — we never deadlock a required check on a reviewer
-    that crashed or drifted from the format. The nuance for the non-failure
-    cases lives in the status `description`, not the state.
+    Only a blocking verdict (`MUST_FIX`) maps to `failure`. `NEEDS_ATTENTION`
+    is non-blocking by definition, `LOOKS_GOOD` is clean, and an
+    unparseable/missing verdict (`None`) passes too — we never deadlock a
+    required check on a reviewer that crashed or drifted from the format. The
+    nuance for the non-failure cases lives in the status `description`, not the
+    state. Severity itself is the enum's to know; this is the GitHub-string
+    projection, which stays here in the GitHub adapter's locality.
     """
 
-    return "failure" if verdict == "MUST_FIX" else "success"
+    parsed = CliReviewVerdict._coerce(verdict)
+    return "failure" if (parsed is not None and parsed.is_blocking) else "success"
 
 
 def _owner_repo_from_url(pr_url: str) -> str | None:
@@ -430,6 +395,26 @@ def format_header(
     parts.append(f"round {round_n}/{round_of}")
     parts.append(_fmt_duration_short(duration_s))
     return "### " + " · ".join(parts) + "\n\n"
+
+
+def strip_header(md: str) -> str:
+    """Inverse of `format_header`: drop a leading H3 metadata header if present.
+
+    `format_header` writes `### … \\n\\n` and the orchestrator posts it as
+    `header + body`. A reader that needs the header-less body — the eval
+    scorecard, which feeds `CliReviewVerdict.parse` (header-less by contract) —
+    calls this so the header's `###`/blank-line shape stays owned in one place,
+    beside the writer, instead of being re-encoded at the reader. Idempotent: a
+    body with no header (e.g. the raw reviewer stream) is returned unchanged.
+    """
+
+    lines = md.splitlines(keepends=True)
+    if not lines or not lines[0].startswith("### "):
+        return md
+    rest = lines[1:]
+    while rest and not rest[0].strip():
+        rest = rest[1:]
+    return "".join(rest)
 
 
 def _fmt_duration_short(seconds: float) -> str:

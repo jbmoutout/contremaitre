@@ -45,7 +45,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .cli_reviewer import strip_header
 from .manifest import manifest_digest
+from .models import CliReviewVerdict
 
 
 GOLDEN_CASES_DIRNAME = "golden_cases"
@@ -481,12 +483,12 @@ _REQUIRED_ARTIFACTS = (
 )
 
 
-_VERDICT_KEY_TO_SCORE = {
-    "LOOKS_GOOD": 1.0,
-    "NEEDS_ATTENTION": 0.5,
-    "MUST_FIX": 0.0,
-}
-_VERDICT_KEYS = tuple(_VERDICT_KEY_TO_SCORE.keys())
+# The scorecard's projection of a CLI review verdict onto [0,1]. The *order*
+# (LOOKS_GOOD best … MUST_FIX worst) is the enum's `severity`; this map is only
+# eval's policy for what each severity level is worth in the headline score.
+# Keyed by severity (0=LOOKS_GOOD … 2=MUST_FIX) so the ordering is never
+# re-encoded here.
+_SEVERITY_TO_SCORE = {0: 1.0, 1: 0.5, 2: 0.0}
 
 _TERMINAL_TO_SCORE = {
     "READY_FOR_DRAFT_PR": 1.0,
@@ -590,21 +592,20 @@ def _parse_cli_review(run_dir: Path, cli_reviewer: str) -> dict[str, Any]:
 
     if not text and posted.exists():
         text = posted.read_text(encoding="utf-8")
-        # The orchestrator prepends an H3 metadata header to the posted
-        # file ("### reviewed by `codex` · `gpt-5.5` · 5m 23s"). We look
-        # at the first 10 lines for the verdict key, so the header line
-        # shifts but doesn't blind us — citation/finding counts use the
-        # whole body and the header is benign.
+        # The posted file carries an H3 metadata header ("### reviewed by
+        # `codex` · …"); it's stripped before the verdict parse below. The
+        # finding/citation counts run over the whole body, where the header is
+        # benign.
 
-    verdict_key = None
-    if text:
-        head = "\n".join(text.splitlines()[:10])
-        for key in _VERDICT_KEYS:
-            if key in head:
-                verdict_key = key
-                break
+    # Strip any posted-file H3 metadata header (the raw stream has none), then
+    # let the verdict own the parse. This routes through the *live* precedence
+    # (worst-first): a line like `✗ MUST_FIX — not LOOKS_GOOD yet` reads as
+    # MUST_FIX, where eval's old best-first scan over a 10-line join read it as
+    # LOOKS_GOOD and scored it 1.0.
+    verdict = CliReviewVerdict.parse(strip_header(text)) if text else None
+    verdict_key = verdict.value if verdict else None
 
-    parse_ok = verdict_key is not None
+    parse_ok = verdict is not None
     finding_count = len(_FINDING_RE.findall(text)) if text else 0
     citation_count = len(_CITATION_RE.findall(text)) if text else 0
     by_label: dict[str, int] = {label: 0 for label in _FINDING_LABELS}
@@ -615,7 +616,7 @@ def _parse_cli_review(run_dir: Path, cli_reviewer: str) -> dict[str, Any]:
     return {
         "ran": bool(text),
         "verdict_key": verdict_key if parse_ok else ("PARSE_FAIL" if text else None),
-        "verdict_score": _VERDICT_KEY_TO_SCORE.get(verdict_key) if parse_ok else None,
+        "verdict_score": _SEVERITY_TO_SCORE[verdict.severity] if verdict else None,
         "finding_count": finding_count,
         "citation_count": citation_count,
         "by_label": by_label,
