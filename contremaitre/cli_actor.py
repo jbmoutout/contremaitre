@@ -884,7 +884,13 @@ class ClaudeDriver:
     def container_env_names(self) -> list[str]:
         # Forwarded `-e NAME` (value from the docker-run env, never inlined on argv).
         # No real token here — the credential lives in the host auth-inject proxy.
-        return ["ANTHROPIC_BASE_URL", _CLAUDE_OAUTH_ENV, "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "IS_SANDBOX"]
+        return [
+            "ANTHROPIC_BASE_URL",
+            _CLAUDE_OAUTH_ENV,
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "IS_SANDBOX",
+        ]
 
     def parse_events(
         self, events_path: Path, *, start_offset: int

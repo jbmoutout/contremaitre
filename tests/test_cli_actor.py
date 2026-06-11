@@ -880,7 +880,13 @@ class ClaudeContainerEnvTest(unittest.TestCase):
             self.assertEqual(env["IS_SANDBOX"], "1")
             self.assertEqual(
                 set(runner.driver.container_env_names()),
-                {"ANTHROPIC_BASE_URL", _CLAUDE_OAUTH_ENV, "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "IS_SANDBOX"},
+                {
+                    "ANTHROPIC_BASE_URL",
+                    _CLAUDE_OAUTH_ENV,
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "ANTHROPIC_API_KEY",
+                    "IS_SANDBOX",
+                },
             )
 
 
