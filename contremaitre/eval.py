@@ -758,13 +758,24 @@ def _diff_stats(run_dir: Path) -> dict[str, int | None]:
 
 
 def _sim_verdicts_parse_ok(run_dir: Path) -> bool:
-    # Missing file is a failure here (distinct from an empty file, which passes),
-    # so keep the explicit existence guard — the tolerant reader maps both to [].
-    if not (run_dir / "review_cycles.jsonl").exists():
+    # A parse-VALIDITY check on raw content: a malformed or non-object line is a
+    # FAILURE. The tolerant `RunArtifacts` reader would silently skip exactly
+    # those lines (`read_jsonl` drops unparseable + non-dict rows), so this reads
+    # the bytes directly — the same reason the live tail keeps its own handle.
+    # (Contrast `_review_depth`, which consumes parsed rows and routes through
+    # the reader.) Missing file is a failure; an empty file passes.
+    path = run_dir / "review_cycles.jsonl"
+    if not path.exists():
         return False
-    for obj in RunArtifacts.from_run_dir(run_dir).review_cycles():
-        if "verdict" not in obj or "confidence" not in obj:
-            return False
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            if not isinstance(obj, dict) or "verdict" not in obj or "confidence" not in obj:
+                return False
+    except (json.JSONDecodeError, OSError):
+        return False
     return True
 
 

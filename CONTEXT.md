@@ -51,4 +51,7 @@ reads stay outside, both for structural reasons, not oversight:
   never see new lines;
 - `extract` is an **acyclic leaf below the reader** (`run_artifacts → flow_use →
   extract`, since `flow_use` imports `extract.parse_apply_patch`), so it reads
-  its own streams rather than closing that import loop.
+  its own streams rather than closing that import loop;
+- a **parse-validity check** (`eval._sim_verdicts_parse_ok`) reads the bytes
+  directly because the tolerant reader (`read_jsonl`) silently drops the
+  malformed / non-object lines the check exists to fail on.
