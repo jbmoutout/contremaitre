@@ -592,11 +592,10 @@ def _parse_cli_review(run_dir: Path, cli_reviewer: str) -> dict[str, Any]:
 
     if not text and posted.exists():
         text = posted.read_text(encoding="utf-8")
-        # The orchestrator prepends an H3 metadata header to the posted
-        # file ("### reviewed by `codex` · `gpt-5.5` · 5m 23s"). We look
-        # at the first 10 lines for the verdict key, so the header line
-        # shifts but doesn't blind us — citation/finding counts use the
-        # whole body and the header is benign.
+        # The posted file carries an H3 metadata header ("### reviewed by
+        # `codex` · …"); it's stripped before the verdict parse below. The
+        # finding/citation counts run over the whole body, where the header is
+        # benign.
 
     # Strip any posted-file H3 metadata header (the raw stream has none), then
     # let the verdict own the parse. This routes through the *live* precedence
