@@ -17,6 +17,7 @@ import pytest
 
 from contremaitre import events
 from contremaitre.models import ModelSpec
+from contremaitre.jsonlog import read_jsonl, ts_to_ms
 from contremaitre.tui import (
     _PAL_ERROR,
     _PAL_TEXT,
@@ -43,7 +44,6 @@ from contremaitre.tui import (
     _persistent_review_token,
     _phase_trail,
     _pr_number_from_url,
-    _read_jsonl,
     _render_event,
     _render_guardrail,
     _reviewer_glyph,
@@ -78,29 +78,29 @@ def _actor_start(role: str) -> dict:
     return _g(events.ACTOR_START, role=role)
 
 
-# ===== _read_jsonl =====
+# ===== read_jsonl (shared jsonlog primitive) =====
 
 
 def test_read_jsonl_missing_file(tmp_path):
-    assert _read_jsonl(tmp_path / "nonexistent.jsonl") == []
+    assert read_jsonl(tmp_path / "nonexistent.jsonl") == []
 
 
 def test_read_jsonl_empty_file(tmp_path):
     (tmp_path / "f.jsonl").write_text("")
-    assert _read_jsonl(tmp_path / "f.jsonl") == []
+    assert read_jsonl(tmp_path / "f.jsonl") == []
 
 
 def test_read_jsonl_skips_malformed_lines(tmp_path):
     p = tmp_path / "f.jsonl"
     p.write_text('{"a": 1}\nnot json\n{"b": 2}\n')
-    result = _read_jsonl(p)
+    result = read_jsonl(p)
     assert result == [{"a": 1}, {"b": 2}]
 
 
 def test_read_jsonl_skips_non_dict_values(tmp_path):
     p = tmp_path / "f.jsonl"
     p.write_text('{"a": 1}\n[1, 2]\n42\n')
-    result = _read_jsonl(p)
+    result = read_jsonl(p)
     assert result == [{"a": 1}]
 
 
@@ -1638,15 +1638,15 @@ def test_codex_usage_token_absent_for_claude_run():
 
 
 def test_fmt_ts_handles_iso_string_and_int_and_none():
-    from contremaitre.tui import _fmt_ts, _ts_to_ms
+    from contremaitre.tui import _fmt_ts
 
     # claude's user/assistant/result events carry ISO-8601 strings.
-    assert _ts_to_ms("2026-06-06T12:49:25.658Z") == 1780750165658
-    assert _ts_to_ms(1780750165658) == 1780750165658
-    assert _ts_to_ms("1780750165658") == 1780750165658
-    assert _ts_to_ms(None) is None
-    assert _ts_to_ms("") is None
-    assert _ts_to_ms("not-a-time") is None
+    assert ts_to_ms("2026-06-06T12:49:25.658Z") == 1780750165658
+    assert ts_to_ms(1780750165658) == 1780750165658
+    assert ts_to_ms("1780750165658") == 1780750165658
+    assert ts_to_ms(None) is None
+    assert ts_to_ms("") is None
+    assert ts_to_ms("not-a-time") is None
     # _fmt_ts must never raise on any of these (regression: TypeError str/int).
     assert _fmt_ts("2026-06-06T12:49:25.658Z") != ""
     assert _fmt_ts(None) == "        "

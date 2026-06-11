@@ -22,7 +22,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..jsonlog import ts_to_ms
 from ..models import ModelSpec, RunPaths
+from ..run_artifacts import RunArtifacts
 
 _HERE = Path(__file__).resolve().parent
 _CSS_PATH = _HERE / "_styles.css"
@@ -70,8 +72,9 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     # codex agent/SIM/reviewer turns are visible to all consumers below. Then
     # back-fill synthetic timestamps on the clockless (codex) streams so their
     # turns interleave with timestamped opencode turns instead of piling at t=0.
-    agent_events = _normalize_events(_read_jsonl(paths.raw_export))
-    sim_events = _normalize_events(_read_jsonl(paths.sim_raw_export))
+    arts = RunArtifacts(paths)
+    agent_events = _normalize_events(arts.raw_export())
+    sim_events = _normalize_events(arts.sim_raw_export())
     _assign_synthetic_timestamps([agent_events, sim_events])
 
     agent_summary = _summarize_events(agent_events)
@@ -103,8 +106,8 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
         if loaded is not None:
             eval_blob[src.stem] = loaded
 
-    guardrails = _read_jsonl(paths.guardrail_events)
-    recoveries = _read_jsonl(paths.recoveries)
+    guardrails = arts.guardrail_events()
+    recoveries = arts.recoveries()
     cli_review = _assemble_cli_review(paths, guardrails)
     cli_review_extras = _assemble_cli_review_extras(paths)
 
@@ -371,7 +374,7 @@ def _normalize_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     `_build_chat`) understands only opencode's vocabulary (`tool_use` / `text` /
     `step_finish`, each wrapped in a `part`). codex and claude each emit a
     different one, so without this adapter their agent/SIM/reviewer turns are
-    invisible in the viewer. Token counting mirrors `costs.sum_token_usage` (raw
+    invisible in the viewer. Token counting mirrors `costs.sum_token_usage_in_events` (raw
     `input_tokens` / `output_tokens`, no cache subtraction) for consistency with
     the orchestrator's own rollup.
     """
@@ -528,33 +531,6 @@ def _is_claude_stream(events: list[dict[str, Any]]) -> bool:
     return any(ev.get("type") in _CLAUDE_EVENT_TYPES for ev in events)
 
 
-def _coerce_ms(ts: Any) -> int | None:
-    """Coerce a heterogeneous event timestamp to epoch-ms, or None.
-
-    int/float ms pass through; an ISO-8601 string (claude, e.g.
-    `2026-06-06T12:49:25.658Z`) or numeric string is parsed; anything else → None
-    (left for `_assign_synthetic_timestamps` to back-fill).
-    """
-
-    if isinstance(ts, bool):
-        return None
-    if isinstance(ts, (int, float)):
-        return int(ts)
-    if isinstance(ts, str):
-        s = ts.strip()
-        if not s:
-            return None
-        if s.isdigit():
-            return int(s)
-        try:
-            from datetime import datetime
-
-            return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
-        except ValueError:
-            return None
-    return None
-
-
 def _claude_to_opencode(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Flatten claude stream-json into opencode-shaped events.
 
@@ -615,7 +591,7 @@ def _claude_to_opencode(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # claude emits ISO-8601 string timestamps on user/assistant/result events;
         # coerce to epoch-ms so the chat preserves real times (and downstream
         # sorting never mixes str with int).
-        ts = _coerce_ms(ev.get("timestamp"))
+        ts = ts_to_ms(ev.get("timestamp"))
         if etype == "system" and ev.get("subtype") == "init":
             flush()  # close any turn left open by a missing result
             open_turn = True
@@ -1042,23 +1018,6 @@ def _read_json(path: Path, *, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
 
 
 # ----- HTML assembly -----

@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from ..costs import sum_token_usage
-from ..flow_use import compute_phases_from_paths
+from ..costs import sum_token_usage_in_events
+from ..jsonlog import read_jsonl
 from ..models import ModelSpec
-from ..paths import build_run_paths
+from ..run_artifacts import RunArtifacts
 from . import VIEWER_FILENAME
 
 _HERE = Path(__file__).resolve().parent
@@ -542,29 +542,6 @@ _DELETIONS_RE = re.compile(r"(\d+)\s+deletions?\(-\)")
 _INFRA_VERDICTS = frozenset({"FAILED_INFRA", "QUOTA_EXHAUSTED"})
 
 
-def _jsonl(path: Path) -> list[dict[str, Any]]:
-    """Parse a .jsonl file to a list of dict rows; [] if missing/unreadable."""
-
-    if not path.is_file():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            rows.append(obj)
-    return rows
-
-
 def _diffstat_loc(run_dir: Path) -> tuple[int, int] | None:
     """(insertions, deletions) from the last diff_stat snapshot, or None.
 
@@ -576,7 +553,7 @@ def _diffstat_loc(run_dir: Path) -> tuple[int, int] | None:
     """
 
     result: tuple[int, int] | None = None
-    for row in _jsonl(run_dir / "worktree_state.jsonl"):
+    for row in read_jsonl(run_dir / "worktree_state.jsonl"):
         diff_stat = row.get("diff_stat") or ""
         ins_m = _INSERTIONS_RE.search(diff_stat)
         del_m = _DELETIONS_RE.search(diff_stat)
@@ -601,7 +578,7 @@ def _pr_review_verdict(run_dir: Path) -> str | None:
 
     order = {"LOOKS_GOOD": 1, "NEEDS_ATTENTION": 2, "MUST_FIX": 3}
     worst: str | None = None
-    for event in _jsonl(run_dir / "guardrail_events.jsonl"):
+    for event in read_jsonl(run_dir / "guardrail_events.jsonl"):
         if event.get("event") != "cli_review_completed":
             continue
         verdict = event.get("verdict")
@@ -622,7 +599,7 @@ def _review_signals(run_dir: Path) -> dict[str, Any]:
 
     sim_verdicts: list[str] = []
     sim_rounds = 0
-    for row in _jsonl(run_dir / "review_cycles.jsonl"):
+    for row in read_jsonl(run_dir / "review_cycles.jsonl"):
         if row.get("unavailable"):
             continue
         verdict = row.get("verdict")
@@ -664,7 +641,7 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     # fix). grilling/impl come back None when unrecoverable — codex streams
     # carry no timestamps, and pre-actor-start CLI runs logged no agent
     # turns — so the dashboard shows "—" rather than wrong numbers.
-    phases = compute_phases_from_paths(build_run_paths(run_dir.parent, run_dir.name))
+    phases = RunArtifacts.from_run_dir(run_dir).phases()
     loc = _diffstat_loc(run_dir)
     review = _review_signals(run_dir)
     pr_verdict = _pr_review_verdict(run_dir)
@@ -675,7 +652,10 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     # event shapes; eval/cost_report.json is too sparse to rely on.
     out_tokens: int | None = None
     if (run_dir / "raw_export.jsonl").is_file():
-        out_tokens = sum_token_usage(run_dir / "raw_export.jsonl").get("output") or None
+        out_tokens = (
+            sum_token_usage_in_events(RunArtifacts.from_run_dir(run_dir).raw_export()).get("output")
+            or None
+        )
 
     return {
         "agent": agent,

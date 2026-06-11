@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from contremaitre.flow_use import (
     compute_flow_use,
     compute_phases,
-    compute_phases_from_paths,
 )
+from contremaitre.run_artifacts import RunArtifacts
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -62,7 +62,7 @@ def test_compute_phases_opencode_splits_on_settled_write(tmp_path):
     )
     _write_jsonl(paths.guardrail_events, _phase_guardrails())
     _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 1, "verdict": "APPROVED"}])
-    phases = compute_phases_from_paths(paths)
+    phases = RunArtifacts(paths).phases()
     assert phases["grilling_exchanges"] == 1
     assert phases["impl_turns"] == 1
     assert phases["pre_settled_agent_turns"] == 1
@@ -97,7 +97,7 @@ def test_compute_phases_detects_claude_assistant_write(tmp_path):
     )
     _write_jsonl(paths.guardrail_events, _phase_guardrails())
     _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 1, "verdict": "APPROVED"}])
-    phases = compute_phases_from_paths(paths)
+    phases = RunArtifacts(paths).phases()
     assert phases["grilling_exchanges"] == 1
     assert phases["impl_turns"] == 1
 
@@ -116,7 +116,7 @@ def test_compute_phases_codex_without_timestamp_is_none_not_garbage(tmp_path):
     )
     _write_jsonl(paths.guardrail_events, _phase_guardrails())
     _write_jsonl(paths.review_cycles, [{"reviewer": "sim", "round": 2, "verdict": "APPROVED"}])
-    phases = compute_phases_from_paths(paths)
+    phases = RunArtifacts(paths).phases()
     assert phases["grilling_exchanges"] is None
     assert phases["impl_turns"] is None
     assert phases["pre_settled_agent_turns"] is None
@@ -148,7 +148,7 @@ def test_compute_phases_none_when_no_agent_turn_logged(tmp_path):
         [{"event": "actor_start", "role": "sim", "ts": 2000}],
     )
     _write_jsonl(paths.review_cycles, [])
-    phases = compute_phases_from_paths(paths)
+    phases = RunArtifacts(paths).phases()
     assert phases["grilling_exchanges"] is None
     assert phases["review_rounds"] == 0
 

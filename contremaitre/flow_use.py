@@ -34,11 +34,10 @@ Added (SIM): sim_read_settled, sim_read_diff, sim_read_diff_partial,
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from typing import Any
 
 from .extract import parse_apply_patch
-from .jsonlog import read_jsonl
+from .jsonlog import event_ms, read_jsonl
 
 
 # ---------------------------------------------------------------------------
@@ -76,27 +75,19 @@ def compute_flow_use(paths: Any) -> dict[str, Any]:
     agent_events = read_jsonl(paths.raw_export)
     sim_events = read_jsonl(paths.sim_raw_export)
     agent = _agent_metrics(agent_events)
+    guardrails_path = getattr(paths, "guardrail_events", None)
+    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
+    cycles = read_jsonl(paths.review_cycles)
     return {
         "schema": "flow_use v1",
         "agent": agent,
         "sim": _sim_metrics(sim_events, paths),
-        "phases": compute_phases_from_paths(paths, agent_events),
+        # The pure interpreter, read in place. Post-hoc readers that hold only a
+        # run dir (the viewer index, the PR-body builder) go through the
+        # `RunArtifacts` reader's `.phases()`; flow_use keeps the edge acyclic
+        # by reading its own streams rather than importing the reader.
+        "phases": compute_phases(agent_events, guardrails, cycles),
     }
-
-
-def compute_phases_from_paths(paths: Any, agent_events: list[dict] | None = None) -> dict[str, Any]:
-    """I/O wrapper: read the three event streams off `paths`, then delegate.
-
-    Post-hoc readers (eval `flow_use.json`, the PR-body lede in `publisher.py`,
-    `viewer/index.py`) go through here. The live TUI calls `compute_phases`
-    directly with the events it already holds in memory + `live=True`.
-    """
-    if agent_events is None:
-        agent_events = read_jsonl(paths.raw_export)
-    guardrails_path = getattr(paths, "guardrail_events", None)
-    guardrails = read_jsonl(guardrails_path) if guardrails_path else []
-    cycles = read_jsonl(paths.review_cycles)
-    return compute_phases(agent_events, guardrails, cycles)
 
 
 def compute_phases(
@@ -108,8 +99,8 @@ def compute_phases(
 ) -> dict[str, Any]:
     """Split the run into grilling / impl / review phases by counting actor turns.
 
-    Pure: operates on already-read event lists, no I/O. `compute_phases_from_paths`
-    is the disk-reading wrapper; the live TUI calls this directly with `live=True`.
+    Pure: operates on already-read event lists, no I/O. Post-hoc readers reach it
+    through `RunArtifacts.phases()`; the live TUI calls this directly with `live=True`.
 
     grilling = agent + SIM turns BEFORE SETTLED_DESIGN.md is written (design pass)
     impl     = agent turns from SETTLED write through IMPLEMENTATION_COMPLETE
@@ -128,14 +119,14 @@ def compute_phases(
     # tool_use blocks. (Codex has no per-event timestamp — see below.)
     settled_event = _find_write_event(agent_events, _SETTLED_RE)
     impl_event = _find_write_event(agent_events, _IMPL_COMPLETE_RE)
-    settled_ms = _timestamp_ms(settled_event)
-    impl_ms = _timestamp_ms(impl_event)
+    settled_ms = event_ms(settled_event)
+    impl_ms = event_ms(impl_event)
 
     starts: list[tuple[float, str]] = []
     for g in guardrails:
         if g.get("event") != "actor_start":
             continue
-        ts = _timestamp_ms(g)
+        ts = event_ms(g)
         role = g.get("role")
         if ts is None or role not in ("agent", "sim", "review"):
             continue
@@ -221,7 +212,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     re_reads = sum(max(0, n - 1) for n in file_access.values())
     convergence, breadth, distinct, total = _convergence(file_access)
 
-    event_times = [ts for e in events if (ts := _timestamp_ms(e)) is not None]
+    event_times = [ts for e in events if (ts := event_ms(e)) is not None]
     wall_seconds = (
         round((event_times[-1] - event_times[0]) / 1000, 1) if len(event_times) > 1 else 0
     )
@@ -231,7 +222,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
     first_code_edit = _find_first_code_edit(tool_calls)
 
     t0 = event_times[0] if event_times else None
-    settled_ts = _timestamp_ms(settled_event)
+    settled_ts = event_ms(settled_event)
     time_to_settled = (
         round((settled_ts - t0) / 1000, 1) if settled_ts is not None and t0 is not None else None
     )
@@ -243,7 +234,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
 
     settled_before_edit: bool | None = None
     if settled_event and first_code_edit:
-        first_edit_ts = _timestamp_ms(first_code_edit)
+        first_edit_ts = event_ms(first_code_edit)
         settled_before_edit = (
             settled_ts < first_edit_ts
             if settled_ts is not None and first_edit_ts is not None
@@ -524,14 +515,14 @@ def _check_self_verification(
     output_suggests_pass: heuristic — no FAILED/error: in any test output.
     runtime_install_required: agent had to install a runtime (container gap).
     """
-    impl_ts = _timestamp_ms(impl_event) if impl_event else float("inf")
+    impl_ts = event_ms(impl_event) if impl_event else float("inf")
 
     last_edit_ts: float | None = None
     for e in tool_calls:
         part = e.get("part") or {}
         if part.get("tool") not in ("write", "edit", "apply_patch"):
             continue
-        event_ts = _timestamp_ms(e)
+        event_ts = event_ms(e)
         if event_ts is None:
             continue
         if any(not _CONTREMAITRE_DIR_RE.search(fp) for fp in _tool_paths(e)):
@@ -546,7 +537,7 @@ def _check_self_verification(
         cmd = _inp(e).get("command") or ""
         if _RUNTIME_INSTALL_RE.search(cmd):
             runtime_install = True
-        event_ts = _timestamp_ms(e)
+        event_ts = event_ms(e)
         if event_ts is None:
             continue
         if (
@@ -563,29 +554,6 @@ def _check_self_verification(
         not _TEST_FAIL_RE.search(out) and not _ZERO_TESTS_RE.search(out) for out in test_outputs
     )
     return True, all_pass, runtime_install
-
-
-def _timestamp_ms(e: dict | None) -> float | None:
-    if not e:
-        return None
-    raw = e.get("timestamp")
-    if isinstance(raw, int | float):
-        return float(raw)
-    if isinstance(raw, str):
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    ts = e.get("ts")
-    if isinstance(ts, int | float):
-        # claude stream-json stamps each event with an epoch-ms integer.
-        return float(ts)
-    if isinstance(ts, str):
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000
-        except ValueError:
-            return None
-    return None
 
 
 def _tool_paths(e: dict) -> list[str]:

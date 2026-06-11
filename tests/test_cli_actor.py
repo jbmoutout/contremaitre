@@ -26,7 +26,8 @@ from contremaitre.cli_actor import (
     _parse_codex_events,
     _stamp_event_slice,
 )
-from contremaitre.costs import estimate_recorded_cost_usd, sum_token_usage
+from contremaitre.costs import sum_costs_in_events, sum_token_usage_in_events
+from contremaitre.jsonlog import read_jsonl
 from contremaitre.models import ActorMode, RunConfig
 from contremaitre.paths import build_run_paths
 from contremaitre.preflight import (
@@ -417,7 +418,7 @@ class TokenUsageRollupTest(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                sum_token_usage(p),
+                sum_token_usage_in_events(read_jsonl(p)),
                 {"input": 140, "output": 14, "reasoning": 6, "cache_read": 110},
             )
 
@@ -433,7 +434,7 @@ class TokenUsageRollupTest(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                sum_token_usage(p),
+                sum_token_usage_in_events(read_jsonl(p)),
                 {"input": 7, "output": 2, "reasoning": 0, "cache_read": 3},
             )
 
@@ -1010,7 +1011,7 @@ class ClaudeTokenUsageTest(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                sum_token_usage(p),
+                sum_token_usage_in_events(read_jsonl(p)),
                 {"input": 100, "output": 10, "reasoning": 0, "cache_read": 80},
             )
 
@@ -1035,7 +1036,7 @@ class ClaudeTokenUsageTest(unittest.TestCase):
                     ]
                 )
             )
-            self.assertEqual(estimate_recorded_cost_usd(p), 0.0)
+            self.assertEqual(sum_costs_in_events(read_jsonl(p)), 0.0)
 
 
 class ClaudeModelSpecTest(unittest.TestCase):

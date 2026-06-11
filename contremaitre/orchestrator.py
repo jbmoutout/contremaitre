@@ -33,7 +33,6 @@ from . import events, prompts
 from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
 from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
-from .costs import estimate_recorded_cost_usd, sum_token_usage
 from .diffscan import DiffScanResult
 from .evaluator import (
     sim_review_summary,
@@ -43,7 +42,7 @@ from .gates import INTERNAL_PATHS, evaluate_l0, only_internal_changes
 from .extract import extract_run_artifacts
 from .viewer import build_viewer
 from .git_utils import GitRepo
-from .jsonlog import append_jsonl, read_jsonl, write_json
+from .jsonlog import append_jsonl, write_json
 from .manifest import build_manifest
 from .models import (
     ActorMode,
@@ -54,9 +53,9 @@ from .models import (
     RunResult,
     State,
     TerminalVerdict,
-    resolved_model_from_events,
 )
 from .paths import build_run_paths, new_run_id, validate_slug
+from .run_artifacts import RunArtifacts
 from .preflight import enforce_preflight
 from .publisher import (
     PublishOutcome,
@@ -1361,8 +1360,9 @@ class Orchestrator:
         if wall_minutes >= self.config.caps.max_wall_minutes:
             self._emit(events.WALL_CAP, wall_minutes=wall_minutes)
             return True
-        recorded_cost = estimate_recorded_cost_usd(self.paths.raw_export, self.paths.sim_raw_export)
-        token_rollup = sum_token_usage(self.paths.raw_export, self.paths.sim_raw_export)
+        arts = RunArtifacts(self.paths)
+        recorded_cost = arts.cost()
+        token_rollup = arts.token_usage()
         write_json(
             self.paths.cost_report,
             {
@@ -1415,15 +1415,16 @@ class Orchestrator:
         )
         return snapshot
 
-    def _role_spec(self, role: str, raw_export: Path) -> ModelSpec:
+    def _role_spec(self, role: str) -> ModelSpec:
         """The role's `ModelSpec`, with `resolved` back-filled from its raw
         stream (claude echoes the model it actually ran in `system/init`;
-        codex/opencode are silent, so `resolved` stays None there)."""
+        codex/opencode are silent, so `resolved` stays None there). Reads the
+        stream through the artifact reader; `with_resolved(None)` is a no-op when
+        the stream is absent or silent."""
 
         spec = ModelSpec.for_role(self.config, role)
-        if raw_export.exists():
-            spec = spec.with_resolved(resolved_model_from_events(read_jsonl(raw_export)))
-        return spec
+        resolved = RunArtifacts(self.paths).resolved_model(sim=(role == "sim"))
+        return spec.with_resolved(resolved)
 
     def _write_final_stats(
         self, terminal_state: State, verdict: TerminalVerdict, reason: str
@@ -1437,13 +1438,11 @@ class Orchestrator:
                 "reason": reason,
                 "turns": self.turns,
                 "duration_seconds": round(time.monotonic() - self.started, 3),
-                "agent_model": self._role_spec("agent", self.paths.raw_export).to_dict(),
-                "sim_model": self._role_spec("sim", self.paths.sim_raw_export).to_dict(),
+                "agent_model": self._role_spec("agent").to_dict(),
+                "sim_model": self._role_spec("sim").to_dict(),
                 "actor_mode": self.config.actor_mode.value,
                 "publish_mode": self.config.publish_mode.value,
-                "recorded_cost_usd": estimate_recorded_cost_usd(
-                    self.paths.raw_export, self.paths.sim_raw_export
-                ),
+                "recorded_cost_usd": RunArtifacts(self.paths).cost(),
             },
         )
         write_json(self.paths.trajectory, {"states": self.trajectory})
