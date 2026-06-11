@@ -21,7 +21,8 @@ from contremaitre.actors import (
     _recover_text_from_sqlite,
     _record_recovery,
 )
-from contremaitre.costs import estimate_recorded_cost_usd
+from contremaitre.costs import sum_costs_in_events
+from contremaitre.jsonlog import read_jsonl
 from contremaitre.fixture import init_fixture
 from contremaitre.models import Caps, RunConfig, TerminalVerdict
 from contremaitre.orchestrator import run
@@ -339,7 +340,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
             self.assertIn("part", e)
             self.assertIn("cost", e["part"])
         # Cost estimator sees the full $0.15 (parent stdout + harvested).
-        total = estimate_recorded_cost_usd(self.raw_export)
+        total = sum_costs_in_events(read_jsonl(self.raw_export))
         self.assertAlmostEqual(total, 0.15, places=6)
 
     def test_harvest_is_idempotent(self):
@@ -357,7 +358,7 @@ class HarvestStepFinishFromSqliteTest(unittest.TestCase):
 
         self.assertEqual(first, 2)
         self.assertEqual(second, 0)
-        total = estimate_recorded_cost_usd(self.raw_export)
+        total = sum_costs_in_events(read_jsonl(self.raw_export))
         self.assertAlmostEqual(total, 0.07, places=6)
 
     def test_harvest_no_db_is_noop(self):

@@ -20,9 +20,9 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from .flow_use import compute_phases_from_paths
 from .jsonlog import append_jsonl, write_json
 from .models import PublishMode, RunConfig, RunPaths
+from .run_artifacts import RunArtifacts
 from .scaffolds import (
     IMPLEMENTATION_COMPLETE_RELPATH,
     derive_commit_message,
@@ -224,16 +224,6 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     Self-contained so reviewers don't need to clone the run dir.
     """
 
-    def _read_jsonl(p: Path) -> list[dict]:
-        if not p.exists():
-            return []
-        try:
-            return [
-                json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()
-            ]
-        except (OSError, ValueError):
-            return []
-
     def _read_json(p: Path) -> dict | None:
         if not p.exists():
             return None
@@ -255,8 +245,9 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     impl_complete = _read_impl_complete(paths.worktree / IMPLEMENTATION_COMPLETE_RELPATH)
     pr_eval = _read_json(paths.eval_dir / "pr_eval.json")
 
-    review_cycles = _read_jsonl(paths.review_cycles)
-    test_runs = _read_jsonl(paths.test_runs)
+    arts = RunArtifacts(paths)
+    review_cycles = arts.review_cycles()
+    test_runs = arts.test_runs()
 
     sim_cycles = [r for r in review_cycles if not r.get("unavailable")]
     sim = sim_cycles[-1] if sim_cycles else {}
@@ -266,7 +257,7 @@ def _derive_pr_metadata(paths: RunPaths, diff_hash: str) -> tuple[str, str]:
     # on candidate selection alone". grill≤1 with impl=1 is the skipped-grilling
     # pattern; grill≥3 means real back-and-forth before SETTLED.
     try:
-        phases = compute_phases_from_paths(paths)
+        phases = arts.phases()
     except Exception:
         phases = {
             "grilling_exchanges": None,

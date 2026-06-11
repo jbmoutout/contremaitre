@@ -38,8 +38,9 @@ from typing import Any
 from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
 from .extract import parse_apply_patch
-from .flow_use import compute_phases
+from .jsonlog import ts_to_ms
 from .models import ModelSpec, resolved_model_from_events
+from .run_artifacts import RunArtifacts
 
 # Unknown identity placeholder for runs whose model dicts can't be read yet.
 _UNKNOWN_SPEC = ModelSpec(runtime="opencode", requested="?")
@@ -88,27 +89,6 @@ _UNSET_ACTIVE = object()
 
 
 # ---------- JSONL helpers ----------
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    out: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            out.append(parsed)
-    return out
 
 
 def _file_age(path: Path | None) -> float | None:
@@ -179,35 +159,8 @@ def _claude_family(name: str | None) -> str | None:
     return None
 
 
-def _ts_to_ms(ts: object) -> int | None:
-    """Coerce a heterogeneous event timestamp to epoch-ms, or None.
-
-    Events arrive with int/float ms (opencode + our codex back-fill), a numeric
-    string, or an ISO-8601 string (claude emits e.g. `2026-06-06T12:49:25.658Z`
-    on user/assistant/result events). Anything unparseable → None (blank column).
-    """
-
-    if isinstance(ts, bool):  # bool is an int subclass; never a timestamp
-        return None
-    if isinstance(ts, (int, float)):
-        return int(ts)
-    if isinstance(ts, str):
-        s = ts.strip()
-        if not s:
-            return None
-        if s.isdigit():
-            return int(s)
-        try:
-            from datetime import datetime
-
-            return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
-        except ValueError:
-            return None
-    return None
-
-
 def _fmt_ts(ts_ms: object) -> str:
-    ms = _ts_to_ms(ts_ms)
+    ms = ts_to_ms(ts_ms)
     if not ms:
         return "        "
     try:
@@ -2261,6 +2214,11 @@ if _TEXTUAL_AVAILABLE:
         ):
             super().__init__()
             self.run_dir = run_dir
+            # One artifact reader per refresh tick (rebuilt in `_tick`) — a
+            # snapshot whose per-instance memo collapses the repeated stream
+            # reads a single tick used to issue. Seeded here so any pre-first-
+            # tick access is safe.
+            self._arts = RunArtifacts.from_run_dir(run_dir)
             self.agent_model = agent_model or _UNKNOWN_SPEC
             self.sim_model = sim_model or _UNKNOWN_SPEC
             # `"codex"`, `"claude"`, `"auto"`, or `"none"`. When set
@@ -2420,6 +2378,9 @@ if _TEXTUAL_AVAILABLE:
             self.query_one("#cli-review-pane").set_class(True, "hidden")
 
         def _tick(self) -> None:
+            # Fresh snapshot for this tick; memoization makes each artifact
+            # stream read at most once across the `_update_*` methods below.
+            self._arts = RunArtifacts.from_run_dir(self.run_dir)
             now = time.time()
             if now - self._docker_ts > DOCKER_REFRESH_S:
                 self._docker_state = _docker_info(self.docker_image, self.worktree)
@@ -2441,7 +2402,7 @@ if _TEXTUAL_AVAILABLE:
             return widget.scroll_y >= widget.max_scroll_y
 
         def _update_agent_log(self) -> None:
-            events = _read_jsonl(self.paths["raw_export"])
+            events = self._arts.raw_export()
             # Back-fill the header's agent model with the real one the CLI reports
             # (the pre-run label shows the account default when claude_model is empty).
             if not self._agent_model_resolved:
@@ -2493,7 +2454,7 @@ if _TEXTUAL_AVAILABLE:
 
             # Unhide as soon as the orchestrator says the CLI reviewer has
             # started, even before any stdout has arrived.
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            guardrails = self._arts.guardrail_events()
             if any(g.get("event") == "cli_review_started" for g in guardrails):
                 pane = self.query_one("#cli-review-pane")
                 if pane.has_class("hidden"):
@@ -2503,7 +2464,7 @@ if _TEXTUAL_AVAILABLE:
             at_bottom = self._at_bottom(widget)
             # claude first, codex second — dividers land in execution order.
             for tool in ("claude", "codex"):
-                events = _read_jsonl(self.paths[f"{tool}_review_raw_export"])
+                events = self._arts.cli_review_raw(tool)
                 if not events:
                     continue
                 if tool not in self._cli_review_headers_written:
@@ -2521,7 +2482,7 @@ if _TEXTUAL_AVAILABLE:
                 widget.scroll_end(animate=False)
 
         def _update_sim_log(self) -> None:
-            events = _read_jsonl(self.paths["sim_raw_export"])
+            events = self._arts.sim_raw_export()
             if not self._sim_model_resolved:
                 model = resolved_model_from_events(events)
                 if model:
@@ -2543,7 +2504,7 @@ if _TEXTUAL_AVAILABLE:
             # raw_export before writing agent_start[N+1], so the previous
             # tick already flushed them; the separator then precedes any
             # turn N+1 events written in this tick.
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            guardrails = self._arts.guardrail_events()
             agent_starts = [
                 e
                 for e in guardrails
@@ -2576,11 +2537,11 @@ if _TEXTUAL_AVAILABLE:
         def _update_activity_log(self) -> None:
             widget = self.query_one("#activity-log", RichLog)
             at_bottom = self._at_bottom(widget)
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            guardrails = self._arts.guardrail_events()
             for e in guardrails[self._guardrail_idx :]:
                 widget.write(_render_guardrail(e))
             self._guardrail_idx = len(guardrails)
-            recoveries = _read_jsonl(self.paths["recoveries"])
+            recoveries = self._arts.recoveries()
             for e in recoveries[self._recoveries_idx :]:
                 widget.write(_render_guardrail(e))
             self._recoveries_idx = len(recoveries)
@@ -2625,10 +2586,10 @@ if _TEXTUAL_AVAILABLE:
             return None
 
         def _update_chrome(self) -> None:
-            agent_events = _read_jsonl(self.paths["raw_export"])
-            sim_events = _read_jsonl(self.paths["sim_raw_export"])
-            recoveries = _read_jsonl(self.paths["recoveries"])
-            guardrails = _read_jsonl(self.paths["guardrail_events"])
+            agent_events = self._arts.raw_export()
+            sim_events = self._arts.sim_raw_export()
+            recoveries = self._arts.recoveries()
+            guardrails = self._arts.guardrail_events()
 
             # CLI-review event flags — derived early so they're available
             # to both the CLI pane chrome (mid-function) and the phase
@@ -2797,8 +2758,8 @@ if _TEXTUAL_AVAILABLE:
             # the JSONL actually shows once chunks land — used as the
             # title-flip hint once the active tool is known.
             if self.cli_reviewer in ("codex", "claude", "auto"):
-                cli_events = _read_jsonl(self.paths["claude_review_raw_export"]) + _read_jsonl(
-                    self.paths["codex_review_raw_export"]
+                cli_events = self._arts.cli_review_raw("claude") + self._arts.cli_review_raw(
+                    "codex"
                 )
                 tool_label = (self._cli_review_tool or self.cli_reviewer).upper()
                 # Pane state mirrors the file-age semantics used elsewhere:
@@ -2886,9 +2847,9 @@ if _TEXTUAL_AVAILABLE:
             # of truth shared with eval/viewer/publisher), called live=True on
             # the events we already hold so the pre-SETTLED grilling counter
             # keeps accruing instead of reading None.
-            review_cycles = _read_jsonl(self.paths["review_cycles"])
-            test_runs = _read_jsonl(self.paths["test_runs"])
-            phase_counts = compute_phases(agent_events, guardrails, review_cycles, live=True)
+            review_cycles = self._arts.review_cycles()
+            test_runs = self._arts.test_runs()
+            phase_counts = self._arts.phases(live=True)
 
             # Verdict zone text. `attached` covers read-only TUI on an
             # in-progress run; terminal badges come from TerminalVerdict

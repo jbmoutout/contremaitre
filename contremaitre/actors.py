@@ -1185,7 +1185,7 @@ def _harvest_step_finishes_from_sqlite(state_dir: Path, raw_export: Path) -> int
     We walk every `part` row in the DB whose JSON has `type == "step-finish"`
     and synthesize a `step_finish` event matching the stdout envelope shape
     for any whose `part.id` isn't already in raw_export. The cost estimator
-    (`costs.estimate_recorded_cost_usd`) walks event JSON recursively for
+    (`costs.sum_costs_in_events`) walks event JSON recursively for
     `cost`-like keys, so synthesized parts contribute identically to real
     ones without any estimator change.
 

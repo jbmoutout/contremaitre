@@ -29,3 +29,13 @@ The model a run *actually* ran, as reported by the runtime's stream
 (claude's `system/init` carries it; codex is silent; opencode's requested slug
 *is* the resolved model). Distinct from **requested** so two `claude default`
 runs that resolved to different models do not collide in grouping.
+
+**Artifact reader**
+The single Module that reads a run's **artifact contract** (the JSONL/JSON
+streams under `<run-id>/` — `raw_export`, `guardrail_events`, `review_cycles`,
+…) off disk. Owns the file I/O and the low-level coercion (timestamps), and
+*composes* the pure interpreters (`compute_phases`, `sum_*_in_events`,
+`resolved_model_from_events`) over its own memoized streams — it does not
+re-home them. Carried by `RunArtifacts` in `run_artifacts.py`. Snapshot
+semantics: lazy + per-instance memoization, a fresh instance to re-read (the
+live TUI builds one per refresh tick).
