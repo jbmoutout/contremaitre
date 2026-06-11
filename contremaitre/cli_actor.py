@@ -36,8 +36,10 @@ AUTH — claude (subscription, host-injected — NO in-container token)
   claude carries no credential inside the container. The host auth-inject proxy
   (`cli_auth_proxy.py`) holds the token and swaps it in per request; the
   container gets only `ANTHROPIC_BASE_URL` (→ the proxy via host.docker.internal)
-  + a DUMMY `ANTHROPIC_AUTH_TOKEN` (precedence #2, above the OAuth path) +
-  emptied `ANTHROPIC_API_KEY` (no billed-API fall-through). The proxy resolves
+  + a DUMMY `CLAUDE_CODE_OAUTH_TOKEN` (keeps claude in subscription/OAuth mode
+  so interactive sessions track rate_limits.five_hour/seven_day) + emptied
+  `ANTHROPIC_AUTH_TOKEN` (prevents API-key-mode override) + emptied
+  `ANTHROPIC_API_KEY` (no billed-API fall-through). The proxy resolves
   the real token live from `CLAUDE_CODE_OAUTH_TOKEN` / macOS keychain /
   ~/.claude/.credentials.json. The per-run state mounts at /root/.claude/PROJECTS
   (claude's session store) — NOT all of /root/.claude, which would shadow the
@@ -859,14 +861,17 @@ class ClaudeDriver:
 
     def container_env(self, base: dict[str, str]) -> dict[str, str]:
         # No credential enters the container. Point claude at the host
-        # auth-inject proxy and hand it a dummy bearer the proxy swaps for the
-        # real token. ANTHROPIC_AUTH_TOKEN (precedence #2, above the OAuth token)
-        # selects the proxy path; ANTHROPIC_API_KEY is force-emptied so claude
-        # can't fall through to paid API billing.
+        # auth-inject proxy and hand it a dummy CLAUDE_CODE_OAUTH_TOKEN — the
+        # proxy swaps it for the real token per request. CLAUDE_CODE_OAUTH_TOKEN
+        # keeps claude in subscription/OAuth mode (not API-key mode) so the
+        # interactive usage meter tracks rate_limits.five_hour/seven_day.
+        # ANTHROPIC_AUTH_TOKEN is force-emptied so it can't override to API-key
+        # mode; ANTHROPIC_API_KEY is force-emptied for no billed-API fall-through.
         from . import cli_auth_proxy
 
         base["ANTHROPIC_BASE_URL"] = cli_auth_proxy.ensure_auth_proxy("claude")
-        base["ANTHROPIC_AUTH_TOKEN"] = "contremaitre-injected"
+        base[_CLAUDE_OAUTH_ENV] = "contremaitre-injected"
+        base["ANTHROPIC_AUTH_TOKEN"] = ""
         base["ANTHROPIC_API_KEY"] = ""
         # claude refuses `--permission-mode bypassPermissions` when running as
         # root unless it's told it's in a sandbox (it exits with "cannot be used
@@ -879,7 +884,7 @@ class ClaudeDriver:
     def container_env_names(self) -> list[str]:
         # Forwarded `-e NAME` (value from the docker-run env, never inlined on argv).
         # No real token here — the credential lives in the host auth-inject proxy.
-        return ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "IS_SANDBOX"]
+        return ["ANTHROPIC_BASE_URL", _CLAUDE_OAUTH_ENV, "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "IS_SANDBOX"]
 
     def parse_events(
         self, events_path: Path, *, start_offset: int

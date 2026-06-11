@@ -775,10 +775,11 @@ class ClaudeBuildCommandTest(unittest.TestCase):
             self.assertIn(f"{runner.agent_home}:/root/.claude/projects:rw", joined)
             self.assertIn(f"{runner.worktree}:/app:rw", joined)
             # No real credential is forwarded: the host auth-inject proxy holds it.
-            # claude carries only the base-url + a dummy auth token, by NAME only.
+            # claude carries base-url + dummy CLAUDE_CODE_OAUTH_TOKEN (subscription
+            # mode → rate limits) + empty ANTHROPIC_AUTH_TOKEN (no API-key override).
             self.assertIn("ANTHROPIC_BASE_URL", cmd)
+            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
             self.assertIn("ANTHROPIC_AUTH_TOKEN", cmd)
-            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
             self.assertNotIn("SECRET-TOKEN", joined)
             # claude runs OPEN egress + reaches the host proxy via host.docker.internal;
             # it ignores the codex egress-lock network even when one is configured.
@@ -841,11 +842,11 @@ class ClaudeBuildCommandTest(unittest.TestCase):
             self.assertIn(f"{runner.worktree}:/app:ro", joined)
             self.assertIn("python3", cmd)
             self.assertIn("/root/.claude/projects/.contremaitre/statusline_meter.py", cmd)
-            # The meter authenticates through the same host proxy — base-url + dummy,
-            # no real credential in the container.
+            # The meter authenticates through the same host proxy — base-url +
+            # dummy CLAUDE_CODE_OAUTH_TOKEN (subscription mode so rate limits flow).
             self.assertIn("ANTHROPIC_BASE_URL", cmd)
-            self.assertIn("ANTHROPIC_AUTH_TOKEN", cmd)
-            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
+            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
+            self.assertIn("ANTHROPIC_AUTH_TOKEN", cmd)  # forwarded empty (no API-key override)
             self.assertIn("CONTREMAITRE_CLAUDE_METER_MODEL", cmd)
             self.assertIn("CONTREMAITRE_CLAUDE_METER_PROMPT", cmd)
             self.assertNotIn("SECRET-TOKEN", joined)
@@ -868,16 +869,18 @@ class ClaudeContainerEnvTest(unittest.TestCase):
             runner, _ = _make_claude_runner(Path(tmp))
             env = runner.driver.container_env({})
             self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://host.docker.internal:9999")
-            self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "contremaitre-injected")
+            # Dummy CLAUDE_CODE_OAUTH_TOKEN keeps claude in subscription/OAuth mode
+            # so interactive sessions (usage meter) track rate_limits.five_hour/seven_day.
+            self.assertEqual(env[_CLAUDE_OAUTH_ENV], "contremaitre-injected")
+            # Force-emptied so ANTHROPIC_AUTH_TOKEN can't override to API-key mode.
+            self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
             self.assertEqual(env["ANTHROPIC_API_KEY"], "")
-            # No real token forwarded — the credential lives only in the host proxy.
-            self.assertNotIn(_CLAUDE_OAUTH_ENV, env)
             # IS_SANDBOX=1 lets claude bypass permissions as root (the container
             # is a sandbox); without it claude exits "cannot be used with root".
             self.assertEqual(env["IS_SANDBOX"], "1")
             self.assertEqual(
                 set(runner.driver.container_env_names()),
-                {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "IS_SANDBOX"},
+                {"ANTHROPIC_BASE_URL", _CLAUDE_OAUTH_ENV, "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "IS_SANDBOX"},
             )
 
 

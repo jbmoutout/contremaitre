@@ -4,7 +4,7 @@ The claude CLI actor used to carry `CLAUDE_CODE_OAUTH_TOKEN` *inside* the
 agent/SIM/reviewer container. Because the container runs untrusted target-repo
 code, that long-lived bearer was the worst-case thing to expose. This proxy
 moves the credential to the host: the container holds only a dummy
-`ANTHROPIC_AUTH_TOKEN` + an `ANTHROPIC_BASE_URL` pointed here, and this proxy —
+`CLAUDE_CODE_OAUTH_TOKEN` + an `ANTHROPIC_BASE_URL` pointed here, and this proxy —
 running in the host orchestrator process — swaps the dummy for the real token
 (resolved live, per request) before forwarding to the provider. The container
 never sees a usable credential, so it can run on open egress without the
