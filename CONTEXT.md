@@ -43,8 +43,8 @@ instance to re-read (the live TUI builds one per refresh tick).
 It is the sole reader among the **upper layer** — the live TUI, eval scorecard,
 viewer index, and PR-body builder all read through `RunArtifacts`, where the
 reach-arounds used to be. `flow_use` is a **pure interpreter** the reader
-composes (no file I/O — the edge `run_artifacts → flow_use` stays acyclic). Two
-reads stay outside, both for structural reasons, not oversight:
+composes (no file I/O — the edge `run_artifacts → flow_use` stays acyclic). Three
+reads stay outside, each for a structural reason, not oversight:
 
 - a *live tail* (`eval._emit_new_events` seeks `guardrail_events.jsonl` during a
   running subprocess) must keep its own handle — a memoized snapshot reader would
