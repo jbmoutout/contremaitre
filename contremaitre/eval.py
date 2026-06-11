@@ -67,8 +67,8 @@ _DRIFT_ENVELOPES = {
     "agent_discipline_score": 0.20,
     # Demoted to diagnostic (still recorded in canary.json, no longer gated)
     # because each correlates strongly with another headline metric on the
-    # available run corpus, causing "regression on N axes" overcount. See A4
-    # analysis in DUMP.md.
+    # available run corpus, causing "regression on N axes" overcount. The
+    # measured correlations:
     #   review_rounds        — r≈+0.73 with wall_seconds, +0.85 with turns
     #   cli_findings_weighted — r≈-0.63 with cli_review_score
     #   cli_citation_density  — moderate corr with reviewer family, thin n
@@ -1396,7 +1396,7 @@ def compare_cell(current: Cell, baseline: Cell | None) -> CompareResult:
 
 
 def _two_variable_check(current: Cell, baseline: Cell) -> str | None:
-    """Per EVAL_ROADMAP §5: never bump two variables at once.
+    """Per the single-variable rule (see golden_cases/README.md): never bump two variables at once.
 
     `system_digest` differing means contremaitre code / prompts / image /
     skills changed since baseline. Models are case-pinned, so a model swap
@@ -1417,7 +1417,7 @@ def _two_variable_check(current: Cell, baseline: Cell) -> str | None:
         return (
             "Both `system_digest` (contremaitre code/prompts/image/skills) AND "
             "`input_digest` (target/base/cli_reviewer) changed since baseline. "
-            "Per EVAL_ROADMAP §5, change one variable at a time — re-baseline "
+            "Change one variable at a time (the single-variable rule) — re-baseline "
             "with only one moved, then bump the other."
         )
     return None
@@ -1513,9 +1513,8 @@ def cmd_run(*, project_root: Path, case_id: str, config_name: str, n: int, runs_
             file=sys.stderr,
         )
         # Abort the batch on provider quota — the remaining runs would hit
-        # the same per-day/per-hour limit. Per EVAL_ROADMAP §5, surface a
-        # clear actionable error instead of grinding through n-1 wasted
-        # iterations.
+        # the same per-day/per-hour limit. Surface a clear actionable error
+        # instead of grinding through n-1 wasted iterations.
         if h.get("terminal_verdict") == "QUOTA_EXHAUSTED":
             remaining = n - i - 1
             print(

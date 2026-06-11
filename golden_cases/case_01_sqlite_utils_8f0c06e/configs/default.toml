@@ -2,7 +2,7 @@
 #
 # Original baseline configuration: agent and SIM both on opencode-zen's free
 # deepseek-v4-flash, codex as cli_reviewer. Same-family agent ↔ SIM is the
-# bias scenario per EVAL_ROADMAP §5 — kept here as the reference cell so
+# bias scenario the single-variable rule guards against — kept as the reference cell so
 # alternative configs (cross-family Qwen SIM, claude reviewer, etc.) have a
 # stable point to diff against.
 

@@ -1,6 +1,6 @@
 # Contremaitre
 
-Deterministic orchestration shell that runs Matt Pocock's [`improve-codebase-architecture`](https://github.com/mattpocock/skills/tree/main/skills/engineering/improve-codebase-architecture) skill end-to-end against a target repository and produces a draft PR.
+Deterministic orchestration shell that runs Matt Pocock's [`improve-codebase-architecture`](https://github.com/mattpocock/skills/tree/main/skills/engineering/improve-codebase-architecture) skill end-to-end against a target repository and produces a draft PR — then drives an optional **CLI review-and-revise loop**: `codex` or `claude` on your subscription reviews the diff, comments on the PR, and sends the agent back to fix what it flags until the review passes and the host gates are clean.
 
 The agent and SIM live inside per-run Docker containers. Each role runs one of two actor runtimes — **opencode** (an OpenRouter or free OpenCode Zen model) or a **subscription CLI** driven headless (`codex` on your ChatGPT plan, or `claude` on your Claude plan) — and the two can mix (a CLI agent + opencode SIM, or the reverse). Git, GitHub, diff-scan, and cap enforcement stay host-owned — the agent has no outbound git/GitHub credentials. A **claude** role also holds no provider credential (a host-side proxy injects it per request) and runs open egress; a **codex** role mounts a short-lived token and runs behind an allowlist egress lock by default (overridable with `--allow-open-egress`).
 
@@ -85,10 +85,9 @@ The full flag reference lives in [docs/control-plane.md#cli-reference](docs/cont
 
 ### Caveats
 
-- **`--cli-reviewer` is not free.** Each review round runs codex or claude headless in Docker against *your subscription* (Claude Pro/Max, ChatGPT Plus). The host provides `/review` context and posts the returned markdown; the reviewer container receives no GitHub credentials. Revision rounds also burn agent quota. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are scrubbed from the reviewer container so it can't fall through to billed API.
+- **Subscription CLI runs burn your plan, not an API bill.** Every codex/claude role *and* every `--cli-reviewer` round runs headless against your Claude Pro/Max or ChatGPT Plus subscription; revision rounds also burn agent quota. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are scrubbed from the reviewer container so it can't fall through to billed API. The TUI footer shows per-role cost/free/quota — codex's 5h rollout limit, Claude's statusLine percentages, or `claude ?` / `codex ?` when a counter is unavailable.
 - **Free models are rate-limited.** OpenCode Zen's free tier is generous but bounded; long runs or many evals eventually hit a daily cap that surfaces as `QUOTA_EXHAUSTED`.
 - **Paid OpenRouter runs cost real money.** A single `n=3` eval cell on `openrouter/anthropic/claude-sonnet-4.6` runs ~$7–10. The default eval config uses free Zen models for a reason.
-- **Subscription CLI runs burn your plan.** codex/claude roles are subscription usage, not API billing. The TUI footer shows per-role cost/free/quota: codex's 5h rollout limit, Claude's exact statusLine percentages, or `claude ?` / `codex ?` when a counter is unavailable. Claude's exact counter needs one tiny no-tools meter request after each successful Claude turn (it authenticates through the same host injecting proxy). claude runs open egress safely because its credential never enters the container; for a codex role, keep egress locked unless the run explicitly needs open internet (its token is exfiltratable).
 
 ## Other commands
 
