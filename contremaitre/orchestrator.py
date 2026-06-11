@@ -1515,6 +1515,10 @@ class Orchestrator:
         # `finally`); this catches the timeout / signal paths.
         self._stop_run_containers()
         self._remove_run_volumes()
+        # Shut the host auth-inject proxy (claude credential lived only there).
+        from . import cli_auth_proxy
+
+        cli_auth_proxy.stop_auth_proxies()
         source_repo = GitRepo(self.config.repo, self.paths.git_log)
         worktree_existed = self.paths.worktree.exists()
         if worktree_existed:

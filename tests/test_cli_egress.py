@@ -145,24 +145,44 @@ class CliEgressIsAutoTest(unittest.TestCase):
         # An explicit operator-supplied policy wins (their own locked egress).
         self.assertFalse(_cli_egress_is_auto(self._args(docker_network="x")))
 
+    def test_not_auto_for_pure_claude(self):
+        # claude carries no in-container credential (the host auth-inject proxy
+        # holds it), so a claude-only run never auto-locks — it runs open egress.
+        self.assertFalse(_cli_egress_is_auto(self._args(agent="claude")))
+        self.assertFalse(
+            _cli_egress_is_auto(self._args(agent="claude", sim="claude", cli_reviewer="claude"))
+        )
+
+    def test_auto_for_codex_reviewer_with_claude_agent(self):
+        # The default mix: claude agent (open) + codex reviewer still needs the
+        # lock for the codex container's in-container token.
+        self.assertTrue(_cli_egress_is_auto(self._args(agent="claude", cli_reviewer="codex")))
+
+    def test_auto_for_auto_reviewer_with_claude_agent(self):
+        # `auto` reviewer is treated as possibly-codex (cross-family of a claude
+        # agent → codex), so it triggers the lock.
+        self.assertTrue(_cli_egress_is_auto(self._args(agent="claude", cli_reviewer="auto")))
+
 
 class SquidAllowlistTest(unittest.TestCase):
     def test_allowlist_covers_codex_and_opencode_providers(self):
         # The locked proxy must reach codex (openai/chatgpt) AND an opencode SIM
         # on either OpenRouter (paid) or OpenCode Zen (free → opencode.ai +
-        # models.dev catalog), so a mixed run works locked.
+        # models.dev catalog), so a mixed codex/opencode run works locked.
         from contremaitre.cli_egress import _SQUID_CONF
 
         conf = _SQUID_CONF.read_text(encoding="utf-8")
         for domain in (
             ".chatgpt.com",
             ".openai.com",
-            ".anthropic.com",  # claude (the CLI actor) on a Claude subscription
             ".openrouter.ai",
             ".opencode.ai",
             ".models.dev",
         ):
             self.assertIn(domain, conf)
+        # claude holds no in-container token (host auth-inject proxy) and runs
+        # open egress, so anthropic is intentionally NOT on the squid allowlist.
+        self.assertNotIn(".anthropic.com", conf)
         self.assertIn("http_access deny all", conf)  # default-deny stays
 
 

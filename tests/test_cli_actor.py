@@ -177,6 +177,34 @@ class EgressLockTest(unittest.TestCase):
             runner, _ = _make_runner(Path(tmp), allow_open_egress=True)
             runner._assert_egress_locked()  # no raise
 
+    def test_claude_never_requires_lock(self):
+        # claude carries no in-container credential (the host auth-inject proxy
+        # holds it), so the lock requirement does not apply — even with no
+        # docker_network / https_proxy configured.
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, _ = _make_claude_runner(Path(tmp))
+            runner._assert_egress_locked()  # no raise
+
+    def test_egress_docker_flags_are_per_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # claude: OPEN egress + host.docker.internal, ignores any lock network.
+            claude, _ = _make_claude_runner(
+                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
+            )
+            cflags = claude._egress_docker_flags()
+            self.assertIn("--add-host", cflags)
+            self.assertIn("host.docker.internal:host-gateway", cflags)
+            self.assertNotIn("--network", cflags)
+            # codex: locked internal network + forwarded proxy env.
+            codex, _ = _make_runner(
+                Path(tmp), docker_network="cmtr-int", https_proxy="http://p:3128"
+            )
+            xflags = codex._egress_docker_flags()
+            self.assertIn("--network", xflags)
+            self.assertIn("cmtr-int", xflags)
+            self.assertIn("HTTPS_PROXY", xflags)
+            self.assertNotIn("--add-host", xflags)
+
 
 class BuildCommandTest(unittest.TestCase):
     def test_first_turn_argv_mounts_and_flags(self):
@@ -746,9 +774,17 @@ class ClaudeBuildCommandTest(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
             self.assertIn(f"{runner.agent_home}:/root/.claude/projects:rw", joined)
             self.assertIn(f"{runner.worktree}:/app:rw", joined)
-            # Token forwarded by NAME only — the value must not be inlined on argv.
-            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
+            # No real credential is forwarded: the host auth-inject proxy holds it.
+            # claude carries only the base-url + a dummy auth token, by NAME only.
+            self.assertIn("ANTHROPIC_BASE_URL", cmd)
+            self.assertIn("ANTHROPIC_AUTH_TOKEN", cmd)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
             self.assertNotIn("SECRET-TOKEN", joined)
+            # claude runs OPEN egress + reaches the host proxy via host.docker.internal;
+            # it ignores the codex egress-lock network even when one is configured.
+            self.assertIn("--add-host", cmd)
+            self.assertIn("host.docker.internal:host-gateway", cmd)
+            self.assertNotIn("--network", cmd)
             # prompt is the final positional arg.
             self.assertEqual(cmd[-1], "do it")
 
@@ -805,7 +841,11 @@ class ClaudeBuildCommandTest(unittest.TestCase):
             self.assertIn(f"{runner.worktree}:/app:ro", joined)
             self.assertIn("python3", cmd)
             self.assertIn("/root/.claude/projects/.contremaitre/statusline_meter.py", cmd)
-            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
+            # The meter authenticates through the same host proxy — base-url + dummy,
+            # no real credential in the container.
+            self.assertIn("ANTHROPIC_BASE_URL", cmd)
+            self.assertIn("ANTHROPIC_AUTH_TOKEN", cmd)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", cmd)
             self.assertIn("CONTREMAITRE_CLAUDE_METER_MODEL", cmd)
             self.assertIn("CONTREMAITRE_CLAUDE_METER_PROMPT", cmd)
             self.assertNotIn("SECRET-TOKEN", joined)
@@ -814,39 +854,55 @@ class ClaudeBuildCommandTest(unittest.TestCase):
 
 
 class ClaudeContainerEnvTest(unittest.TestCase):
-    def test_injects_token_and_scrubs_api_keys(self):
+    def test_points_at_host_proxy_and_scrubs_keys(self):
+        # No real credential enters the container: the host auth-inject proxy
+        # holds it. container_env carries only the base-url + a dummy bearer.
         with (
             tempfile.TemporaryDirectory() as tmp,
-            patch.dict(
-                os.environ, {_CLAUDE_OAUTH_ENV: "SECRET-TOKEN", "ANTHROPIC_API_KEY": "paid"}
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "paid"}),
+            patch(
+                "contremaitre.cli_auth_proxy.ensure_auth_proxy",
+                return_value="http://host.docker.internal:9999",
             ),
         ):
             runner, _ = _make_claude_runner(Path(tmp))
             env = runner.driver.container_env({})
-            self.assertEqual(env[_CLAUDE_OAUTH_ENV], "SECRET-TOKEN")
+            self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://host.docker.internal:9999")
+            self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "contremaitre-injected")
             self.assertEqual(env["ANTHROPIC_API_KEY"], "")
-            self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+            # No real token forwarded — the credential lives only in the host proxy.
+            self.assertNotIn(_CLAUDE_OAUTH_ENV, env)
             # IS_SANDBOX=1 lets claude bypass permissions as root (the container
             # is a sandbox); without it claude exits "cannot be used with root".
             self.assertEqual(env["IS_SANDBOX"], "1")
-            # The forwarded names cover the token + the scrubbed keys + the sandbox flag.
             self.assertEqual(
                 set(runner.driver.container_env_names()),
-                {_CLAUDE_OAUTH_ENV, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "IS_SANDBOX"},
+                {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "IS_SANDBOX"},
             )
 
 
 class ClaudeEnsureReadyTest(unittest.TestCase):
-    def test_raises_without_token(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: ""}):
+    def test_raises_without_credential(self):
+        from contremaitre.cli_auth_proxy import AuthProxyError
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch(
+                "contremaitre.cli_auth_proxy.ensure_auth_proxy",
+                side_effect=AuthProxyError("no claude credential found"),
+            ),
+        ):
             runner, _ = _make_claude_runner(Path(tmp))
             with self.assertRaises(Exception):
                 runner.driver.ensure_ready()
 
-    def test_passes_with_token(self):
+    def test_passes_with_credential(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
-            patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: "tok"}),
+            patch(
+                "contremaitre.cli_auth_proxy.ensure_auth_proxy",
+                return_value="http://host.docker.internal:1",
+            ),
         ):
             runner, _ = _make_claude_runner(Path(tmp))
             runner.driver.ensure_ready()  # no raise
@@ -987,8 +1043,16 @@ class ClaudeAuthCheckTest(unittest.TestCase):
             self.assertEqual(_check_claude_auth(cfg).status, "PASS")
             self.assertEqual(_check_cli_auth(cfg).status, "PASS")  # dispatch
 
-    def test_fail_when_token_missing(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {_CLAUDE_OAUTH_ENV: ""}):
+    def test_fail_when_no_credential_resolves(self):
+        from contremaitre.cli_auth_proxy import AuthProxyError
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch(
+                "contremaitre.cli_auth_proxy.resolve_claude_token",
+                side_effect=AuthProxyError("no claude credential found"),
+            ),
+        ):
             cfg = _cli_config(Path(tmp), cli_tool="claude")
             self.assertEqual(_check_claude_auth(cfg).status, "FAIL")
 

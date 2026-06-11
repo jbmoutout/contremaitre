@@ -20,6 +20,7 @@ dependency group (`uv sync --group dev`). The TUI requires `textual`
 - **Event names** — `contremaitre/events.py` constants. Don't write `"some_event"` string literals when emitting to `guardrail_events.jsonl` / `recoveries.jsonl`; renaming a constant breaks at import time instead of silently at runtime.
 - **State machine / caps / cleanup** — `orchestrator.py`.
 - **Docker / opencode launch** — `actors.py` (`OpencodeActorRunner.build_docker_command`).
+- **CLI actor auth / egress** — `cli_actor.py` (`CodexDriver` / `ClaudeDriver`, `_egress_docker_flags`), `cli_auth_proxy.py` (host-side claude token injection — the container never holds the credential), `cli_egress.py` (codex squid lock).
 - **Hard gates** — `evaluator.py` + `diffscan.py` + `verdicts.py`. Strict by design.
 - **Live UI** — `tui.py`. Reads JSONL artifacts; never writes.
 - **CLI subcommands** — `cli.py` (`run`, `doctor`, `models`, `fixture`, `image`, `tui`, `cleanup`, `eval`).
@@ -64,5 +65,5 @@ Repo is treated as public. No absolute paths, internal codenames, or links to pr
 
 - Don't add scorecard numbers without a real judge backing them. L2 / L3 are `PENDING` in `evaluator.py` until focused-judge passes exist.
 - Don't put `--no-verify`, force-push, or destructive flags in the publisher. Hard gates are load-bearing, not advisory.
-- Don't move git operations into the agent or SIM containers. The threat model relies on the agent having no outbound credentials.
+- Don't move git operations into the agent or SIM containers. The threat model relies on the agent having no outbound credentials — and for claude, no model credential either (the host auth-inject proxy holds it). Don't reintroduce a real token into a claude container; don't drop codex's neutered-token + locked egress.
 - Don't reintroduce phase-based prompts. One multi-turn WORK session, SIM yields between agent turns, no orchestrator-side phase re-prompting.

@@ -57,8 +57,9 @@ DOCKER_IMAGE :=
 #   Leave empty to skip the L1 gate.
 CHECK_CMD    :=
 # ALLOW_OPEN_EGRESS: set non-empty to run with open egress (required for opencode).
-# For CLI roles (claude/codex) this overrides the default locked egress — warned,
-# since the in-container token is exfiltratable.
+# codex: overrides its default locked egress — warned, since codex's in-container
+# token is exfiltratable. claude: no-op — it holds no in-container credential (a
+# host-side proxy injects the token) and already runs open egress by default.
 ALLOW_OPEN_EGRESS :=
 
 # ── Cross-fork (uncomment + set when fork ≠ upstream) ────────────────────────

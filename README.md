@@ -2,7 +2,7 @@
 
 Deterministic orchestration shell that runs Matt Pocock's [`improve-codebase-architecture`](https://github.com/mattpocock/skills/tree/main/skills/engineering/improve-codebase-architecture) skill end-to-end against a target repository and produces a draft PR.
 
-The agent and SIM live inside per-run Docker containers. Each role runs one of two actor runtimes — **opencode** (an OpenRouter or free OpenCode Zen model) or a **subscription CLI** driven headless (`codex` on your ChatGPT plan, or `claude` on your Claude plan) — and the two can mix (a CLI agent + opencode SIM, or the reverse). Git, GitHub, diff-scan, and cap enforcement stay host-owned — the agent has no outbound git/GitHub credentials, and a CLI container runs behind an allowlist egress lock by default (overridable with `--allow-open-egress`).
+The agent and SIM live inside per-run Docker containers. Each role runs one of two actor runtimes — **opencode** (an OpenRouter or free OpenCode Zen model) or a **subscription CLI** driven headless (`codex` on your ChatGPT plan, or `claude` on your Claude plan) — and the two can mix (a CLI agent + opencode SIM, or the reverse). Git, GitHub, diff-scan, and cap enforcement stay host-owned — the agent has no outbound git/GitHub credentials. A **claude** role also holds no provider credential (a host-side proxy injects it per request) and runs open egress; a **codex** role mounts a short-lived token and runs behind an allowlist egress lock by default (overridable with `--allow-open-egress`).
 
 **Status**: v0.1.2 — pre-1.0, expect rough edges.
 
@@ -36,10 +36,10 @@ Skip the picker by passing `--agent-model` / `--sim-model` explicitly (or settin
 Instead of opencode, a role can run a **frontier CLI headless on your subscription** — no API key, no per-token billing. Two tools are wired:
 
 - **codex** on your ChatGPT plan (`--agent codex`): model + effort via `--codex-model` (default `gpt-5.5`) / `--codex-effort` (default `high`). Auth is a logged-in `codex` on the host (`~/.codex/auth.json`); preflight checks the token isn't about to expire (missing → `codex login`).
-- **claude** on your Claude plan (`--agent claude`): model + effort via `--claude-model` (empty = your `~/.claude` account default) / `--claude-effort` (`low|medium|high|max`, default `high`). Auth is a headless OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`). If it's missing, the pre-run check offers to run `claude setup-token` for you, then writes the token to `.env` so later runs just work; you can also set it manually (`claude setup-token` → add `CLAUDE_CODE_OAUTH_TOKEN=…` to `.env` or export it).
+- **claude** on your Claude plan (`--agent claude`): model + effort via `--claude-model` (empty = your `~/.claude` account default) / `--claude-effort` (`low|medium|high|max`, default `high`). Auth never enters the container: a host-side proxy injects the token per request. The token resolves from `CLAUDE_CODE_OAUTH_TOKEN` (run `claude setup-token` — the pre-run check offers to do it and write `.env` for you), or, failing that, from your interactive `claude` login (macOS keychain / `~/.claude/.credentials.json`).
 - **opencode** on a paid OpenRouter model: the pre-run check verifies `OPENROUTER_API_KEY` is set (add it to `.env`). Free OpenCode Zen models (`opencode/…`) need no key.
 
-Select a role via `--agent claude` or `--agent codex` (or `AGENT=claude` / `AGENT=codex` in the Makefile). Mix with `--sim opencode` for a CLI agent + opencode SIM (or the reverse). Egress is **locked by default** — the in-container token is exfiltratable, so the container only reaches the model provider through an allowlist proxy (OpenAI, Anthropic, OpenRouter, and OpenCode Zen). Pass `--allow-open-egress` (or `ALLOW_OPEN_EGRESS=1` in the Makefile) to run it open when the agent needs other hosts (PyPI/npm/GitHub to install deps). Details: [docs/control-plane.md#cli-actor-codex--claude-auth--egress-lock](docs/control-plane.md#cli-actor-codex--claude-auth--egress-lock).
+Select a role via `--agent claude` or `--agent codex` (or `AGENT=claude` / `AGENT=codex` in the Makefile). Mix with `--sim opencode` for a CLI agent + opencode SIM (or the reverse). Egress posture follows the credential: **claude** holds no in-container token (the host proxy injects it), so it runs **open egress** by default — free to install deps from PyPI/npm/GitHub. **codex** still mounts a short-lived token, so it's **locked by default** behind a providers-only allowlist proxy (OpenAI/OpenRouter/Zen); pass `--allow-open-egress` (or `ALLOW_OPEN_EGRESS=1`) to open it. Details: [docs/control-plane.md#cli-actor-codex--claude-auth--egress-lock](docs/control-plane.md#cli-actor-codex--claude-auth--egress-lock).
 
 ## How it works
 
@@ -73,7 +73,7 @@ The launcher takes the same flags whether you call `make run …` or `python3 -m
 - `--check-cmd "<command>"` *(repeatable)* — fast deterministic check the post-implementation worktree must pass before publishing (e.g. `"npx tsc --noEmit"`, `"uv run pytest -q"`).
 - `--publish-mode stub|gh` — `stub` (default) is a full dry-run with no `git push` or `gh pr create`; `gh` opens the draft PR.
 - `--max-turns 30` / `--max-wall-minutes 180` / `--max-cost-usd 30` — per-run budgets; the orchestrator aborts cleanly on cap.
-- `--allow-open-egress` — accept open egress instead of configuring `--docker-network` / `--http-proxy` / `--https-proxy`. A **CLI** role (codex/claude) is egress-locked by default; pass this to run it open (e.g. so the agent can install deps from PyPI/npm that the provider-only allowlist blocks) — warned, since the token is exfiltratable.
+- `--allow-open-egress` — accept open egress instead of configuring `--docker-network` / `--http-proxy` / `--https-proxy`. A **codex** role is egress-locked by default (its in-container token is exfiltratable); pass this to run it open (e.g. to install deps from PyPI/npm the provider-only allowlist blocks) — warned. A **claude** role already runs open (no in-container token), so the flag is a no-op for it.
 
 Headless mode is the same command minus the TUI prefix:
 
@@ -88,7 +88,7 @@ The full flag reference lives in [docs/control-plane.md#cli-reference](docs/cont
 - **`--cli-reviewer` is not free.** Each review round runs codex or claude headless in Docker against *your subscription* (Claude Pro/Max, ChatGPT Plus). The host provides `/review` context and posts the returned markdown; the reviewer container receives no GitHub credentials. Revision rounds also burn agent quota. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are scrubbed from the reviewer container so it can't fall through to billed API.
 - **Free models are rate-limited.** OpenCode Zen's free tier is generous but bounded; long runs or many evals eventually hit a daily cap that surfaces as `QUOTA_EXHAUSTED`.
 - **Paid OpenRouter runs cost real money.** A single `n=3` eval cell on `openrouter/anthropic/claude-sonnet-4.6` runs ~$7–10. The default eval config uses free Zen models for a reason.
-- **Subscription CLI runs burn your plan.** codex/claude roles are subscription usage, not API billing. The TUI footer shows per-role cost/free/quota: codex's 5h rollout limit, Claude's exact statusLine percentages, or `claude ?` / `codex ?` when a counter is unavailable. Claude's exact counter needs one tiny no-tools meter request after each successful Claude turn. Keep egress locked unless a run explicitly needs open internet; `CLAUDE_CODE_OAUTH_TOKEN` is long-lived.
+- **Subscription CLI runs burn your plan.** codex/claude roles are subscription usage, not API billing. The TUI footer shows per-role cost/free/quota: codex's 5h rollout limit, Claude's exact statusLine percentages, or `claude ?` / `codex ?` when a counter is unavailable. Claude's exact counter needs one tiny no-tools meter request after each successful Claude turn (it authenticates through the same host injecting proxy). claude runs open egress safely because its credential never enters the container; for a codex role, keep egress locked unless the run explicitly needs open internet (its token is exfiltratable).
 
 ## Other commands
 
@@ -101,7 +101,7 @@ The full flag reference lives in [docs/control-plane.md#cli-reference](docs/cont
 - `contremaitre image build [--variant base|rust|go]` — build the runtime image. The default-variant image auto-builds on first opencode-mode run and auto-rebuilds when the Dockerfile changes.
 - `contremaitre fixture init <path>` — create a tiny git repo for fake-actor smoke runs.
 
-For controlled egress on an **opencode** run (instead of `--allow-open-egress`), pass `--docker-network`, `--http-proxy`, `--https-proxy`, `--no-proxy`. Ambient proxy env vars are *not* forwarded into containers — only what you pass explicitly. A **CLI** role or CLI reviewer (codex/claude) needs none of this by default: it auto-provisions its own internal network + allowlist proxy (and refuses to run open unless you pass `--allow-open-egress`).
+For controlled egress on an **opencode** run (instead of `--allow-open-egress`), pass `--docker-network`, `--http-proxy`, `--https-proxy`, `--no-proxy`. Ambient proxy env vars are *not* forwarded into containers — only what you pass explicitly. A **codex** role or codex CLI reviewer needs none of this by default: it auto-provisions its own internal network + allowlist proxy (and refuses to run open unless you pass `--allow-open-egress`). A **claude** role or reviewer needs no egress config at all — it runs open and reaches its model through the host injecting proxy.
 
 ## When something goes wrong
 

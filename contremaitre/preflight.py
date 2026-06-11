@@ -210,25 +210,39 @@ def _check_readonly_mount(config: RunConfig) -> PreflightCheck:
 
 
 def _check_network_policy(config: RunConfig) -> PreflightCheck:
-    cli_active = bool(_active_cli_tools(config))
-    # A CLI role's egress is locked by default and the runner requires BOTH layers
-    # — an `--internal` docker network AND an allowlisting https proxy (exactly
-    # `cli_actor._assert_egress_locked`). A generic "either is set" check would
-    # pass a half-configured run that the first CLI turn then refuses, so gate on
-    # BOTH here. `_maybe_provision_cli_egress` normally sets both before we land.
-    if cli_active and not config.allow_open_egress:
+    active = _active_cli_tools(config)
+    codex_active = "codex" in active
+    claude_active = "claude" in active
+    opencode_active = ActorMode.OPENCODE in {config.actor_mode, config.sim_actor_mode}
+    # Only codex carries a token INSIDE its container, so only codex requires the
+    # egress lock: an `--internal` docker network AND an allowlisting https proxy
+    # (exactly `cli_actor._assert_egress_locked` for codex). Gate on BOTH — a
+    # generic "either is set" check would pass a half-configured run the first
+    # codex turn then refuses. `_maybe_provision_cli_egress` sets both before we
+    # land.
+    if codex_active and not config.allow_open_egress:
         if config.docker_network and config.https_proxy:
             return _pass(
                 "network_policy",
-                "CLI egress locked (internal docker network + allowlist https proxy)",
+                "codex egress locked (internal docker network + allowlist https proxy)",
                 {"docker_network": config.docker_network, "https_proxy": True},
             )
         return _fail(
             "network_policy",
-            "CLI role requires BOTH an --internal docker_network and an "
+            "codex role requires BOTH an --internal docker_network and an "
             "allowlisting --https-proxy (or --allow-open-egress); auto-provisioning "
             "did not set both — check Docker is up.",
             {"docker_network": config.docker_network, "https_proxy": bool(config.https_proxy)},
+        )
+    # claude carries NO in-container credential — the host auth-inject proxy
+    # (`cli_auth_proxy`) holds the token and adds the bearer per request — so
+    # open egress is the safe default. (A codex reviewer in the same run may set
+    # docker_network for its own lock; the claude container ignores it.)
+    if claude_active and not codex_active and not opencode_active:
+        return _pass(
+            "network_policy",
+            "claude runs open egress (no in-container credential; host auth-inject proxy holds the token)",
+            {},
         )
     # opencode (or a CLI role explicitly opened): either a proxy or a network is
     # acceptable; `--allow-open-egress` is the explicit open override.
@@ -266,23 +280,23 @@ def _check_cli_auth(config: RunConfig) -> PreflightCheck:
 
 
 def _check_claude_auth(config: RunConfig) -> PreflightCheck:
-    """Validate the operator's claude headless OAuth token for CLI actor mode.
+    """Validate that a claude subscription credential resolves on the host.
 
-    claude runs in-container off `CLAUDE_CODE_OAUTH_TOKEN` (from
-    `claude setup-token`), forwarded by name. We only confirm the env var is
-    set — the token is opaque and long-lived, so there's no expiry to check, and
-    `claude` need not be on the host PATH (it's baked into the runtime image).
+    claude never carries a token in-container: the host auth-inject proxy
+    (`cli_auth_proxy`) holds it and adds the bearer per request. We confirm a
+    credential SOURCE resolves — `CLAUDE_CODE_OAUTH_TOKEN` env (from
+    `claude setup-token`), the macOS keychain, or `~/.claude/.credentials.json`
+    — not that any specific env var is set. `claude` need not be on the host PATH
+    (it's baked into the runtime image).
     """
 
-    from .cli_actor import _CLAUDE_OAUTH_ENV
+    from .cli_auth_proxy import AuthProxyError, resolve_claude_token
 
-    if not os.environ.get(_CLAUDE_OAUTH_ENV):
-        return _fail(
-            "claude_auth",
-            f"{_CLAUDE_OAUTH_ENV} not set; run `claude setup-token` and export it",
-            {},
-        )
-    return _pass("claude_auth", "claude OAuth token present", {})
+    try:
+        resolve_claude_token()
+    except AuthProxyError as exc:
+        return _fail("claude_auth", str(exc), {})
+    return _pass("claude_auth", "claude subscription credential resolves on the host", {})
 
 
 def _check_codex_auth(config: RunConfig) -> PreflightCheck:
