@@ -4,7 +4,7 @@ Deterministic orchestration shell that runs Matt Pocock's [`improve-codebase-arc
 
 The agent and SIM live inside per-run Docker containers. Each role runs one of two actor runtimes — **opencode** (an OpenRouter or free OpenCode Zen model) or a **subscription CLI** driven headless (`codex` on your ChatGPT plan, or `claude` on your Claude plan) — and the two can mix (a CLI agent + opencode SIM, or the reverse). Git, GitHub, diff-scan, and cap enforcement stay host-owned — the agent has no outbound git/GitHub credentials. A **claude** role also holds no provider credential (a host-side proxy injects it per request) and runs open egress; a **codex** role mounts a short-lived token and runs behind an allowlist egress lock by default (overridable with `--allow-open-egress`).
 
-**Status**: v0.1.2 — pre-1.0, expect rough edges.
+**Status**: v0.2.0 — pre-1.0, expect rough edges.
 
 ## Quickstart
 
