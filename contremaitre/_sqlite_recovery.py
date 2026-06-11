@@ -27,7 +27,27 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .jsonlog import read_jsonl
+
+def _read_jsonl_lines(path: Path) -> list[dict]:
+    """Inline JSONL reader. Zero contremaitre imports."""
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
 
 
 def recover_text(state_dir: Path, session_id: str | None) -> tuple[str | None, str | None, bool]:
@@ -98,7 +118,7 @@ def existing_step_finish_part_ids(path: Path) -> set[str]:
     """
 
     ids: set[str] = set()
-    for event in read_jsonl(path):
+    for event in _read_jsonl_lines(path):
         if event.get("type") != "step_finish":
             continue
         part = event.get("part")
