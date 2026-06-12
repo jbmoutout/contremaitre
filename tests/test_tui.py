@@ -30,7 +30,6 @@ from contremaitre.tui import (
     _read_codex_usage,
     _usage_pct_style,
     _activity_state,
-    _architecture_review_in,
     _build_event_row,
     _claude_event_rows,
     _current_cli_review_round,
@@ -38,7 +37,6 @@ from contremaitre.tui import (
     _current_review_round,
     _derive_phase,
     _fmt_elapsed,
-    _impl_complete_in,
     _is_free_model,
     _latest_pending_tool,
     _persistent_review_token,
@@ -49,8 +47,6 @@ from contremaitre.tui import (
     _reviewer_glyph,
     _reviewer_status,
     _round_verdict,
-    _self_verified_in,
-    _settled_in,
     _short_repo,
     _task_count,
     _terminal_badge,
@@ -879,147 +875,6 @@ def test_task_count():
         {"type": "tool_use", "part": {"tool": "task"}},
     ]
     assert _task_count(evts) == 2
-
-
-# ===== _settled_in =====
-
-
-def _write_tool_event(tool: str, file_path: str = "", status: str = "completed") -> dict:
-    return {
-        "type": "tool_use",
-        "part": {
-            "tool": tool,
-            "state": {
-                "status": status,
-                "input": {"filePath": file_path},
-            },
-        },
-    }
-
-
-def _completed_bash(*, timestamp: int, command: str) -> dict:
-    return {
-        "type": "tool_use",
-        "timestamp": timestamp,
-        "part": {
-            "tool": "bash",
-            "state": {
-                "status": "completed",
-                "input": {"command": command},
-            },
-        },
-    }
-
-
-def _completed_apply_patch(*, timestamp: int, path: str) -> dict:
-    return {
-        "type": "tool_use",
-        "timestamp": timestamp,
-        "part": {
-            "tool": "apply_patch",
-            "state": {
-                "status": "completed",
-                "input": {
-                    "patchText": (
-                        f"*** Begin Patch\n*** Update File: {path}\n@@\n-old\n+new\n*** End Patch\n"
-                    )
-                },
-            },
-        },
-    }
-
-
-def test_settled_in_false_when_empty():
-    assert not _settled_in([])
-
-
-def test_settled_in_true_on_settled_design_write():
-    evts = [_write_tool_event("write", "/worktree/SETTLED_DESIGN.md")]
-    assert _settled_in(evts)
-
-
-def test_settled_in_false_when_not_completed():
-    evts = [_write_tool_event("write", "/worktree/SETTLED_DESIGN.md", status="running")]
-    assert not _settled_in(evts)
-
-
-def test_impl_complete_in_true():
-    evts = [_write_tool_event("write", "/worktree/IMPLEMENTATION_COMPLETE")]
-    assert _impl_complete_in(evts)
-
-
-def test_impl_complete_in_true_on_apply_patch():
-    evts = [
-        {
-            "type": "tool_use",
-            "part": {
-                "tool": "apply_patch",
-                "state": {
-                    "status": "completed",
-                    "input": {
-                        "patchText": (
-                            "*** Begin Patch\n"
-                            "*** Add File: .contremaitre/IMPLEMENTATION_COMPLETE\n"
-                            "+done\n"
-                            "*** End Patch\n"
-                        )
-                    },
-                },
-            },
-        }
-    ]
-    assert _impl_complete_in(evts)
-
-
-# ===== _architecture_review_in =====
-
-
-def test_architecture_review_in_false_when_empty():
-    assert not _architecture_review_in([])
-
-
-def test_architecture_review_in_true_on_write():
-    evts = [_write_tool_event("write", "/worktree/.contremaitre/architecture-review.html")]
-    assert _architecture_review_in(evts)
-
-
-def test_architecture_review_in_true_on_apply_patch():
-    evts = [
-        {
-            "type": "tool_use",
-            "part": {
-                "tool": "apply_patch",
-                "state": {
-                    "status": "completed",
-                    "input": {
-                        "patchText": (
-                            "*** Begin Patch\n"
-                            "*** Add File: .contremaitre/architecture-review.html\n"
-                            "+<html/>\n"
-                            "*** End Patch\n"
-                        )
-                    },
-                },
-            },
-        }
-    ]
-    assert _architecture_review_in(evts)
-
-
-def test_architecture_review_in_false_for_unrelated_write():
-    evts = [_write_tool_event("write", "/worktree/src/foo.py")]
-    assert not _architecture_review_in(evts)
-
-
-def test_self_verified_counts_apply_patch_as_code_edit():
-    evts = [
-        _completed_bash(timestamp=1_000, command="pytest -q"),
-        _completed_apply_patch(timestamp=2_000, path="app/foo.py"),
-    ]
-    assert not _self_verified_in(evts)
-
-    evts.append(_completed_bash(timestamp=3_000, command="pytest -q"))
-    assert _self_verified_in(evts)
 
 
 # ===== _latest_pending_tool =====

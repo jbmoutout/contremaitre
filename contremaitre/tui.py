@@ -37,7 +37,13 @@ from typing import Any
 
 from .cli_reviewer import expand_choice as _cli_reviewer_expand_choice
 from .costs import sum_costs_in_events
-from .extract import parse_apply_patch
+from .flow_use import (
+    ARCHITECTURE_REVIEW,
+    IMPLEMENTATION_COMPLETE,
+    SETTLED_DESIGN,
+    marker_writes,
+    self_verification,
+)
 from .jsonlog import ts_to_ms
 from .models import ModelSpec, resolved_model_from_events
 from .run_artifacts import RunArtifacts
@@ -58,21 +64,6 @@ except ImportError:  # pragma: no cover — gated at CLI entry point
     _TEXTUAL_AVAILABLE = False
 
 
-SETTLED_FILE_RE = re.compile(r"/SETTLED_DESIGN\.md$", re.IGNORECASE)
-IMPL_COMPLETE_FILE_RE = re.compile(r"/IMPLEMENTATION_COMPLETE$")
-ARCH_REVIEW_FILE_RE = re.compile(r"/architecture-review\.html?$", re.IGNORECASE)
-APPLY_PATCH_SETTLED_RE = re.compile(
-    r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*SETTLED_DESIGN\.md\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-APPLY_PATCH_IMPL_COMPLETE_RE = re.compile(
-    r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*IMPLEMENTATION_COMPLETE\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-APPLY_PATCH_ARCH_REVIEW_RE = re.compile(
-    r"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*architecture-review\.html?\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
 DOCKER_REFRESH_S = 2.0
 # codex writes its rate-limit snapshot into session-rollout files (not the
 # `--json` stream we tail). Re-reading them every chrome tick (5Hz) is wasteful
@@ -930,114 +921,6 @@ def _task_count(events: list[dict[str, Any]]) -> int:
         for e in events
         if e.get("type") == "tool_use" and (e.get("part") or {}).get("tool") == "task"
     )
-
-
-def _settled_in(events: list[dict[str, Any]]) -> bool:
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        state = part.get("state") or {}
-        if state.get("status") != "completed":
-            continue
-        tool = part.get("tool")
-        inp = state.get("input") or {}
-        if tool in ("write", "edit"):
-            fp = inp.get("filePath") or inp.get("path") or ""
-            if SETTLED_FILE_RE.search(fp):
-                return True
-        elif tool == "apply_patch":
-            patch = inp.get("patchText") or inp.get("patch") or ""
-            if APPLY_PATCH_SETTLED_RE.search(patch):
-                return True
-    return False
-
-
-def _impl_complete_in(events: list[dict[str, Any]]) -> bool:
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        state = part.get("state") or {}
-        if state.get("status") != "completed":
-            continue
-        tool = part.get("tool")
-        inp = state.get("input") or {}
-        if tool in ("write", "edit"):
-            fp = inp.get("filePath") or inp.get("path") or ""
-            if IMPL_COMPLETE_FILE_RE.search(fp):
-                return True
-        elif tool == "apply_patch":
-            patch = inp.get("patchText") or inp.get("patch") or ""
-            if APPLY_PATCH_IMPL_COMPLETE_RE.search(patch):
-                return True
-    return False
-
-
-def _architecture_review_in(events: list[dict[str, Any]]) -> bool:
-    """True if `.contremaitre/architecture-review.html` has been written.
-
-    The skill's convention is for the agent to publish candidate cards there
-    before grilling with SIM. Not a harness gate, but useful as the
-    Exploring → Grilling boundary in the footer trail.
-    """
-
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        state = part.get("state") or {}
-        if state.get("status") != "completed":
-            continue
-        tool = part.get("tool")
-        inp = state.get("input") or {}
-        if tool in ("write", "edit"):
-            fp = inp.get("filePath") or inp.get("path") or ""
-            if ARCH_REVIEW_FILE_RE.search(fp):
-                return True
-        elif tool == "apply_patch":
-            patch = inp.get("patchText") or inp.get("patch") or ""
-            if APPLY_PATCH_ARCH_REVIEW_RE.search(patch):
-                return True
-    return False
-
-
-def _self_verified_in(events: list[dict[str, Any]]) -> bool:
-    """True if agent ran a test command after its last code edit."""
-    _test_cmd_re = re.compile(
-        r"\bunittest\b|\bpytest\b|\btsc\b|npm\s+test|make\s+test|\bmypy\b|\bjest\b|\bvitest\b"
-    )
-    _contremaitre_re = re.compile(r"[/\\]?\.contremaitre[/\\]")
-    last_edit_ts = 0
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        inp = (part.get("state") or {}).get("input") or {}
-        paths: list[str]
-        if part.get("tool") == "apply_patch":
-            patch = inp.get("patchText") or inp.get("patch") or ""
-            paths = [fp for _, fp, _ in parse_apply_patch(patch)]
-        else:
-            fp = inp.get("filePath") or inp.get("path") or ""
-            paths = [fp] if fp else []
-        if any(not _contremaitre_re.search(fp) for fp in paths):
-            last_edit_ts = max(last_edit_ts, e.get("timestamp", 0))
-    if not last_edit_ts:
-        return False
-    for e in events:
-        if e.get("type") != "tool_use":
-            continue
-        if (e.get("part") or {}).get("tool") != "bash":
-            continue
-        if e.get("timestamp", 0) <= last_edit_ts:
-            continue
-        cmd = ((e.get("part") or {}).get("state") or {}).get("input", {}).get("command") or ""
-        if _test_cmd_re.search(cmd):
-            return True
-    return False
 
 
 def _latest_pending_tool(events: list[dict[str, Any]]) -> str | None:
@@ -2630,9 +2513,9 @@ if _TEXTUAL_AVAILABLE:
 
             agent_turns = _text_event_count(agent_events)
             sim_turns = _text_event_count(sim_events)
-            settled = _settled_in(agent_events)
-            impl_complete = _impl_complete_in(agent_events)
-            self_verified = _self_verified_in(agent_events)
+            settled = bool(marker_writes(agent_events, SETTLED_DESIGN))
+            impl_complete = bool(marker_writes(agent_events, IMPLEMENTATION_COMPLETE))
+            self_verified = self_verification(agent_events).verified
 
             # Freeze elapsed + activity-age once the orchestrator has
             # written stats.json (terminal state) so a finished run stops
@@ -2827,7 +2710,7 @@ if _TEXTUAL_AVAILABLE:
             review_started = any(
                 g.get("event") == "actor_start" and g.get("role") == "review" for g in guardrails
             )
-            architecture_review_done = _architecture_review_in(agent_events)
+            architecture_review_done = bool(marker_writes(agent_events, ARCHITECTURE_REVIEW))
             # cli_review_started / _completed / _failed hoisted above.
             phase, color_state = _derive_phase(
                 terminal=terminal,
