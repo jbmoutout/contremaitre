@@ -20,7 +20,7 @@ It does NOT own:
   - the `HARD_GATES_CHECKED` telemetry. The emits legitimately diverge per call
     site (the revision path folds L1 into its `passed` and adds `context` / `round`
     / `failed_checks`), so each caller projects the event from its `L0GateResult`.
-  - the eval-artifact *schema*. `evaluate_l0` calls `evaluator.hard_gate_payload`
+  - the eval-artifact *schema*. `evaluate_l0` calls `gates.hard_gate_payload`
     to build `.payload`; the dict shape stays where the eval reports live.
 """
 
@@ -135,7 +135,7 @@ def evaluate_l0(
 
     `expected_hash` is the diff hash captured at SIM-APPROVED (publish path) or at
     the start of a post-publish revision round. The returned `payload` is the
-    `evaluator.hard_gate_payload` dict, unchanged in schema, ready to thread into
+    `gates.hard_gate_payload` dict, unchanged in schema, ready to thread into
     `_write_eval` / `_blocked_by_gates`.
     """
 
