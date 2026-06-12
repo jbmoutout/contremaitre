@@ -63,7 +63,12 @@ def _marker(name: str, *, flags: int = 0) -> Marker:
     return Marker(
         name,
         re.compile(rf"(?:^|[/\\]){escaped}$", flags),
-        re.compile(rf"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*{escaped}\s*$", flags | re.MULTILINE),
+        # `(?:.*[/\])?` keeps the same basename boundary as path_re — a header
+        # naming `docs/fooSETTLED_DESIGN.md` is a lookalike, not a marker write.
+        re.compile(
+            rf"^\*\*\*\s+(?:Add|Update)\s+File:\s*(?:.*[/\\])?{escaped}\s*$",
+            flags | re.MULTILINE,
+        ),
     )
 
 

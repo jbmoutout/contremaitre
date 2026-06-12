@@ -505,6 +505,33 @@ def test_marker_writes_ignores_subpath_lookalike():
     assert marker_writes(evts, SETTLED_DESIGN) == []
 
 
+def test_marker_writes_ignores_apply_patch_header_lookalikes():
+    # The header path needs the same basename boundary as write/edit paths:
+    # a prefixed basename naming the marker as a suffix is a lookalike.
+    evts = [
+        _completed_apply_patch(
+            timestamp=1_000,
+            patch_text=_update_file_patch("docs/fooSETTLED_DESIGN.md"),
+        ),
+        _completed_apply_patch(
+            timestamp=2_000,
+            patch_text=_update_file_patch("docs/NOT_IMPLEMENTATION_COMPLETE"),
+        ),
+    ]
+    assert marker_writes(evts, SETTLED_DESIGN) == []
+    assert marker_writes(evts, IMPLEMENTATION_COMPLETE) == []
+
+
+def test_marker_writes_accepts_apply_patch_header_with_directory_prefix():
+    evts = [
+        _completed_apply_patch(
+            timestamp=1_000,
+            patch_text=_update_file_patch(".contremaitre/SETTLED_DESIGN.md"),
+        )
+    ]
+    assert marker_writes(evts, SETTLED_DESIGN) == evts
+
+
 def test_marker_writes_detects_claude_assistant_write():
     evts = [_claude_write_event(ts=1_000, file_path="/app/.contremaitre/SETTLED_DESIGN.md")]
     assert marker_writes(evts, SETTLED_DESIGN) == evts
