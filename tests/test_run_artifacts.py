@@ -196,3 +196,41 @@ def test_worktree_state_accessor(tmp_path):
     assert arts.worktree_state() == [{"diff_stat": "1 file changed, 3 insertions(+)"}]
     # Missing stream → [] (snapshot semantics, same as the other accessors).
     assert RunArtifacts.from_run_dir(tmp_path / "run_absent").worktree_state() == []
+
+
+def test_diffstat_parses_last_snapshot(tmp_path):
+    # The final diffstat-bearing snapshot wins (an early partial diff is
+    # superseded by the run's net diff).
+    paths = build_run_paths(tmp_path, "run_ds")
+    _write_jsonl(
+        paths.worktree_state,
+        [
+            {"diff_stat": " 1 file changed, 5 insertions(+), 1 deletion(-)\n"},
+            {"diff_stat": " 3 files changed, 80 insertions(+), 12 deletions(-)\n"},
+        ],
+    )
+    assert RunArtifacts.from_run_dir(tmp_path / "run_ds").diffstat() == {
+        "files": 3,
+        "insertions": 80,
+        "deletions": 12,
+    }
+
+
+def test_diffstat_handles_insertions_only(tmp_path):
+    # An all-add diff has no "deletions(-)" clause — it reads as 0, not None.
+    paths = build_run_paths(tmp_path, "run_add")
+    _write_jsonl(paths.worktree_state, [{"diff_stat": " 1 file changed, 7 insertions(+)\n"}])
+    assert RunArtifacts.from_run_dir(tmp_path / "run_add").diffstat() == {
+        "files": 1,
+        "insertions": 7,
+        "deletions": 0,
+    }
+
+
+def test_diffstat_none_without_diffstat(tmp_path):
+    # Snapshots that never carried a summary line (status-only rows) → None.
+    paths = build_run_paths(tmp_path, "run_none")
+    _write_jsonl(paths.worktree_state, [{"diff_stat": "", "status": "?? x\n"}])
+    assert RunArtifacts.from_run_dir(tmp_path / "run_none").diffstat() is None
+    # Missing stream entirely → None too.
+    assert RunArtifacts.from_run_dir(tmp_path / "run_absent").diffstat() is None

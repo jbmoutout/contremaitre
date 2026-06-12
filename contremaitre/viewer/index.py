@@ -9,7 +9,6 @@ viewer. Reuses `_styles.css` so the index inherits the viewer's look.
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -75,6 +74,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         base = pr.get("base")
 
     cli_reviews = _read_cli_reviews(run_dir)
+    diffstat = RunArtifacts.from_run_dir(run_dir).diffstat()
 
     return {
         "run_id": run_dir.name,
@@ -92,6 +92,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "reason": (stats.get("reason") or "").strip(),
         "impl_complete": _read_impl_complete(run_dir),
         "settled_preamble": _read_settled_preamble(run_dir),
+        "diffstat": diffstat,
         "pr_kind": (pr or {}).get("kind") if isinstance(pr, dict) else None,
         "pr_url": (pr or {}).get("url") if isinstance(pr, dict) else None,
         "pr_title": (pr or {}).get("title") if isinstance(pr, dict) else None,
@@ -418,6 +419,28 @@ def _fmt_turns(turns: int | None) -> str:
     return "—" if turns is None else str(turns)
 
 
+def _diffstat_pill(diffstat: dict[str, int] | None) -> str:
+    """`{files, insertions, deletions}` → a "N files · +I −D" score pill.
+
+    Empty string when the run produced no diff (so a clean/no-op run shows
+    no pill rather than a misleading "0 files"). Colors mirror the pipeline
+    tab's +LoC/−LoC accents (green insertions, red deletions).
+    """
+
+    if not diffstat:
+        return ""
+    files = diffstat.get("files") or 0
+    ins = diffstat.get("insertions") or 0
+    dele = diffstat.get("deletions") or 0
+    return (
+        '<span class="score-pill">'
+        f'<b>{files}</b> file{"s" if files != 1 else ""} · '
+        f'<span style="color:var(--success)">+{ins}</span> '
+        f'<span style="color:#F87171">−{dele}</span>'
+        "</span>"
+    )
+
+
 def _render_html(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
     css = _CSS_PATH.read_text(encoding="utf-8")
     body = _render_body(rows, runs_root=runs_root)
@@ -529,8 +552,6 @@ document.querySelectorAll('.tab').forEach(function (tab) {{
 # (the same short form the runs tab shows), so the two tabs reconcile.
 
 _PAIRING_MIN_RUNS = 2
-_INSERTIONS_RE = re.compile(r"(\d+)\s+insertions?\(\+\)")
-_DELETIONS_RE = re.compile(r"(\d+)\s+deletions?\(-\)")
 
 # Verdicts where the pipeline died for reasons unrelated to model quality
 # (docker/clone/preflight, or provider credit exhaustion). These runs never
@@ -539,29 +560,6 @@ _DELETIONS_RE = re.compile(r"(\d+)\s+deletions?\(-\)")
 # pollute turns/LoC. Infra reliability is a separate concern (the runs tab's
 # "failed infra" total).
 _INFRA_VERDICTS = frozenset({"FAILED_INFRA", "QUOTA_EXHAUSTED"})
-
-
-def _diffstat_loc(arts: RunArtifacts) -> tuple[int, int] | None:
-    """(insertions, deletions) from the last diff_stat snapshot, or None.
-
-    `worktree_state.jsonl` records a `git diff --stat base...HEAD` text per
-    snapshot; the final row carrying a diffstat summary holds the run's net
-    diff. No structured integer field exists — we pull the counts out of
-    the "N insertions(+), M deletions(-)" summary line (either side may be
-    absent for an all-add or all-delete diff).
-    """
-
-    result: tuple[int, int] | None = None
-    for row in arts.worktree_state():
-        diff_stat = row.get("diff_stat") or ""
-        ins_m = _INSERTIONS_RE.search(diff_stat)
-        del_m = _DELETIONS_RE.search(diff_stat)
-        if ins_m or del_m:
-            result = (
-                int(ins_m.group(1)) if ins_m else 0,
-                int(del_m.group(1)) if del_m else 0,
-            )
-    return result
 
 
 def _pr_review_verdict(arts: RunArtifacts) -> str | None:
@@ -644,7 +642,7 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
     # (raw_export, review_cycles, guardrail_events) to one read each.
     arts = RunArtifacts.from_run_dir(run_dir)
     phases = arts.phases()
-    loc = _diffstat_loc(arts)
+    loc = arts.diffstat()
     review = _review_signals(arts)
     pr_verdict = _pr_review_verdict(arts)
 
@@ -672,8 +670,8 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
         "sim_rounds": review["sim_rounds"],
         "sim_changes": review["sim_changes"],
         "pr_review_fail": (pr_verdict == "MUST_FIX") if pr_verdict else None,
-        "ins": loc[0] if loc else None,
-        "dele": loc[1] if loc else None,
+        "ins": loc["insertions"] if loc else None,
+        "dele": loc["deletions"] if loc else None,
         "out_tokens": out_tokens,
     }
 
@@ -1201,6 +1199,7 @@ def _render_row(r: dict[str, Any]) -> str:
         f'<span class="score-pill"><b>{_fmt_duration(r["duration_seconds"])}</b> duration</span>'
         f'<span class="score-pill"><b>{_fmt_turns(r["turns"])}</b> turns</span>'
         f"{cost_pill}"
+        f"{_diffstat_pill(r['diffstat'])}"
     )
 
     verdict_display = _verdict_label(r["verdict"])

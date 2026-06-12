@@ -98,6 +98,7 @@
     <span class="item"><b>${fmt(stats.n_tool_uses)}</b> tool uses</span>
     <span class="item"><b>${fmt(stats.subagent_count)}</b> sub-agents</span>
     <span class="item"><b>${fmt(stats.files_written_count)}</b> files written</span>
+    ${stats.files_changed != null ? `<span class="item">diff <b>${fmt(stats.files_changed)}</b> file${stats.files_changed === 1 ? "" : "s"} · <b>+${fmt(stats.lines_added)}</b> / <b>−${fmt(stats.lines_removed)}</b></span>` : ""}
     ${cliChip}
     ${cliExtraChips}
   `;
@@ -159,6 +160,7 @@
       <div class="k">events</div><div class="v"><b>${fmt(stats.n_events)}</b> (${fmt(stats.n_text_events)} text · ${fmt(stats.n_tool_uses)} tool_use · ${fmt(stats.n_step_finishes)} step_finish)</div>
       <div class="k">tool counts (agent + sim)</div><div class="v">${toolPills || '<span style="color:var(--text-dim)">none</span>'}</div>
       <div class="k">tokens</div><div class="v"><b>${fmt(stats.tokens_in)}</b> in / <b>${fmt(stats.tokens_out)}</b> out</div>
+      ${stats.files_changed != null ? `<div class="k">net diff</div><div class="v"><b>${fmt(stats.files_changed)}</b> file${stats.files_changed === 1 ? "" : "s"} · <span style="color:var(--success)">+${fmt(stats.lines_added)}</span> / <span style="color:#F87171">−${fmt(stats.lines_removed)}</span></div>` : ""}
       <div class="k">recorded cost</div><div class="v">$<b>${(stats.cost_usd ?? 0).toFixed(4)}</b></div>
       ${prRow}
     </div>

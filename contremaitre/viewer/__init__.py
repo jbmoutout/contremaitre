@@ -110,6 +110,7 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     recoveries = arts.recoveries()
     cli_review = _assemble_cli_review(paths, guardrails)
     cli_review_extras = _assemble_cli_review_extras(paths)
+    diffstat = arts.diffstat()
 
     stats = {
         **stats_raw,
@@ -131,6 +132,11 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
         "sim_tool_counts": sim_summary["tool_counts"],
         "files_written_count": len(extracted_files),
         "subagent_count": len(sub_agents),
+        # Net diff over base — files touched + LoC. None fields when the run
+        # produced no diff; the renderer omits the strip item in that case.
+        "files_changed": (diffstat or {}).get("files"),
+        "lines_added": (diffstat or {}).get("insertions"),
+        "lines_removed": (diffstat or {}).get("deletions"),
     }
 
     return {

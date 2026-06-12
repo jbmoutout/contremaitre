@@ -1,7 +1,8 @@
 """Tests for the pipeline-observability tab in the runs index.
 
 Covers the grounded per-pairing extraction + aggregation: the pure
-extractors (`_diffstat_loc`, `_pr_review_verdict`, `_review_signals`),
+extractors (`_pr_review_verdict`, `_review_signals`; diffstat now lives on
+`RunArtifacts.diffstat`, tested in test_run_artifacts.py),
 the live phase split (via `_pipeline_run_metrics`, which now calls the
 fixed `flow_use.compute_phases`), and the coverage-honest aggregation in
 `_collect_pipeline_pairings`. Every expected number is hand-computed in
@@ -17,7 +18,6 @@ from contremaitre.models import ModelSpec
 from contremaitre.run_artifacts import RunArtifacts
 from contremaitre.viewer.index import (
     _collect_pipeline_pairings,
-    _diffstat_loc,
     _pipeline_run_metrics,
     _pr_review_verdict,
     _review_signals,
@@ -164,29 +164,6 @@ def test_collect_pairings_merges_differently_spelled_same_model(tmp_path):
 # --------------------------------------------------------------------------
 # Reader-fed extractors (take a RunArtifacts; read through the single seam)
 # --------------------------------------------------------------------------
-
-
-def test_diffstat_loc_parses_last_snapshot(tmp_path):
-    _write_jsonl(
-        tmp_path / "worktree_state.jsonl",
-        [
-            {"diff_stat": " 1 file changed, 5 insertions(+), 1 deletion(-)\n"},
-            {"diff_stat": " 3 files changed, 80 insertions(+), 12 deletions(-)\n"},
-        ],
-    )
-    assert _diffstat_loc(RunArtifacts.from_run_dir(tmp_path)) == (80, 12)
-
-
-def test_diffstat_loc_handles_insertions_only(tmp_path):
-    _write_jsonl(
-        tmp_path / "worktree_state.jsonl", [{"diff_stat": " 1 file changed, 7 insertions(+)\n"}]
-    )
-    assert _diffstat_loc(RunArtifacts.from_run_dir(tmp_path)) == (7, 0)
-
-
-def test_diffstat_loc_none_without_diffstat(tmp_path):
-    _write_jsonl(tmp_path / "worktree_state.jsonl", [{"diff_stat": "", "status": "?? x\n"}])
-    assert _diffstat_loc(RunArtifacts.from_run_dir(tmp_path)) is None
 
 
 def test_pr_review_verdict_keeps_worst(tmp_path):
