@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -100,6 +101,7 @@ def run_preflight(config: RunConfig) -> PreflightReport:
         funcs += [_check_docker_image, _check_readonly_mount, _check_network_policy]
         for tool in sorted(active_cli_tools):
             funcs.append(_check_claude_auth if tool == "claude" else _check_codex_auth)
+        funcs.append(_check_cli_freshness)
     # Dedupe by function identity (image/readonly/network are shared) so each
     # check runs once even when both runtimes are active.
     seen: set = set()
@@ -336,6 +338,167 @@ def _check_codex_auth(config: RunConfig) -> PreflightCheck:
         f"codex subscription token present and valid (~{remaining // 3600}h left)",
         {"remaining_s": remaining},
     )
+
+
+# ── CLI freshness ────────────────────────────────────────────────────────────
+# The frontier CLIs (claude/codex) are baked into the runtime image by an
+# UNPINNED `npm i -g` (see contremaitre/Dockerfile). Nothing refreshes them at
+# launch, and the image-staleness trigger keys only on the Dockerfile's sha256,
+# which never moves when a new CLI ships. So the in-image CLI can silently lag
+# npm — and a just-released model (e.g. a new claude) fails until the operator
+# rebuilds. This check turns that drift into a visible WARN. It never FAILs:
+# a stale CLI usually still works, so it must never gate a run.
+
+_NPM_PKG = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex"}
+_SEMVER_RE = re.compile(r"(\d+(?:\.\d+)+)")
+_NPM_LATEST_TTL_SECONDS = 6 * 3600
+_NPM_LATEST_CACHE = (
+    Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    / "contremaitre"
+    / "npm_latest.json"
+)
+
+
+def _image_update_cmd(image: str) -> str:
+    """The exact command that rebuilds `image` with the latest CLIs.
+
+    `--no-cache` is load-bearing: without it Docker serves the cached
+    `npm i -g` layer and reinstalls the SAME old version. Variant tags map to
+    their `--variant` flag; an operator's custom tag can't be auto-built, so we
+    describe the manual path instead. Tag strings mirror cli.py's
+    `_DEFAULT_IMAGE` / `_RUST_IMAGE` / `_GO_IMAGE` (kept inline to avoid a
+    cli→preflight import cycle).
+    """
+
+    if image == "contremaitre-agent:latest":
+        return "contremaitre image build --no-cache"
+    for variant in ("rust", "go"):
+        if image == f"contremaitre-agent-{variant}:latest":
+            return f"contremaitre image build --variant {variant} --no-cache"
+    return f"rebuild image '{image}' with the latest CLIs"
+
+
+def _image_exists(image: str) -> bool:
+    proc = _run(["docker", "image", "inspect", image, "--format", "{{.Id}}"])
+    return proc.returncode == 0
+
+
+def _local_cli_version(image: str, tool: str) -> str | None:
+    """The semver of `tool` baked into `image`, or None if it can't be read.
+
+    Mirrors `_check_opencode_binary`'s `docker run --version` probe. `claude`
+    prints `2.1.165 (Claude Code)`, `codex` prints `codex-cli 0.137.0`; we take
+    the first dotted-number run from stdout.
+    """
+
+    proc = _run(["docker", "run", "--rm", image, tool, "--version"])
+    if proc.returncode != 0:
+        return None
+    m = _SEMVER_RE.search(proc.stdout)
+    return m.group(1) if m else None
+
+
+def _read_npm_cache() -> dict[str, Any]:
+    try:
+        data = json.loads(_NPM_LATEST_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_npm_cache(cache: dict[str, Any]) -> None:
+    try:
+        _NPM_LATEST_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _NPM_LATEST_CACHE.write_text(json.dumps(cache), encoding="utf-8")
+    except OSError:
+        pass  # cache is a perf hop; failing to persist must not break the check
+
+
+def _fetch_npm_latest(pkg: str) -> str | None:
+    url = f"https://registry.npmjs.org/{pkg}/latest"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, str) and version else None
+
+
+def _npm_latest(pkg: str) -> str | None:
+    """Latest published version of `pkg`, via a 6h on-disk cache.
+
+    The cache keeps the interactive screen snappy and means an offline run
+    hits the network at most a few times a day. A miss (npm unreachable) returns
+    None and the caller emits the 'couldn't check' WARN.
+    """
+
+    cache = _read_npm_cache()
+    entry = cache.get(pkg)
+    if isinstance(entry, dict):
+        ts = entry.get("ts")
+        version = entry.get("version")
+        if isinstance(ts, (int, float)) and isinstance(version, str):
+            if time.time() - ts < _NPM_LATEST_TTL_SECONDS:
+                return version
+    version = _fetch_npm_latest(pkg)
+    if version:
+        cache[pkg] = {"version": version, "ts": time.time()}
+        _write_npm_cache(cache)
+    return version
+
+
+def _is_behind(local: str, latest: str) -> bool:
+    """True if `local` is an older semver than `latest`. False (no nag) when
+    either can't be parsed as dotted ints."""
+
+    try:
+        lt = tuple(int(x) for x in local.split("."))
+        rt = tuple(int(x) for x in latest.split("."))
+    except ValueError:
+        return False
+    return lt < rt
+
+
+def freshness_row(image: str, tool: str) -> tuple[str, str]:
+    """(status, message) for one CLI tool's image-vs-npm freshness.
+
+    status ∈ {"PASS", "WARN"}. Every WARN message ends with the exact rebuild
+    command. Shared by the structured preflight check and the interactive
+    pre-Y/n screen so both surfaces speak with one voice. Callers that run
+    BEFORE the image is built (the pre-Y/n screen) must gate on `_image_exists`
+    first — this assumes the image is present.
+    """
+
+    update = _image_update_cmd(image)
+    local = _local_cli_version(image, tool)
+    if local is None:
+        return "WARN", f"couldn't read in-image {tool} version — rebuild: {update}"
+    latest = _npm_latest(_NPM_PKG[tool])
+    if latest is None:
+        return (
+            "WARN",
+            f"couldn't check {tool} freshness (npm registry unreachable); "
+            f"image has {local} — to refresh: {update}",
+        )
+    if _is_behind(local, latest):
+        return (
+            "WARN",
+            f"{tool} CLI in image is {local}; npm latest is {latest} — update: {update}",
+        )
+    return "PASS", f"{tool} CLI up to date ({local})"
+
+
+def _check_cli_freshness(config: RunConfig) -> PreflightCheck:
+    """WARN when any active CLI tool's in-image version lags npm. Never FAILs."""
+
+    tools = sorted(_active_cli_tools(config))
+    rows = {tool: freshness_row(config.docker_image, tool) for tool in tools}
+    status = "WARN" if any(s == "WARN" for s, _ in rows.values()) else "PASS"
+    message = "; ".join(m for _, m in rows.values()) or "no CLI tool active"
+    details = {tool: {"status": s, "message": m} for tool, (s, m) in rows.items()}
+    return PreflightCheck(name="cli_freshness", status=status, message=message, details=details)
 
 
 def _check_openrouter_key(config: RunConfig) -> PreflightCheck:

@@ -18,7 +18,7 @@ from .fixture import init_fixture
 from .models import ActorMode, Caps, ModelSpec, PublishMode, RunConfig
 from .orchestrator import run
 from .paths import slugify
-from .preflight import run_preflight
+from .preflight import _image_exists, freshness_row, run_preflight
 from .runtime_image import list_deps_volumes
 from .viewer import VIEWER_FILENAME, build_viewer
 from .viewer.index import INDEX_FILENAME, build_index
@@ -963,6 +963,18 @@ def _preflight_presence_check(args: argparse.Namespace) -> int:
         print(f"    {role_label:<16}  {tool_name:<8}  {mark}  {_d(line)}")
         if not ok:
             failed = True
+
+    # CLI freshness: WARN if the in-image claude/codex lags npm. Advisory only —
+    # never sets `failed` (a stale CLI usually still works). Skipped when the
+    # image isn't built yet: this screen runs BEFORE the build, so a cold first
+    # run would otherwise cry "couldn't read version" about an image that simply
+    # doesn't exist yet (it's built right after the Y/n).
+    image = getattr(args, "docker_image", _DEFAULT_IMAGE)
+    if roles_by_name and _image_exists(image):
+        for tool_name in roles_by_name:
+            status, message = freshness_row(image, tool_name)
+            mark = "⚠" if status == "WARN" else "✓"
+            print(f"    {'freshness':<16}  {tool_name:<8}  {mark}  {_d(message)}")
 
     if opencode_paid_roles:
         role_label = " + ".join(opencode_paid_roles)

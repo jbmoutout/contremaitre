@@ -295,3 +295,88 @@ class CliNetworkPolicyTest(unittest.TestCase):
             https_proxy="http://p:3128",
         )
         self.assertEqual(_check_network_policy(locked).status, "PASS")
+
+
+class CliFreshnessTest(unittest.TestCase):
+    def test_behind_compares_semver_not_lexically(self):
+        from contremaitre.preflight import _is_behind
+
+        self.assertTrue(_is_behind("2.1.165", "2.1.175"))
+        self.assertTrue(_is_behind("2.1.9", "2.1.10"))  # not lexical
+        self.assertFalse(_is_behind("2.1.175", "2.1.175"))
+        self.assertFalse(_is_behind("2.2.0", "2.1.175"))  # local newer
+        self.assertFalse(_is_behind("weird", "2.0.0"))  # unparseable → no nag
+
+    def test_update_cmd_carries_no_cache_and_variant(self):
+        from contremaitre.preflight import _image_update_cmd
+
+        self.assertEqual(
+            _image_update_cmd("contremaitre-agent:latest"),
+            "contremaitre image build --no-cache",
+        )
+        self.assertIn("--variant rust", _image_update_cmd("contremaitre-agent-rust:latest"))
+        self.assertIn("--no-cache", _image_update_cmd("contremaitre-agent-rust:latest"))
+        self.assertIn("rebuild", _image_update_cmd("myorg/custom:tag"))
+
+    def test_behind_warns_with_exact_command(self):
+        from contremaitre.preflight import freshness_row
+
+        with (
+            patch("contremaitre.preflight._local_cli_version", return_value="2.1.165"),
+            patch("contremaitre.preflight._npm_latest", return_value="2.1.175"),
+        ):
+            status, message = freshness_row("contremaitre-agent:latest", "claude")
+        self.assertEqual(status, "WARN")
+        self.assertIn("2.1.165", message)
+        self.assertIn("2.1.175", message)
+        self.assertIn("contremaitre image build --no-cache", message)
+
+    def test_up_to_date_passes(self):
+        from contremaitre.preflight import freshness_row
+
+        with (
+            patch("contremaitre.preflight._local_cli_version", return_value="2.1.175"),
+            patch("contremaitre.preflight._npm_latest", return_value="2.1.175"),
+        ):
+            status, _ = freshness_row("contremaitre-agent:latest", "claude")
+        self.assertEqual(status, "PASS")
+
+    def test_npm_unreachable_warns_with_command(self):
+        from contremaitre.preflight import freshness_row
+
+        with (
+            patch("contremaitre.preflight._local_cli_version", return_value="2.1.165"),
+            patch("contremaitre.preflight._npm_latest", return_value=None),
+        ):
+            status, message = freshness_row("contremaitre-agent:latest", "codex")
+        self.assertEqual(status, "WARN")
+        self.assertIn("unreachable", message)
+        self.assertIn("contremaitre image build --no-cache", message)
+
+    def test_unreadable_local_warns_to_rebuild(self):
+        from contremaitre.preflight import freshness_row
+
+        with patch("contremaitre.preflight._local_cli_version", return_value=None):
+            status, message = freshness_row("contremaitre-agent:latest", "claude")
+        self.assertEqual(status, "WARN")
+        self.assertIn("rebuild", message)
+
+    def test_check_never_fails_even_when_stale(self):
+        # The whole point: a lagging CLI must WARN, never gate the run.
+        from contremaitre.preflight import _check_cli_freshness
+
+        cfg = RunConfig(
+            repo=Path("/tmp/r"),
+            base="main",
+            runs_root=Path("/tmp/runs"),
+            run_slug="t",
+            actor_mode=ActorMode.CLI,
+            cli_tool="claude",
+        )
+        with (
+            patch("contremaitre.preflight._local_cli_version", return_value="2.1.165"),
+            patch("contremaitre.preflight._npm_latest", return_value="2.1.175"),
+        ):
+            check = _check_cli_freshness(cfg)
+        self.assertEqual(check.status, "WARN")
+        self.assertNotEqual(check.status, "FAIL")

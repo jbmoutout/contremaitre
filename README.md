@@ -91,7 +91,7 @@ The full flag reference lives in [docs/control-plane.md#cli-reference](docs/cont
 
 ## Other commands
 
-- `contremaitre doctor` — preflight check without spawning a run (target/base, Docker, opencode binary, `:ro` mount, network posture, OpenRouter key bounds).
+- `contremaitre doctor` — preflight check without spawning a run (target/base, Docker, opencode binary, `:ro` mount, network posture, OpenRouter key bounds, CLI freshness vs npm).
 - `contremaitre cleanup [--deps] [--repos]` — sweep label-tagged containers, worktrees, dangling images; opt-in to deps volumes and the clone cache.
 - `contremaitre viewer <run-dir> [--open]` — rebuild the per-run `viewer.html`: transcript, timeline, sub-agents, written files, guardrail events, eval reports. Self-contained — no server needed.
 - `contremaitre index [<runs-root>] [--open]` — rebuild `index.html` across every run under the root: one summary card per run (verdict, models, PR link, cost, duration), newest first, each linking to its viewer. Auto-rebuilt at the end of every run.
@@ -106,7 +106,7 @@ For controlled egress on an **opencode** run (instead of `--allow-open-egress`),
 
 - **Browse the run.** Open `.contremaitre/runs/<run-id>/viewer.html` — self-contained, no server. If it's missing, rebuild it: `contremaitre viewer .contremaitre/runs/<run-id>`.
 - **Read the event log.** `guardrail_events.jsonl` in the run dir is the structured timeline of every state transition, cap trip, gate result, recovery, and verdict. Pair with `stats.json` (`reason` field disambiguates same-verdict failure modes).
-- **Sanity-check the environment.** `contremaitre doctor --base main --fork …` runs the same preflight as `run` (Docker daemon + image, opencode binary, `:ro` mount enforcement, network posture, OpenRouter key bounds) without spawning a run.
+- **Sanity-check the environment.** `contremaitre doctor --base main --fork …` runs the same preflight as `run` (Docker daemon + image, opencode binary, `:ro` mount enforcement, network posture, OpenRouter key bounds, CLI freshness vs npm) without spawning a run.
 - **Sweep leftovers.** A SIGKILL'd parent can leave label-tagged containers and worktrees behind. `contremaitre cleanup --dry-run` shows what's stale; `contremaitre cleanup` removes them. Add `--deps` / `--repos` to also clear cross-run caches.
 
 ## Further reading
