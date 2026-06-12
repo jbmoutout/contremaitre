@@ -126,7 +126,7 @@ class EvaluateL0Test(unittest.TestCase):
         self.assertTrue(r.clean_worktree)
         self.assertTrue(r.diff_scan.passed)
         self.assertEqual(r.recomputed_hash, _hash_of(diff))
-        # payload schema is the unchanged evaluator.hard_gate_payload dict
+        # payload schema is the unchanged gates.hard_gate_payload dict
         self.assertTrue(r.payload["passed"])
         self.assertEqual(
             set(r.payload["checks"]),

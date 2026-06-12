@@ -20,8 +20,8 @@ It does NOT own:
   - the `HARD_GATES_CHECKED` telemetry. The emits legitimately diverge per call
     site (the revision path folds L1 into its `passed` and adds `context` / `round`
     / `failed_checks`), so each caller projects the event from its `L0GateResult`.
-  - the eval-artifact *schema*. `evaluate_l0` calls `evaluator.hard_gate_payload`
-    to build `.payload`; the dict shape stays where the eval reports live.
+  - the eval-artifact *schema*. `gates.hard_gate_payload` owns the L0 payload
+    shape; `evaluate_l0` calls it to build `.payload`.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .diffscan import DiffScanResult, scan_diff
-from .evaluator import hard_gate_payload
 from .git_utils import GitRepo
 from .verdicts import diff_hash
 
@@ -89,6 +88,31 @@ def only_internal_changes(porcelain: str) -> bool:
     return True
 
 
+def hard_gate_payload(
+    *,
+    diff_scan: DiffScanResult | None,
+    clean_worktree: bool,
+    diff_hash_matched: bool,
+    draft_only: bool = True,
+) -> dict[str, object]:
+    # `clean_worktree` is expected to hold trivially in normal flow because the
+    # orchestrator commits agent changes before this gate runs. Kept as a
+    # belt-and-suspenders check: if a downstream change ever moves the commit
+    # boundary or introduces post-commit edits, this fails loud.
+    checks = {
+        "diff_scan": diff_scan.passed if diff_scan else False,
+        "clean_worktree": clean_worktree,
+        "diff_hash_matched": diff_hash_matched,
+        "draft_only": draft_only,
+    }
+    return {
+        "passed": all(checks.values()),
+        "checks": checks,
+        "forbidden_files": diff_scan.forbidden_files if diff_scan else [],
+        "changed_files": diff_scan.changed_files if diff_scan else [],
+    }
+
+
 @dataclass(frozen=True)
 class L0GateResult:
     """Outcome of one L0 evaluation. `passed` is L0-only — it never folds L1."""
@@ -111,7 +135,7 @@ def evaluate_l0(
 
     `expected_hash` is the diff hash captured at SIM-APPROVED (publish path) or at
     the start of a post-publish revision round. The returned `payload` is the
-    `evaluator.hard_gate_payload` dict, unchanged in schema, ready to thread into
+    `gates.hard_gate_payload` dict, unchanged in schema, ready to thread into
     `_write_eval` / `_blocked_by_gates`.
     """
 

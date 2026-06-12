@@ -1219,6 +1219,10 @@ class Orchestrator:
                 confidence=None,
                 summary=reason,
             )
+        try:
+            flow_use = RunArtifacts(self.paths).flow_use()
+        except Exception as exc:
+            flow_use = {"status": "error", "reason": repr(exc), "agent": {}, "sim": {}}
         write_eval_reports(
             paths=self.paths,
             verdict=verdict,
@@ -1233,6 +1237,7 @@ class Orchestrator:
                 else 0.5,
             },
             needs_human=needs_human,
+            flow_use=flow_use,
         )
 
     # ----- worktree + git helpers -----
