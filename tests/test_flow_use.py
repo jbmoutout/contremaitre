@@ -5,8 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from contremaitre.flow_use import (
+    ARCHITECTURE_REVIEW,
+    IMPLEMENTATION_COMPLETE,
+    SETTLED_DESIGN,
     compute_flow_use,
     compute_phases,
+    marker_writes,
+    self_verification,
 )
 from contremaitre.run_artifacts import RunArtifacts
 
@@ -379,3 +384,169 @@ def test_sim_useful_call_ratio_credits_path_or_include_args():
         verdict="checked tests/test_extract.py for coverage",
     )
     assert flow_use["sim"]["sim_useful_call_ratio"]["value"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Run-signal predicates — marker_writes / self_verification
+# (migrated from test_tui.py when the TUI's duplicate copies were deleted)
+# ---------------------------------------------------------------------------
+
+
+def _write_tool_event(tool: str, file_path: str = "", status: str = "completed") -> dict:
+    return {
+        "type": "tool_use",
+        "part": {
+            "tool": tool,
+            "state": {"status": status, "input": {"filePath": file_path}},
+        },
+    }
+
+
+def _completed_bash(*, timestamp: int, command: str) -> dict:
+    return {
+        "type": "tool_use",
+        "timestamp": timestamp,
+        "part": {
+            "tool": "bash",
+            "state": {"status": "completed", "input": {"command": command}},
+        },
+    }
+
+
+def _completed_apply_patch(*, timestamp: int, patch_text: str) -> dict:
+    return {
+        "type": "tool_use",
+        "timestamp": timestamp,
+        "part": {
+            "tool": "apply_patch",
+            "state": {"status": "completed", "input": {"patchText": patch_text}},
+        },
+    }
+
+
+def _update_file_patch(path: str) -> str:
+    return f"*** Begin Patch\n*** Update File: {path}\n@@\n-old\n+new\n*** End Patch\n"
+
+
+def _claude_write_event(*, ts: int, file_path: str) -> dict:
+    return {
+        "type": "assistant",
+        "ts": ts,
+        "message": {
+            "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": file_path}}]
+        },
+    }
+
+
+def test_marker_writes_empty():
+    assert marker_writes([], SETTLED_DESIGN) == []
+
+
+def test_marker_writes_fires_on_settled_design_write():
+    evts = [_write_tool_event("write", "/worktree/.contremaitre/SETTLED_DESIGN.md")]
+    assert marker_writes(evts, SETTLED_DESIGN) == evts
+
+
+def test_marker_writes_ignores_uncompleted_opencode_write():
+    evts = [
+        _write_tool_event("write", "/worktree/.contremaitre/SETTLED_DESIGN.md", status="running")
+    ]
+    assert marker_writes(evts, SETTLED_DESIGN) == []
+
+
+def test_marker_writes_fires_on_impl_complete_apply_patch_header():
+    evts = [
+        _completed_apply_patch(
+            timestamp=1_000,
+            patch_text=(
+                "*** Begin Patch\n"
+                "*** Add File: .contremaitre/IMPLEMENTATION_COMPLETE\n"
+                "+done\n"
+                "*** End Patch\n"
+            ),
+        )
+    ]
+    assert marker_writes(evts, IMPLEMENTATION_COMPLETE) == evts
+
+
+def test_marker_writes_fires_on_architecture_review_write():
+    evts = [_write_tool_event("write", "/worktree/.contremaitre/architecture-review.html")]
+    assert marker_writes(evts, ARCHITECTURE_REVIEW) == evts
+
+
+def test_marker_writes_ignores_unrelated_write():
+    evts = [_write_tool_event("write", "/worktree/src/foo.py")]
+    assert marker_writes(evts, ARCHITECTURE_REVIEW) == []
+    assert marker_writes(evts, SETTLED_DESIGN) == []
+
+
+def test_marker_writes_ignores_patch_context_line_mention():
+    # The pre-unification scorecard matched the marker name anywhere in the
+    # patch text — a context line mentioning SETTLED_DESIGN fired it. Only an
+    # Add/Update File header naming the marker is a marker write.
+    evts = [
+        _completed_apply_patch(
+            timestamp=1_000,
+            patch_text=(
+                "*** Begin Patch\n"
+                "*** Update File: docs/notes.md\n"
+                "@@\n"
+                "-see SETTLED_DESIGN.md for the plan\n"
+                "+see the settled plan\n"
+                "*** End Patch\n"
+            ),
+        )
+    ]
+    assert marker_writes(evts, SETTLED_DESIGN) == []
+
+
+def test_marker_writes_ignores_subpath_lookalike():
+    evts = [_write_tool_event("write", "/worktree/docs/SETTLED_DESIGN_notes.md")]
+    assert marker_writes(evts, SETTLED_DESIGN) == []
+
+
+def test_marker_writes_detects_claude_assistant_write():
+    evts = [_claude_write_event(ts=1_000, file_path="/app/.contremaitre/SETTLED_DESIGN.md")]
+    assert marker_writes(evts, SETTLED_DESIGN) == evts
+
+
+def test_marker_writes_returns_stream_order():
+    first = _write_tool_event("write", ".contremaitre/IMPLEMENTATION_COMPLETE")
+    second = _claude_write_event(ts=2_000, file_path=".contremaitre/IMPLEMENTATION_COMPLETE")
+    assert marker_writes([first, second], IMPLEMENTATION_COMPLETE) == [first, second]
+
+
+def test_self_verification_counts_apply_patch_as_code_edit():
+    evts = [
+        _completed_bash(timestamp=1_000, command="pytest -q"),
+        _completed_apply_patch(timestamp=2_000, patch_text=_update_file_patch("app/foo.py")),
+    ]
+    assert not self_verification(evts).verified
+
+    evts.append(_completed_bash(timestamp=3_000, command="pytest -q"))
+    assert self_verification(evts).verified
+
+
+def test_self_verification_bounds_against_last_marker_write():
+    # Revision rounds clear and rewrite IMPLEMENTATION_COMPLETE. A test run
+    # between the revision edit and the FINAL marker write must count —
+    # first-write anchoring made it invisible.
+    evts = [
+        _completed_apply_patch(timestamp=1_000, patch_text=_update_file_patch("app/foo.py")),
+        _write_tool_event("write", ".contremaitre/IMPLEMENTATION_COMPLETE") | {"timestamp": 2_000},
+        _completed_apply_patch(timestamp=3_000, patch_text=_update_file_patch("app/foo.py")),
+        _completed_bash(timestamp=4_000, command="pytest -q"),
+        _write_tool_event("write", ".contremaitre/IMPLEMENTATION_COMPLETE") | {"timestamp": 5_000},
+    ]
+    assert self_verification(evts).verified
+
+
+def test_self_verification_rejects_test_run_after_final_marker():
+    # A test command after the marker is not verification-before-declaring-
+    # done. The TUI's pre-unification copy had no upper bound and counted it.
+    evts = [
+        _completed_apply_patch(timestamp=1_000, patch_text=_update_file_patch("app/foo.py")),
+        _write_tool_event("write", ".contremaitre/IMPLEMENTATION_COMPLETE") | {"timestamp": 2_000},
+        _completed_bash(timestamp=3_000, command="pytest -q"),
+    ]
+    assert not self_verification(evts).verified

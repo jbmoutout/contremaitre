@@ -30,6 +30,22 @@ The model a run *actually* ran, as reported by the runtime's stream
 *is* the resolved model). Distinct from **requested** so two `claude default`
 runs that resolved to different models do not collide in grouping.
 
+**Run-signal predicate**
+A pure predicate over an actor's raw event stream that detects one of the
+harness filesystem contracts: the architecture-review card, the
+`SETTLED_DESIGN.md` write, self-verification (a test command between the last
+code edit and the final `IMPLEMENTATION_COMPLETE` write), and the
+`IMPLEMENTATION_COMPLETE` write itself. Owned by `flow_use.py`
+(`marker_writes` / `self_verification`); the **Artifact reader** composes
+them post-hoc and the live TUI calls them per tick — one
+implementation, so the live chrome and the eval scorecard cannot disagree
+about the same run. Observability-only: the orchestrator's handoff gate is a
+filesystem check on the worktree, never these predicates. Marker matching is
+anchored (exact basename; `apply_patch` requires an `Add/Update File:`
+header); runtime decoding (opencode `tool_use` / claude `assistant` blocks;
+codex deliberately unhandled — no per-event timestamps) is an internal seam,
+not a public one.
+
 **Artifact reader**
 The single Module that reads a run's **artifact contract** (the JSONL/JSON
 streams under `<run-id>/` — `raw_export`, `guardrail_events`, `review_cycles`,

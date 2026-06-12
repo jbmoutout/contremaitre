@@ -34,18 +34,43 @@ Added (SIM): sim_read_settled, sim_read_diff, sim_read_diff_partial,
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 from .extract import parse_apply_patch
 from .jsonlog import event_ms
 
 
 # ---------------------------------------------------------------------------
-# Regex patterns — all anchored to harness contracts, not model prose style
+# Run-signal markers — the harness filesystem contracts, as anchored patterns
 # ---------------------------------------------------------------------------
+#
+# Matching is anchored on purpose: a write/edit fires only on the exact
+# basename, and an apply_patch fires only on an `*** Add|Update File:` header
+# naming the marker. A patch whose context lines merely mention the marker, or
+# a path like `docs/SETTLED_DESIGN_notes.md`, is not a marker write.
 
-_SETTLED_RE = re.compile(r"SETTLED_DESIGN", re.IGNORECASE)
-_IMPL_COMPLETE_RE = re.compile(r"IMPLEMENTATION_COMPLETE")
+
+class Marker(NamedTuple):
+    """One harness filesystem contract, as the patterns that detect its write."""
+
+    name: str
+    path_re: re.Pattern  # against the written path (write / edit / claude Write)
+    patch_re: re.Pattern  # against an apply_patch `Add/Update File:` header line
+
+
+def _marker(name: str, *, flags: int = 0) -> Marker:
+    escaped = re.escape(name).replace(r"\.html", r"\.html?")
+    return Marker(
+        name,
+        re.compile(rf"(?:^|[/\\]){escaped}$", flags),
+        re.compile(rf"^\*\*\*\s+(?:Add|Update)\s+File:\s*.*{escaped}\s*$", flags | re.MULTILINE),
+    )
+
+
+SETTLED_DESIGN = _marker("SETTLED_DESIGN.md", flags=re.IGNORECASE)
+IMPLEMENTATION_COMPLETE = _marker("IMPLEMENTATION_COMPLETE")
+ARCHITECTURE_REVIEW = _marker("architecture-review.html", flags=re.IGNORECASE)
+
 _DIFF_RE = re.compile(r"review_diff_round|(?:^|[/\\])diff\.patch$", re.IGNORECASE)
 _CONTREMAITRE_DIR_RE = re.compile(r"[/\\]?\.contremaitre[/\\]")
 
@@ -115,8 +140,12 @@ def compute_phases(
     """
     # Mode-agnostic write detection: opencode `tool_use` + claude `assistant`
     # tool_use blocks. (Codex has no per-event timestamp — see below.)
-    settled_event = _find_write_event(agent_events, _SETTLED_RE)
-    impl_event = _find_write_event(agent_events, _IMPL_COMPLETE_RE)
+    # FIRST writes on purpose: the phase split describes the original WORK
+    # pass; turns after a round-1 marker are CLI-review turns, not impl.
+    settled_writes = marker_writes(agent_events, SETTLED_DESIGN)
+    impl_writes = marker_writes(agent_events, IMPLEMENTATION_COMPLETE)
+    settled_event = settled_writes[0] if settled_writes else None
+    impl_event = impl_writes[0] if impl_writes else None
     settled_ms = event_ms(settled_event)
     impl_ms = event_ms(impl_event)
 
@@ -215,8 +244,10 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
         round((event_times[-1] - event_times[0]) / 1000, 1) if len(event_times) > 1 else 0
     )
 
-    settled_event = _find_write_to(tool_calls, _SETTLED_RE)
-    impl_event = _find_write_to(tool_calls, _IMPL_COMPLETE_RE)
+    settled_writes = marker_writes(events, SETTLED_DESIGN)
+    impl_writes = marker_writes(events, IMPLEMENTATION_COMPLETE)
+    settled_event = settled_writes[0] if settled_writes else None
+    impl_event = impl_writes[0] if impl_writes else None
     first_code_edit = _find_first_code_edit(tool_calls)
 
     t0 = event_times[0] if event_times else None
@@ -228,7 +259,7 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
 
     settled_chars: int | None = None
     if settled_event:
-        settled_chars = _write_chars(settled_event, _SETTLED_RE)
+        settled_chars = _write_chars(settled_event, SETTLED_DESIGN)
 
     settled_before_edit: bool | None = None
     if settled_event and first_code_edit:
@@ -238,12 +269,13 @@ def _agent_metrics(events: list[dict]) -> dict[str, Any]:
             if settled_ts is not None and first_edit_ts is not None
             else None
         )
-    elif settled_event:
+    elif settled_event and tool_calls:
+        # No code edit found AND the stream is opencode-shaped (code edits
+        # are detectable) → trivially before. A claude stream has no
+        # detectable edits, so "no edit found" there means unknown, not True.
         settled_before_edit = True
 
-    self_verified, self_verify_pass, runtime_install = _check_self_verification(
-        tool_calls, impl_event
-    )
+    self_verified, self_verify_pass, runtime_install = self_verification(events)
 
     return {
         "tool_call_count": {"value": len(tool_calls), "extraction": "automatic"},
@@ -313,7 +345,7 @@ def _sim_metrics(events: list[dict], review_cycles: list[dict]) -> dict[str, Any
         by_tool[t] = by_tool.get(t, 0) + 1
 
     sim_read_settled = any(
-        _SETTLED_RE.search(_inp(e).get("filePath", "") or "")
+        SETTLED_DESIGN.path_re.search(_inp(e).get("filePath", "") or "")
         for e in tool_calls
         if _tool_name(e) == "read"
     )
@@ -411,33 +443,39 @@ def _convergence(file_access: dict[str, int]) -> tuple[str, float, int, int]:
     return label, breadth, distinct, total
 
 
-def _find_write_to(tool_calls: list[dict], pattern: re.Pattern) -> dict | None:
-    for e in tool_calls:
-        part = e.get("part") or {}
-        if part.get("tool") not in ("write", "edit", "apply_patch"):
-            continue
-        if (part.get("state") or {}).get("status") != "completed":
-            continue
-        inp = _inp(e)
-        target = (
-            inp.get("filePath") or inp.get("path") or inp.get("patchText") or inp.get("patch") or ""
-        )
-        if pattern.search(str(target)):
-            return e
-    return None
-
-
 # claude stream-json names its file-writing tools with leading caps.
 _CLAUDE_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
 
-def _find_write_event(events: list[dict], pattern: re.Pattern) -> dict | None:
-    """First event that WRITES a path matching `pattern`, across runtimes.
+def _claude_write_blocks(event: dict, marker: Marker) -> bool:
+    for block in (event.get("message") or {}).get("content") or []:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        if block.get("name") not in _CLAUDE_WRITE_TOOLS:
+            continue
+        inp = block.get("input") or {}
+        target = inp.get("file_path") or inp.get("path") or ""
+        if marker.path_re.search(str(target)):
+            return True
+    return False
 
-    Handles opencode `tool_use` (write/edit/apply_patch) and claude
-    `assistant` events whose `message.content[]` carries a `tool_use` block
-    (Write/Edit/…). Both shapes carry an extractable timestamp, so the
-    caller can time-anchor the phase split.
+
+def marker_writes(events: list[dict], marker: Marker) -> list[dict]:
+    """Stream-ordered events that WROTE `marker`'s path, across runtimes.
+
+    The one run-signal predicate shared by the live TUI chrome, the phase
+    split, and the eval scorecard — observability only; the orchestrator's
+    handoff gate is a filesystem check on the worktree, never this. Each
+    consumer takes the end it means: the TUI tests truthiness, the phase
+    split anchors to the FIRST write (`impl_turns` counts the original WORK
+    pass), `self_verification` bounds against the LAST write (revision
+    rounds clear and rewrite the marker).
+
+    Handles opencode `tool_use` (write/edit/apply_patch, completed only)
+    and claude `assistant` events whose `message.content[]` carries a
+    Write/Edit tool_use block. The claude branch has no completion check —
+    the tool result lands in a later `user` event this predicate does not
+    correlate; acceptable while the predicates feed only telemetry.
 
     Codex is intentionally NOT handled: its `--json` stream carries no
     per-event timestamp (and writes files via opaque `command_execution`
@@ -446,35 +484,56 @@ def _find_write_event(events: list[dict], pattern: re.Pattern) -> dict | None:
     rather than a wrong number — see `compute_phases`.
     """
 
+    out: list[dict] = []
     for e in events:
         etype = e.get("type")
         if etype == "tool_use":  # opencode
             part = e.get("part") or {}
-            if part.get("tool") not in ("write", "edit", "apply_patch"):
+            tool = part.get("tool")
+            if tool not in ("write", "edit", "apply_patch"):
                 continue
             if (part.get("state") or {}).get("status") != "completed":
                 continue
             inp = _inp(e)
-            target = (
-                inp.get("filePath")
-                or inp.get("path")
-                or inp.get("patchText")
-                or inp.get("patch")
-                or ""
-            )
-            if pattern.search(str(target)):
-                return e
+            if tool == "apply_patch":
+                patch = inp.get("patchText") or inp.get("patch") or ""
+                if marker.patch_re.search(str(patch)):
+                    out.append(e)
+            else:
+                fp = inp.get("filePath") or inp.get("path") or ""
+                if marker.path_re.search(str(fp)):
+                    out.append(e)
         elif etype == "assistant":  # claude stream-json
-            for block in (e.get("message") or {}).get("content") or []:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                if block.get("name") not in _CLAUDE_WRITE_TOOLS:
-                    continue
-                inp = block.get("input") or {}
-                target = inp.get("file_path") or inp.get("path") or ""
-                if pattern.search(str(target)):
-                    return e
-    return None
+            if _claude_write_blocks(e, marker):
+                out.append(e)
+    return out
+
+
+class SelfVerification(NamedTuple):
+    verified: bool
+    output_suggests_pass: bool | None
+    runtime_install_required: bool
+
+
+def self_verification(events: list[dict]) -> SelfVerification:
+    """Did the agent run a test command after its FINAL code edits, before
+    its FINAL `IMPLEMENTATION_COMPLETE` write?
+
+    Bound: last code edit < test command < LAST marker write. The last
+    write, not the first: revision rounds clear and rewrite the marker, and
+    the final write is the declaration the published artifact ships under —
+    first-write anchoring would make every revision-round test run
+    invisible. Live (no marker yet) the upper bound is open, so the flag
+    accrues as the TUI ticks.
+
+    opencode `tool_use` streams only — claude bash runs are not detected
+    (both pre-unification copies had the same reach; widening is a new
+    detection mechanism, not a merge).
+    """
+
+    tool_calls = [e for e in events if e.get("type") == "tool_use"]
+    impl_writes = marker_writes(events, IMPLEMENTATION_COMPLETE)
+    return _check_self_verification(tool_calls, impl_writes[-1] if impl_writes else None)
 
 
 def _find_first_code_edit(tool_calls: list[dict]) -> dict | None:
@@ -502,13 +561,11 @@ def _tokens_before(events: list[dict], target: dict | None) -> int | None:
     return total
 
 
-def _check_self_verification(
-    tool_calls: list[dict], impl_event: dict | None
-) -> tuple[bool, bool | None, bool]:
-    """Return (self_verified, output_suggests_pass, runtime_install_required).
+def _check_self_verification(tool_calls: list[dict], impl_event: dict | None) -> SelfVerification:
+    """Implementation behind `self_verification` — see its docstring.
 
-    self_verified: agent ran a test command between last code edit and
-    IMPLEMENTATION_COMPLETE write.
+    `impl_event` is the LAST IMPLEMENTATION_COMPLETE write (the caller's
+    anchoring decision); None leaves the upper bound open (live run).
     output_suggests_pass: heuristic — no FAILED/error: in any test output.
     runtime_install_required: agent had to install a runtime (container gap).
     """
@@ -545,12 +602,12 @@ def _check_self_verification(
             test_outputs.append((e.get("part") or {}).get("state", {}).get("output") or "")
 
     if not test_outputs:
-        return False, None, runtime_install
+        return SelfVerification(False, None, runtime_install)
 
     all_pass = all(
         not _TEST_FAIL_RE.search(out) and not _ZERO_TESTS_RE.search(out) for out in test_outputs
     )
-    return True, all_pass, runtime_install
+    return SelfVerification(True, all_pass, runtime_install)
 
 
 def _tool_paths(e: dict) -> list[str]:
@@ -563,7 +620,16 @@ def _tool_paths(e: dict) -> list[str]:
     return [str(fp)] if fp else []
 
 
-def _write_chars(e: dict, pattern: re.Pattern) -> int:
+def _write_chars(e: dict, marker: Marker) -> int:
+    if e.get("type") == "assistant":  # claude Write/Edit block
+        for block in (e.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            inp = block.get("input") or {}
+            target = inp.get("file_path") or inp.get("path") or ""
+            if block.get("name") in _CLAUDE_WRITE_TOOLS and marker.path_re.search(str(target)):
+                return len(inp.get("content") or inp.get("new_string") or "")
+        return 0
     inp = _inp(e)
     tool = _tool_name(e)
     if tool == "write":
@@ -572,7 +638,9 @@ def _write_chars(e: dict, pattern: re.Pattern) -> int:
         return len(inp.get("newString") or "")
     if tool == "apply_patch":
         patch = inp.get("patchText") or inp.get("patch") or ""
-        return sum(len(body) for _, fp, body in parse_apply_patch(str(patch)) if pattern.search(fp))
+        return sum(
+            len(body) for _, fp, body in parse_apply_patch(str(patch)) if marker.path_re.search(fp)
+        )
     return 0
 
 
