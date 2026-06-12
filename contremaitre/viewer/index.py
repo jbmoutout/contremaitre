@@ -434,7 +434,7 @@ def _diffstat_pill(diffstat: dict[str, int] | None) -> str:
     dele = diffstat.get("deletions") or 0
     return (
         '<span class="score-pill">'
-        f'<b>{files}</b> file{"s" if files != 1 else ""} · '
+        f"<b>{files}</b> file{'s' if files != 1 else ''} · "
         f'<span style="color:var(--success)">+{ins}</span> '
         f'<span style="color:#F87171">−{dele}</span>'
         "</span>"
