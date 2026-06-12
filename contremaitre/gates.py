@@ -29,7 +29,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .diffscan import DiffScanResult, scan_diff
-from .evaluator import hard_gate_payload
 from .git_utils import GitRepo
 from .verdicts import diff_hash
 
@@ -87,6 +86,31 @@ def only_internal_changes(porcelain: str) -> bool:
         if not is_internal_path(path):
             return False
     return True
+
+
+def hard_gate_payload(
+    *,
+    diff_scan: DiffScanResult | None,
+    clean_worktree: bool,
+    diff_hash_matched: bool,
+    draft_only: bool = True,
+) -> dict[str, object]:
+    # `clean_worktree` is expected to hold trivially in normal flow because the
+    # orchestrator commits agent changes before this gate runs. Kept as a
+    # belt-and-suspenders check: if a downstream change ever moves the commit
+    # boundary or introduces post-commit edits, this fails loud.
+    checks = {
+        "diff_scan": diff_scan.passed if diff_scan else False,
+        "clean_worktree": clean_worktree,
+        "diff_hash_matched": diff_hash_matched,
+        "draft_only": draft_only,
+    }
+    return {
+        "passed": all(checks.values()),
+        "checks": checks,
+        "forbidden_files": diff_scan.forbidden_files if diff_scan else [],
+        "changed_files": diff_scan.changed_files if diff_scan else [],
+    }
 
 
 @dataclass(frozen=True)
