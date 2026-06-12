@@ -311,7 +311,7 @@ def _check_codex_auth(config: RunConfig) -> PreflightCheck:
     CLI tool (agent or SIM), so it no longer gates on `config.cli_tool` itself.
     """
 
-    from .cli_actor import _access_token_exp
+    from .cli_actor import _REFRESH_MARGIN_SECONDS, _access_token_exp
 
     auth = Path.home() / ".codex" / "auth.json"
     if not auth.exists():
@@ -320,16 +320,17 @@ def _check_codex_auth(config: RunConfig) -> PreflightCheck:
     if exp is None:
         return _warn("codex_auth", "codex access token present (opaque; expiry unknown)", {})
     remaining = exp - int(time.time())
-    if remaining <= 24 * 3600:
+    if remaining <= _REFRESH_MARGIN_SECONDS:
         # WARN, not FAIL: a near-expiry (or expired) token is RECOVERABLE — the
         # runner host-refreshes it in `CodexDriver.prepare_home` before each turn
         # (real refresh_token, host-side, never in a container) and hard-fails
         # there if it can't renew. Failing preflight would abort the run before
         # that refresh ever runs (preflight precedes actor setup), making the
         # recovery path unreachable.
+        human = f"~{remaining // 3600}h" if remaining >= 3600 else f"~{max(remaining, 0) // 60}m"
         return _warn(
             "codex_auth",
-            f"codex access token expires in ~{remaining // 3600}h; the runner will "
+            f"codex access token expires in {human}; the runner will "
             "attempt a host-side refresh before launch (run `codex login` if it can't).",
             {"remaining_s": remaining},
         )

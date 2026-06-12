@@ -105,6 +105,9 @@ class Orchestrator:
         # publication-gate path.
         self._last_sim_parsed: ParsedVerdict | None = None
         self._last_cli_review_reason: str | None = None
+        # Most recent per-tool CLI-review failure ("<tool>: <reason>"), used to
+        # surface a specific run-level reason instead of a generic message.
+        self._cli_review_last_error: str | None = None
 
     @property
     def _diff_base(self) -> str:
@@ -515,6 +518,7 @@ class Orchestrator:
             round_verdicts: list[tuple[str, str | None]] = []
             round_needs_revision = False
             round_reviewer_failed = False
+            self._cli_review_last_error = None
             all_required_changes: list[str] = []
 
             extras_dir = self.paths.run_dir / "extras" / f"cli_review_{cli_round:03d}"
@@ -566,8 +570,16 @@ class Orchestrator:
                     start_offset=sink_start_offset,
                 )
 
+                if markdown is None:
+                    # Hard failure: _run_one_cli_reviewer already emitted a
+                    # specific CLI_REVIEW_FAILED and recorded the reason.
+                    round_reviewer_failed = True
+                    round_verdicts.append((tool, None))
+                    continue
+
                 if not markdown:
                     round_reviewer_failed = True
+                    self._cli_review_last_error = f"{tool}: empty_output"
                     self._emit(
                         events.CLI_REVIEW_FAILED,
                         tool=tool,
@@ -645,9 +657,8 @@ class Orchestrator:
             last_round_verdicts = round_verdicts
 
             if round_reviewer_failed:
-                self._last_cli_review_reason = (
-                    "post-publish CLI review failed or produced no parseable verdict"
-                )
+                detail = self._cli_review_last_error or "no parseable verdict"
+                self._last_cli_review_reason = f"post-publish CLI review failed — {detail}"
                 self._post_cli_review_status(
                     worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
                 )
@@ -820,16 +831,22 @@ class Orchestrator:
         sink: Path,
         round_n: int,
         review_dir: Path,
-    ) -> str:
-        """Run one CLI reviewer tool in Docker for one round. Returns markdown or "".
+    ) -> str | None:
+        """Run one CLI reviewer tool in Docker for one round.
+
+        Returns the reviewer's markdown on success (may be an empty string if
+        the model genuinely produced nothing), or ``None`` on a hard failure —
+        in which case CLI_REVIEW_FAILED is already emitted with a specific
+        reason and that reason is stashed on ``self._cli_review_last_error`` for
+        run-level surfacing. The caller must distinguish ``None`` (failed, do
+        not re-log) from ``""`` (ran but empty).
 
         The reviewer sees only `/app:ro` plus the host-built `/review:ro`
-        bundle. GitHub credentials and PR side effects stay host-owned.
-        Failures are caught and emitted as CLI_REVIEW_FAILED events; the loop
-        continues without this tool's verdict.
+        bundle. GitHub credentials and PR side effects stay host-owned. The
+        loop continues without this tool's verdict.
         """
 
-        from .cli_actor import CliActorRunner as _CliActorRunner
+        from .cli_actor import ActorError, CliActorRunner as _CliActorRunner
 
         runner = _CliActorRunner(config=self.config, paths=self.paths, tool=tool)
         try:
@@ -840,14 +857,21 @@ class Orchestrator:
                 review_dir=review_dir,
             )
             return output.text
+        except ActorError as exc:
+            # Preflight/auth failures (e.g. token near expiry) carry a precise,
+            # human-readable message already — surface it verbatim, not as an
+            # opaque "docker_error".
+            reason = str(exc)
         except Exception as exc:
-            self._emit(
-                events.CLI_REVIEW_FAILED,
-                tool=tool,
-                reason=f"docker_error: {exc}",
-                round=round_n,
-            )
-            return ""
+            reason = f"docker_error: {exc}"
+        self._cli_review_last_error = f"{tool}: {reason}"
+        self._emit(
+            events.CLI_REVIEW_FAILED,
+            tool=tool,
+            reason=reason,
+            round=round_n,
+        )
+        return None
 
     def _write_cli_review_context(
         self,

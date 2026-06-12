@@ -303,6 +303,67 @@ class CliReviewRevisionGateTest(unittest.TestCase):
             )
         )
 
+    def test_cli_reviewer_actor_error_surfaces_verbatim_reason(self):
+        from contremaitre.actors import ActorError
+
+        orch, _worktree_git, _branch = self._prepared_orchestrator()
+        review_dir = orch.paths.run_dir / "extras" / "cli_review_001" / "input"
+        review_dir.mkdir(parents=True)
+        msg = "codex access token is near expiry and host auto-refresh did not renew it"
+
+        with mock.patch("contremaitre.cli_actor.CliActorRunner") as runner_cls:
+            runner_cls.return_value.cli_reviewer_turn.side_effect = ActorError(msg)
+            out = orch._run_one_cli_reviewer(
+                tool="codex",
+                prompt="review /review",
+                sink=orch.paths.codex_review_raw_export,
+                round_n=1,
+                review_dir=review_dir,
+            )
+
+        self.assertIsNone(out)
+        self.assertEqual(orch._cli_review_last_error, f"codex: {msg}")
+        failures = [
+            row
+            for row in self._read_jsonl(orch.paths.guardrail_events)
+            if row.get("event") == events.CLI_REVIEW_FAILED
+        ]
+        # Exactly one failure event, carrying the precise message — not an
+        # opaque "docker_error" wrapper, and no duplicate "empty_output".
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["reason"], msg)
+
+    def test_hard_failed_cli_reviewer_does_not_double_log_empty_output(self):
+        orch, worktree_git, branch = self._prepared_orchestrator()
+        outcome = self._published_outcome(orch, branch)
+
+        # None == hard failure already emitted by _run_one_cli_reviewer, which
+        # also records the specific reason on _cli_review_last_error.
+        def _fail(**_kw):
+            orch._cli_review_last_error = "codex: token near expiry"
+            return None
+
+        with (
+            mock.patch.object(orch, "_run_one_cli_reviewer", side_effect=_fail),
+            mock.patch.object(orch, "_agent_turn") as agent_turn,
+            mock.patch.object(orch, "_post_cli_review_status"),
+        ):
+            verdict = orch._run_cli_review_loop(
+                worktree_git=worktree_git,
+                branch=branch,
+                outcome=outcome,
+                actor=object(),
+            )
+
+        self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        agent_turn.assert_not_called()
+        guardrails = self._read_jsonl(orch.paths.guardrail_events)
+        self.assertFalse(
+            any(row.get("reason") == "empty_output" for row in guardrails),
+            "must not re-log empty_output when the reviewer already emitted a failure",
+        )
+        self.assertIn("token near expiry", orch._last_cli_review_reason)
+
     def test_unparseable_cli_reviewer_output_requires_human_without_revision(self):
         orch, worktree_git, branch = self._prepared_orchestrator()
         outcome = self._published_outcome(orch, branch)

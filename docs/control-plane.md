@@ -69,7 +69,7 @@ The codex access token is a ~10-day JWT, so the in-container credential outlives
 
 - **Neutered refresh token.** `~/.codex/auth.json` is copied into a per-run home with `tokens.refresh_token` overwritten by a dummy (`"x"`, `_NEUTERED_REFRESH_TOKEN`). codex's parser and refresh API both reject an *empty* refresh token, so it can't simply be dropped — but a valid access token in a writable home means codex never refreshes, so the dummy is inert. The real refresh token never enters a container.
 - **Re-seeded every turn.** codex can delete `auth.json` on a failed refresh, so the home (mounted RW — codex writes PATH / app-server / sessions) is re-seeded from the host each turn via `CodexDriver.prepare_home`.
-- **Host-side expiry gate.** If the access JWT has < 24h left (`_REFRESH_MARGIN_SECONDS`), the host triggers a *host-side* refresh (`codex login status`, no model call) before launch; if it doesn't renew, the run refuses rather than letting codex attempt an in-container refresh the neutered token would fail.
+- **Host-side expiry gate.** If the access JWT has less than `_REFRESH_MARGIN_SECONDS` (1h) left, the host triggers a *host-side* refresh (`codex login status`, no model call) before launch; if it doesn't renew, the run refuses rather than letting codex attempt an in-container refresh the neutered token would fail. The margin only needs to outlast one container's wall-clock (the 1800s agent turn is the longest) plus headroom — it deliberately sits well under the ~10-day JWT life so a still-valid token isn't rejected hours early.
 
 Preflight's `_check_codex_auth` confirms `~/.codex/auth.json` exists and isn't about to expire (codex CLI runs only).
 

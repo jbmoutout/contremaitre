@@ -86,9 +86,12 @@ from .models import RunConfig, RunPaths
 _NEUTERED_REFRESH_TOKEN = "x"
 
 # Refuse to run when the access JWT has less than this remaining — codex may
-# then try (and, with the neutered token, fail) to refresh mid-run. The token
-# is a ~10-day JWT, so this rarely fires.
-_REFRESH_MARGIN_SECONDS = 24 * 3600
+# then try (and, with the neutered token, fail) to refresh mid-run. This only
+# needs to outlast a single container's wall-clock (longest timeout is the
+# 1800s agent turn) plus headroom; codex doesn't proactively refresh a token
+# that stays valid for the whole run. Keep it well under the ~10-day JWT's life
+# so a perfectly usable token isn't rejected hours before it actually expires.
+_REFRESH_MARGIN_SECONDS = 3600
 
 # Env var carrying claude's headless OAuth token (from `claude setup-token`).
 _CLAUDE_OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
