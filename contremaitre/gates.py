@@ -20,8 +20,8 @@ It does NOT own:
   - the `HARD_GATES_CHECKED` telemetry. The emits legitimately diverge per call
     site (the revision path folds L1 into its `passed` and adds `context` / `round`
     / `failed_checks`), so each caller projects the event from its `L0GateResult`.
-  - the eval-artifact *schema*. `evaluate_l0` calls `gates.hard_gate_payload`
-    to build `.payload`; the dict shape stays where the eval reports live.
+  - the eval-artifact *schema*. `gates.hard_gate_payload` owns the L0 payload
+    shape; `evaluate_l0` calls it to build `.payload`.
 """
 
 from __future__ import annotations
