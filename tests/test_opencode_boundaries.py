@@ -11,7 +11,7 @@ from unittest.mock import patch
 from contremaitre import prompts
 from contremaitre.actors import build_docker_command
 from contremaitre.git_utils import GitRepo
-from contremaitre.models import ActorMode, PublishMode, RunConfig
+from contremaitre.models import ActorMode, DepsVolume, PublishMode, RunConfig
 from contremaitre.orchestrator import Orchestrator
 from contremaitre.paths import build_run_paths
 from contremaitre.publisher import GhPublisher
@@ -138,6 +138,63 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 role="sim",
             )
         return worktree
+
+    def _deps_mount_for_role(self, role: str, mount_mode: str) -> str | None:
+        """Return the `name:/app/path:MODE` deps-volume arg build_docker_command
+        emits for `role`, or None if no deps mount was added.
+        """
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": "k"}, clear=False),
+        ):
+            root = Path(tmp)
+            paths = build_run_paths(root / "runs", f"20260613-{root.name}")
+            paths.run_dir.mkdir(parents=True)
+            worktree = root / "worktree"
+            worktree.mkdir()
+            state = root / "state"
+            state.mkdir()
+            config = RunConfig(
+                repo=root,
+                base="main",
+                runs_root=root / "runs",
+                run_slug="t",
+                actor_mode=ActorMode.OPENCODE,
+                docker_image="img",
+                deps_volume=DepsVolume(
+                    name="vol-x",
+                    mount_path=".venv",
+                    runtime_env=(("VIRTUAL_ENV", "/app/.venv"),),
+                ),
+            )
+            cmd, _ = build_docker_command(
+                config=config,
+                paths=paths,
+                worktree=worktree,
+                state_dir=state,
+                mount_mode=mount_mode,
+                model="m",
+                prompt="p",
+                session_id=None,
+                extra_mounts=[],
+                role=role,
+            )
+        for token in cmd:
+            if token.startswith("vol-x:/app/.venv:"):
+                return token
+        return None
+
+    def test_deps_mount_agent_rw_sim_ro_review_none(self):
+        """Deps follow execution: agent gets a writable venv (self-verify),
+        the SIM gets read-only, the review role gets no deps mount at all
+        (keeps the reviewer prompt's "no deps" true). Worktree mount mode is
+        the agent's rw / the reviewers' ro, and the deps mode tracks it.
+        """
+
+        self.assertEqual(self._deps_mount_for_role("agent", "rw"), "vol-x:/app/.venv:rw")
+        self.assertEqual(self._deps_mount_for_role("sim", "ro"), "vol-x:/app/.venv:ro")
+        self.assertIsNone(self._deps_mount_for_role("review", "ro"))
 
     def test_ro_mount_precreates_opencode_json_mountpoint(self):
         # A codex-agent mix runs the opencode SIM with /app:ro and no opencode.json
