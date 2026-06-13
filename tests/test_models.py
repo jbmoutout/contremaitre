@@ -9,7 +9,13 @@ longer verified through each caller's private normalizer.
 
 from __future__ import annotations
 
-from contremaitre.models import ActorMode, ModelSpec, RunConfig, resolved_model_from_events
+from contremaitre.models import (
+    ActorMode,
+    ModelSpec,
+    RunConfig,
+    carries_live_credential,
+    resolved_model_from_events,
+)
 
 
 # --------------------------------------------------------------------------
@@ -187,3 +193,22 @@ def test_round_trip_through_dict_and_back():
         claude_effort="max",
     ).with_resolved("claude-opus-4-8")
     assert ModelSpec.from_record(original.to_dict()) == original
+
+
+# --------------------------------------------------------------------------
+# carries_live_credential — the one fact the egress posture turns on
+# --------------------------------------------------------------------------
+
+
+def test_carries_live_credential_only_codex():
+    # codex mounts a short-lived access token inside its container — the single
+    # fact that triggers the egress lock.
+    assert carries_live_credential("codex") is True
+
+
+def test_carries_live_credential_false_for_non_token_tools():
+    # claude's bearer stays on the host (cli_auth_proxy injects per request);
+    # opencode/fake hold no CLI token; "auto"/"none"/"" are unresolved reviewer
+    # choices, not credentialed tools.
+    for tool in ("claude", "opencode", "fake", "auto", "none", ""):
+        assert carries_live_credential(tool) is False

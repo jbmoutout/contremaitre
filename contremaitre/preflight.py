@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .jsonlog import write_json
-from .models import ActorMode, RunConfig, RunPaths, is_zen_model
+from .models import ActorMode, RunConfig, RunPaths, carries_live_credential, is_zen_model
 
 
 class PreflightError(RuntimeError):
@@ -213,7 +213,7 @@ def _check_readonly_mount(config: RunConfig) -> PreflightCheck:
 
 def _check_network_policy(config: RunConfig) -> PreflightCheck:
     active = _active_cli_tools(config)
-    codex_active = "codex" in active
+    codex_active = any(carries_live_credential(t) for t in active)
     claude_active = "claude" in active
     opencode_active = ActorMode.OPENCODE in {config.actor_mode, config.sim_actor_mode}
     # Only codex carries a token INSIDE its container, so only codex requires the

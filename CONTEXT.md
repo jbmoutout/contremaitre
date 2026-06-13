@@ -30,6 +30,15 @@ The model a run *actually* ran, as reported by the runtime's stream
 *is* the resolved model). Distinct from **requested** so two `claude default`
 runs that resolved to different models do not collide in grouping.
 
+**Egress posture**
+Whether a CLI tool's per-run container runs with **locked** egress (an internal
+docker network + an allowlisting https proxy as the sole exit) or **open**
+egress. It turns on one fact: does the tool hold a live in-container credential —
+codex yes (a short-lived access token in its home), claude/opencode/fake no
+(claude's bearer stays on the host, injected per request by `cli_auth_proxy`).
+Owned by `carries_live_credential` in `models.py`, the single source the four
+egress sites (provision / validate / enforce / flag-emit) read.
+
 **Run-signal predicate**
 A pure predicate over an actor's raw event stream that detects one of the
 harness filesystem contracts: the architecture-review card, the
