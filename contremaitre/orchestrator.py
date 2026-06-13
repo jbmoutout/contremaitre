@@ -227,7 +227,6 @@ class Orchestrator:
                 required_changes=last_required_changes,
                 sim_parsed=last_sim,
             )
-            self.sm.transition("session_done", f"WORK session round {review_round}")
             self._emit(events.WORK_SESSION_END, round=review_round, outcome=outcome)
 
             if not self._implementation_complete():
@@ -258,6 +257,8 @@ class Orchestrator:
                 emit_event=self._emit,
             )
             self._record_worktree_state(worktree_git, f"after-checks-round{review_round}")
+
+            self.sm.transition("session_done", f"WORK session round {review_round}")
 
             review_result = self._run_review(
                 actor=actor,
@@ -1030,10 +1031,7 @@ class Orchestrator:
 
         # All gates pass — commit the APPROVED transition before write/eval/
         # publish so the state machine reflects the real terminal state.
-        # `force` is correct here: `_publish_or_block` is the point-of-no-return,
-        # reached only after gates and checks pass; the call site guarantees the
-        # state machine is past the REVIEW→APPROVED seam.
-        self.sm.force(State.APPROVED, note="SIM approved — gates passed")
+        self.sm.transition("approved", "SIM approved — gates passed")
         # Write eval BEFORE publish so `_derive_pr_metadata` can read the
         # scorecard into the PR body. Safe because eval inputs (hard_gates,
         # checks, parsed) are all in scope here, and `reason` is unused

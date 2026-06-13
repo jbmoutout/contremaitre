@@ -351,6 +351,9 @@ class CliReviewRevisionGateTest(unittest.TestCase):
             return TerminalVerdict.PR_NEEDS_HUMAN
 
         publisher = SimpleNamespace(publish=mock.Mock(return_value=outcome))
+        # Prime the state machine to REVIEW so `transition("approved")` resolves.
+        orch.sm.transition("worktree_ready")
+        orch.sm.transition("session_done")
         with (
             mock.patch("contremaitre.orchestrator.make_publisher", return_value=publisher),
             mock.patch.object(orch, "_run_cli_review_loop", side_effect=cli_review_loop),
