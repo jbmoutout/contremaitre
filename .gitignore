@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.DS_Store
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -10,7 +11,7 @@ build/
 dist/
 *.egg-info/
 .contremaitre/runs/
-.contremaitre/defaults.toml
+.contremaitre/reports/
 
 .env
 
