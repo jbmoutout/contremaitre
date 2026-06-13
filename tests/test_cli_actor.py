@@ -1041,7 +1041,7 @@ class ClaudePrepareHomeTest(unittest.TestCase):
         # Verify the loaded content matches what cli_actor serves
         self.assertEqual(source, _CLAUDE_STATUSLINE_SCRIPT_BODY)
 
-        ns: dict = {}
+        ns: dict = {"__name__": "__notmain__"}
         exec(compile(source, "statusline.py", "exec"), ns)
 
         # _dict helper
