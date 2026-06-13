@@ -68,6 +68,7 @@ from .scaffolds import (
     SETTLED_RELPATH,
     derive_commit_message,
 )
+from .statemachine import StateMachine
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
 
 
@@ -90,7 +91,7 @@ class Orchestrator:
         self.paths = build_run_paths(config.runs_root, self.run_id)
         self.started = time.monotonic()
         self.turns = 0
-        self.trajectory: list[dict[str, object]] = []
+        self.sm = StateMachine(on_transition=self._on_sm_transition)
         self.no_progress_streak = 0
         self._last_progress_key: tuple[str, str] | None = None
         # SHA of `origin/<base>` captured at worktree creation, right
@@ -143,8 +144,8 @@ class Orchestrator:
         signal.signal(signal.SIGTERM, _on_sigterm)
         try:
             enforce_preflight(self.config, self.paths)
-            self._transition(State.INIT, "creating worktree")
             self._create_worktree(repo, branch)
+            self.sm.transition("worktree_ready", "creating worktree")
             self._ensure_pristine_deps_volume()
             self._provision_run_deps_volume()
             worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
@@ -153,6 +154,7 @@ class Orchestrator:
             return self._review_rounds(actor=actor, worktree_git=worktree_git, branch=branch)
         except Exception as exc:
             failure_kind = getattr(exc, "kind", None) if isinstance(exc, ActorError) else None
+            self.sm.force(State.FAILED, note=str(exc))
             self._emit(events.INFRA_FAILURE, error=repr(exc), kind=failure_kind)
             # Provider free-tier quota (opencode-zen `FreeUsageLimitError`) is
             # categorically not "infra" — the operator can't fix Docker /
@@ -219,7 +221,6 @@ class Orchestrator:
         last_sim: ParsedVerdict | None = None
 
         for review_round in range(1, self.config.caps.max_review_rounds + 1):
-            self._transition(State.WORK, f"WORK session round {review_round}")
             outcome = self._run_work_session(
                 actor=actor,
                 review_round=review_round,
@@ -257,6 +258,8 @@ class Orchestrator:
             )
             self._record_worktree_state(worktree_git, f"after-checks-round{review_round}")
 
+            self.sm.transition("session_done", f"WORK session round {review_round}")
+
             review_result = self._run_review(
                 actor=actor,
                 worktree_git=worktree_git,
@@ -273,6 +276,7 @@ class Orchestrator:
             parsed, current_hash = review_result
 
             if parsed.verdict == ReviewVerdict.NEEDS_HUMAN:
+                self.sm.transition("rejected", parsed.summary)
                 return self._terminal_no_pr(
                     TerminalVerdict.NO_PR_NEEDS_HUMAN,
                     parsed.summary,
@@ -282,6 +286,7 @@ class Orchestrator:
                 )
 
             if parsed.verdict == ReviewVerdict.CHANGES_REQUESTED:
+                self.sm.transition("needs_revision", f"SIM review round {review_round}")
                 last_required_changes = list(parsed.required_changes)
                 last_parsed = parsed
                 last_sim = self._last_sim_parsed
@@ -293,7 +298,9 @@ class Orchestrator:
                 )
                 continue
 
-            # APPROVED — drift check + hard gates + publish + CLI review loop
+            # APPROVED — drift check + hard gates + publish + CLI review loop.
+            # The `approved` transition fires inside `_publish_or_block` after
+            # gates/checks pass, not here.
             return self._publish_or_block(
                 worktree_git=worktree_git,
                 branch=branch,
@@ -390,7 +397,6 @@ class Orchestrator:
         settled_file: Path,
         review_round: int,
     ) -> tuple[ParsedVerdict, str] | None:
-        self._transition(State.REVIEW, f"SIM review round {review_round}")
         current_hash = diff_hash(worktree_git, self._diff_base)
         diff_file = self.paths.run_dir / f"review_diff_round{review_round}.diff"
         write_review_diff(worktree_git, self._diff_base, diff_file)
@@ -511,7 +517,6 @@ class Orchestrator:
         self._last_cli_review_reason = "post-publish CLI review did not reach LOOKS_GOOD"
 
         for cli_round in range(1, max_rounds + 1):
-            self._transition(State.APPROVED, f"CLI review round {cli_round}/{max_rounds}")
             round_verdicts: list[tuple[str, str | None]] = []
             round_needs_revision = False
             round_reviewer_failed = False
@@ -1024,6 +1029,9 @@ class Orchestrator:
                 sim_verdict=parsed,
             )
 
+        # All gates pass — commit the APPROVED transition before write/eval/
+        # publish so the state machine reflects the real terminal state.
+        self.sm.transition("approved", "SIM approved — gates passed")
         # Write eval BEFORE publish so `_derive_pr_metadata` can read the
         # scorecard into the PR body. Safe because eval inputs (hard_gates,
         # checks, parsed) are all in scope here, and `reason` is unused
@@ -1096,6 +1104,7 @@ class Orchestrator:
         reason: str,
         sim_verdict: ParsedVerdict | None,
     ) -> RunResult:
+        self.sm.force(State.NO_PR, note=reason)
         self._emit(
             events.PUBLICATION_BLOCKED,
             reason=reason,
@@ -1143,6 +1152,7 @@ class Orchestrator:
         checks: list[CheckResult] | None = None,
         sim_verdict: ParsedVerdict | None = None,
     ) -> RunResult:
+        self.sm.force(State.NO_PR, note=reason)
         record_publication(
             self.paths,
             PublishOutcome(
@@ -1227,7 +1237,7 @@ class Orchestrator:
             sim_review=sim_review,
             trajectory={
                 "turns": self.turns,
-                "states": self.trajectory,
+                "states": self.sm.trajectory,
                 "process_reliability": 1.0
                 if verdict == TerminalVerdict.READY_FOR_DRAFT_PR
                 else 0.5,
@@ -1343,10 +1353,17 @@ class Orchestrator:
 
         append_jsonl(self.paths.guardrail_events, {"event": event, **fields})
 
-    def _transition(self, state: State, note: str) -> None:
-        record = {"state": state.value, "note": note, "turns": self.turns}
-        self.trajectory.append(record)
-        append_jsonl(self.paths.timeline, record)
+    def _on_sm_transition(self, from_state: State, verb: str, note: str) -> None:
+        append_jsonl(
+            self.paths.timeline,
+            {
+                "from": from_state.value,
+                "state": self.sm.current.value,
+                "verb": verb,
+                "note": note,
+                "turns": self.turns,
+            },
+        )
 
     def _before_turn(self) -> None:
         self.turns += 1
@@ -1445,7 +1462,7 @@ class Orchestrator:
                 "recorded_cost_usd": RunArtifacts(self.paths).cost(),
             },
         )
-        write_json(self.paths.trajectory, {"states": self.trajectory})
+        write_json(self.paths.trajectory, {"states": self.sm.trajectory})
 
     def _ensure_pristine_deps_volume(self) -> None:
         """Populate the lockhash-keyed deps cache against the fresh worktree.
