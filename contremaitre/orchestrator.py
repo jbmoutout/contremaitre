@@ -32,7 +32,12 @@ from pathlib import Path
 from . import events, prompts
 from .actors import ActorError, ActorRunner, make_actor_runner
 from .checks import CheckResult, run_checks
-from .runtime_image import DepsInstallError, clone_deps_volume_for_run, ensure_deps_volume
+from .runtime_image import (
+    DepsInstallError,
+    assert_deps_offline,
+    clone_deps_volume_for_run,
+    ensure_deps_volume,
+)
 from .diffscan import DiffScanResult
 from .evaluator import (
     sim_review_summary,
@@ -150,6 +155,7 @@ class Orchestrator:
             self._create_worktree(repo, branch)
             self._ensure_pristine_deps_volume()
             self._provision_run_deps_volume()
+            self._assert_deps_offline()
             worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
             actor = make_actor_runner(config=self.config, paths=self.paths)
 
@@ -1527,6 +1533,54 @@ class Orchestrator:
             base_image=self.config.docker_image,
         )
         self.config = dataclasses.replace(self.config, deps_volume=per_run)
+
+    def _assert_deps_offline(self) -> None:
+        """Prove the check command (or ecosystem canary) passes on the
+        agent's network BEFORE the agent starts — fail fast on a doomed
+        run, record a soft signal otherwise.
+
+        Fatal only when the OPERATOR's check command fails under a LOCKED
+        network: that gate must pass to publish, and locked egress means
+        the agent can't fetch its way out, so the run would burn turns on
+        an unfixable environment. A failing canary, or any failure under
+        open egress, is emitted (not raised) — we never hard-block a run
+        on a heuristic we authored, and open egress leaves the agent room
+        to install at runtime.
+
+        Opencode-only for now: deps volumes are provisioned only in that
+        mode (`_ensure_pristine_deps_volume`). PR extending the deps mount
+        to CLI containers would widen this gate to match.
+        """
+
+        if self.config.actor_mode != ActorMode.OPENCODE:
+            return
+        result = assert_deps_offline(
+            worktree=self.paths.worktree,
+            base_image=self.config.docker_image,
+            docker_network=self.config.docker_network,
+            container_user=self.config.container_user,
+            deps_volume=self.config.deps_volume,
+            check_cmds=self.config.check_cmds,
+        )
+        if result is None:
+            return
+        self._emit(
+            events.DEPS_OFFLINE_ASSERT,
+            ok=result.ok,
+            source=result.source,
+            cmd=result.cmd,
+            network_locked=result.network is not None,
+            returncode=result.returncode,
+        )
+        if result.ok:
+            return
+        if result.source == "check_cmd" and result.network is not None:
+            raise RuntimeError(
+                "deps offline assert failed: the check command cannot pass under "
+                f"locked egress (rc={result.returncode}). The run would burn turns "
+                "on an environment the agent can't repair without network. "
+                f"Command: {result.cmd}\n{result.output}"
+            )
 
     def _cleanup_worktree(self) -> None:
         if not self.paths.worktree.name.startswith("contremaitre-"):

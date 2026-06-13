@@ -9,6 +9,8 @@ from contremaitre.models import DepsVolume
 from contremaitre.runtime_image import (
     _LOCKFILES,
     _detect,
+    _offline_assert_cmd,
+    assert_deps_offline,
     clone_deps_volume_for_run,
     ensure_deps_volume,
 )
@@ -107,6 +109,34 @@ class LockfileDetectionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(_detect(Path(tmp)))
 
+    def test_uv_runtime_env_pins_no_sync_and_canary(self):
+        """uv's runtime env must carry UV_NO_SYNC=1 so a runtime `uv run`
+        uses the warmed venv as-is instead of rebuilding the project (which
+        refetches the `setuptools` build backend — blocked under locked
+        egress). poetry, which has no such rebuild-on-run, must NOT carry it.
+        """
+
+        uv = next(lock for lock in _LOCKFILES if lock.name == "uv.lock")
+        self.assertEqual(dict(uv.runtime_env).get("UV_NO_SYNC"), "1")
+        self.assertEqual(uv.canary_cmd, "uv run python -c ''")
+        # requirements.lock shares the uv-run path, so shares the guard.
+        req = next(lock for lock in _LOCKFILES if lock.name == "requirements.lock")
+        self.assertEqual(dict(req.runtime_env).get("UV_NO_SYNC"), "1")
+        self.assertEqual(req.canary_cmd, "uv run python -c ''")
+        # poetry: no uv-run rebuild, so no UV_NO_SYNC and no uv canary.
+        poetry = next(lock for lock in _LOCKFILES if lock.name == "poetry.lock")
+        self.assertNotIn("UV_NO_SYNC", dict(poetry.runtime_env))
+        self.assertEqual(poetry.canary_cmd, "")
+
+    def test_only_uv_family_has_a_canary(self):
+        """Canaries exist only where they exercise the proven-broken
+        offline-run path (uv). Faking one for an ecosystem we can't test
+        would give false confidence — those rely on the operator's check.
+        """
+
+        with_canary = {lock.name for lock in _LOCKFILES if lock.canary_cmd}
+        self.assertEqual(with_canary, {"uv.lock", "requirements.lock"})
+
     def test_install_commands_do_not_bootstrap_tools(self):
         """The base image ships uv + poetry. If the install_cmd ever
         regresses to `pip install --quiet uv && …`, the install
@@ -158,8 +188,12 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         # at runtime, which also mounts at /app.
         self.assertRegex(joined, r"contremaitre-deps-test-project-uv-lock-[0-9a-f]+:/app/\.venv\b")
         self.assertIn("VIRTUAL_ENV=/app/.venv", cmd)
-        # Install command does NOT pip-install uv (it ships in the image).
-        self.assertIn("uv sync --frozen --no-install-project", cmd[-1])
+        # Full `uv sync --frozen` — NOT `--no-install-project`. The project
+        # must be installed at warm time (open egress can fetch the build
+        # backend); deferring it to a runtime `uv run` under locked egress
+        # was the setuptools wall. Guard the regression explicitly.
+        self.assertIn("uv sync --frozen", cmd[-1])
+        self.assertNotIn("--no-install-project", cmd[-1])
         self.assertNotIn("pip install --quiet uv", cmd[-1])
 
     def test_poetry_install_mounts_venv_and_sets_virtual_env(self):
@@ -332,6 +366,157 @@ class CloneDepsVolumeForRunTest(unittest.TestCase):
             any("cp -a /src/. /dst/" in arg for arg in copy_cmd),
             f"expected cp -a in copy_cmd, got {copy_cmd!r}",
         )
+
+
+class OfflineAssertCmdSelectionTest(unittest.TestCase):
+    """`_offline_assert_cmd` picks the right probe: operator check > canary > none."""
+
+    def test_check_cmds_win_joined_with_and(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # A uv.lock canary is available, but an explicit check command
+            # is the stronger signal and must win.
+            (repo / "uv.lock").write_text("", encoding="utf-8")
+            sel = _offline_assert_cmd(worktree=repo, check_cmds=("ruff check .", "pytest -q"))
+        self.assertEqual(sel, ("ruff check . && pytest -q", "check_cmd"))
+
+    def test_canary_fallback_when_no_check_cmd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "uv.lock").write_text("", encoding="utf-8")
+            sel = _offline_assert_cmd(worktree=repo, check_cmds=())
+        self.assertEqual(sel, ("uv run python -c ''", "canary"))
+
+    def test_none_when_no_check_cmd_and_no_canary(self):
+        # Node has no canary today → nothing to assert without a check cmd.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "package-lock.json").write_text("{}", encoding="utf-8")
+            self.assertIsNone(_offline_assert_cmd(worktree=repo, check_cmds=()))
+
+    def test_none_when_no_lockfile_and_no_check_cmd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(_offline_assert_cmd(worktree=Path(tmp), check_cmds=()))
+
+
+class AssertDepsOfflineTest(unittest.TestCase):
+    """`assert_deps_offline` builds an L1-sidecar-shaped probe on the
+    agent's network and reports pass/fail without deciding severity.
+    """
+
+    @staticmethod
+    def _proc(returncode=0, stdout="", stderr=""):
+        return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_mirrors_locked_network_and_mounts_deps_rw(self):
+        captured: dict[str, list[str]] = {}
+
+        def runner(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return self._proc(0)
+
+        vol = DepsVolume(
+            name="vol-x",
+            mount_path=".venv",
+            runtime_env=(("VIRTUAL_ENV", "/app/.venv"), ("UV_NO_SYNC", "1")),
+        )
+        res = assert_deps_offline(
+            worktree=Path("/wt"),
+            base_image="img",
+            docker_network="contremaitre-cli-egress",
+            container_user=None,
+            deps_volume=vol,
+            check_cmds=("pytest -q",),
+            runner=runner,
+        )
+        cmd = captured["cmd"]
+        joined = " ".join(cmd)
+        # Same network the agent faces — the whole point of the probe.
+        self.assertIn("--network", cmd)
+        self.assertIn("contremaitre-cli-egress", cmd)
+        # Deps volume RW at the cache path, runtime env passed through.
+        self.assertIn("vol-x:/app/.venv:rw", joined)
+        self.assertIn("VIRTUAL_ENV=/app/.venv", cmd)
+        self.assertIn("UV_NO_SYNC=1", cmd)
+        # `sh -c`, not `-lc` (login shell would reset PATH and drop the venv).
+        self.assertIn("sh", cmd)
+        self.assertEqual(cmd[-2], "-c")
+        self.assertNotIn("-lc", cmd)
+        self.assertEqual(cmd[-1], "pytest -q")
+        self.assertTrue(res.ok)
+        self.assertEqual(res.source, "check_cmd")
+        self.assertEqual(res.network, "contremaitre-cli-egress")
+
+    def test_open_egress_omits_network_flag_and_uses_canary(self):
+        captured: dict[str, list[str]] = {}
+
+        def runner(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return self._proc(0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "uv.lock").write_text("", encoding="utf-8")
+            res = assert_deps_offline(
+                worktree=Path(tmp),
+                base_image="img",
+                docker_network=None,
+                container_user=None,
+                deps_volume=None,
+                check_cmds=(),
+                runner=runner,
+            )
+        self.assertNotIn("--network", captured["cmd"])
+        self.assertEqual(res.source, "canary")
+        self.assertEqual(res.cmd, "uv run python -c ''")
+        self.assertIsNone(res.network)
+
+    def test_failure_maps_returncode_and_tails_output(self):
+        def runner(cmd, **kwargs):
+            return self._proc(returncode=1, stdout="build-out", stderr="setuptools missing")
+
+        res = assert_deps_offline(
+            worktree=Path("/wt"),
+            base_image="img",
+            docker_network="net",
+            container_user=None,
+            deps_volume=None,
+            check_cmds=("x",),
+            runner=runner,
+        )
+        self.assertFalse(res.ok)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("setuptools missing", res.output)
+
+    def test_returns_none_when_nothing_to_assert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "package-lock.json").write_text("{}", encoding="utf-8")
+            res = assert_deps_offline(
+                worktree=Path(tmp),
+                base_image="img",
+                docker_network="net",
+                container_user=None,
+                deps_volume=None,
+                check_cmds=(),
+                runner=lambda *a, **k: self._proc(0),
+            )
+        self.assertIsNone(res)
+
+    def test_container_did_not_complete_is_not_ok(self):
+        def runner(cmd, **kwargs):
+            raise OSError("docker daemon gone")
+
+        res = assert_deps_offline(
+            worktree=Path("/wt"),
+            base_image="img",
+            docker_network="net",
+            container_user=None,
+            deps_volume=None,
+            check_cmds=("x",),
+            runner=runner,
+        )
+        self.assertFalse(res.ok)
+        self.assertEqual(res.returncode, -1)
+        self.assertIn("did not complete", res.output)
 
 
 if __name__ == "__main__":

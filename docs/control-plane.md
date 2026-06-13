@@ -45,7 +45,7 @@ Audience: humans modifying the orchestrator, and LLMs that need to reason about 
 └───────────────────────────────────────────────┘
 ```
 
-Containers are launched detached (`docker run -d`) and labeled with `contremaitre.run-id=<id>` and `contremaitre.role=<agent|sim|review|check|deps-install|deps-clone>` so `_stop_run_containers` + `contremaitre cleanup` can sweep them by label. The diagram above shows the `opencode` runtime; a `codex` role reuses the same role labels, mounts, and lifecycle — only the in-container binary and its egress posture differ ([Actor runtimes](#actor-runtimes)).
+Containers are launched detached (`docker run -d`) and labeled with `contremaitre.run-id=<id>` and `contremaitre.role=<agent|sim|review|check|deps-install|deps-clone|deps-assert>` so `_stop_run_containers` + `contremaitre cleanup` can sweep them by label. The diagram above shows the `opencode` runtime; a `codex` role reuses the same role labels, mounts, and lifecycle — only the in-container binary and its egress posture differ ([Actor runtimes](#actor-runtimes)).
 
 ## Actor runtimes
 
@@ -292,7 +292,7 @@ INIT  ──►  WORK  ──►  REVIEW  ──►  APPROVED  ──►  (hard 
                               FAILED
 ```
 
-- **INIT** — worktree creation, deps volume provisioning, preflight. Transition to WORK on success.
+- **INIT** — worktree creation, deps volume provisioning, the offline-readiness assert (`assert_deps_offline`), preflight. Transition to WORK on success.
 - **WORK** — one multi-turn opencode session. Terminates on `.contremaitre/IMPLEMENTATION_COMPLETE` (harness gate), cap trip, or `max_turns`.
 - **REVIEW** — single-shot reviewer container (role=review) reads `/review/diff.patch` + `/review/SETTLED_DESIGN.md`, emits JSON verdict.
 - **APPROVED** — runs hard gates, then the publisher. Success → `READY_FOR_DRAFT_PR`.
@@ -504,8 +504,8 @@ Each variant runs a smoke check (`rustc --version`, `go version`) at build time 
 | `pnpm-lock.yaml` | `corepack pnpm install --frozen-lockfile` | `node_modules` | — |
 | `yarn.lock` | `yarn install --frozen-lockfile --non-interactive` | `node_modules` | — |
 | `poetry.lock` | `POETRY_VIRTUALENVS_IN_PROJECT=true poetry install --no-root` | `.venv` | `VIRTUAL_ENV=/app/.venv` |
-| `uv.lock` | `uv sync --frozen --no-install-project` | `.venv` | `VIRTUAL_ENV=/app/.venv` |
-| `requirements.lock` | `uv venv .venv && uv pip install --no-deps -r requirements.lock` | `.venv` | `VIRTUAL_ENV=/app/.venv` |
+| `uv.lock` | `uv sync --frozen` | `.venv` | `VIRTUAL_ENV=/app/.venv`, `UV_NO_SYNC=1` |
+| `requirements.lock` | `uv venv .venv && uv pip install --no-deps -r requirements.lock` | `.venv` | `VIRTUAL_ENV=/app/.venv`, `UV_NO_SYNC=1` |
 | `Cargo.lock` | `cargo fetch` | `.cargo-cache` | `CARGO_HOME=/app/.cargo-cache` |
 | `go.sum` | `go mod download` | `.go-mod-cache` | `GOPATH=/app/.go-mod-cache` |
 
@@ -515,12 +515,14 @@ Each variant runs a smoke check (`rustc --version`, `go version`) at build time 
 
 `_prune_stale_deps_volumes` is scoped by `<project>-<lockfile>` so projects don't evict each other's caches when their lockfiles bump. Deps install failures raise `DepsInstallError`; the orchestrator hard-fails the run rather than silently degrade.
 
+**Warm/run parity (`assert_deps_offline`).** The warm container runs with **open egress** (it must fetch); the agent runs under the **codex lock** (or open, for opencode/claude). That asymmetry hid a gap: `uv.lock`'s old `--no-install-project` cached deps but not the build backend (`setuptools>=68`) that a runtime `uv run` needs to install the project — fine at warm time, but blocked under the lock, so the agent hit it mid-run. Two parts close it: (1) the recipe installs the project at warm time (`uv sync --frozen`) and pins `UV_NO_SYNC=1` so runtime `uv run` won't rebuild; (2) after the per-run clone, the orchestrator runs the operator's `--check-cmd` (joined with `&&`) — or, with none set, the ecosystem **canary** (`uv run python -c ''` for the uv family; none for Node/Rust/Go) — in an L1-shaped sidecar **on the same network the agent will face**. It emits `DEPS_OFFLINE_ASSERT`. Severity is asymmetric and deliberate: a failing **check command under a locked network** hard-fails the run (the publish gate can't pass and the agent can't fetch its way out); a failing **canary**, or any failure under open egress, is recorded but not raised — the orchestrator never hard-blocks on a heuristic it authored.
+
 ## Lifecycle / cleanup
 
 Per opencode-mode run, the orchestrator owns these external artifacts beyond the run directory:
 
 - **Worktree** `/tmp/contremaitre-<run-id>/` — removed by `_cleanup_worktree` in `finally`.
-- **Detached containers** labeled `contremaitre.run-id=<id>` — agent / SIM / review / check / deps-install / deps-clone. `--rm` for one-shot turns, explicit `docker rm -f` after `docker wait` for streamed-log ones. `_stop_run_containers` runs in `finally` and on SIGTERM, scans by label, and stops anything still alive.
+- **Detached containers** labeled `contremaitre.run-id=<id>` — agent / SIM / review / check / deps-install / deps-clone / deps-assert. `--rm` for one-shot turns (deps-install / deps-clone / deps-assert are synchronous `--rm` one-shots), explicit `docker rm -f` after `docker wait` for streamed-log ones. `_stop_run_containers` runs in `finally` and on SIGTERM, scans by label, and stops anything still alive.
 - **Per-run deps volume** `contremaitre-run-<run-id>-deps` — removed by `_remove_run_volumes` in `_cleanup_worktree`'s `finally`.
 - **Pristine deps volumes** — kept across runs by design (avoids the 60–90s install re-cost). Same-project + same-lockfile-kind volumes with stale digests are pruned automatically after a fresh install lands.
 - **Local clone cache** `~/.cache/contremaitre/<host>-<owner>-<repo>/` — kept across runs; `git fetch origin <base>` for freshness on every run.
