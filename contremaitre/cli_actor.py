@@ -79,6 +79,7 @@ from . import events
 from .actors import ActorError, ActorOutput, _run_detached_container
 from .jsonlog import append_jsonl, append_transcript
 from .models import RunConfig, RunPaths
+from .runtime_image import deps_mount_mode
 
 # codex REQUIRES tokens.refresh_token present and non-empty (parser + refresh
 # API both reject otherwise), so we neuter rather than drop it. Inert in
@@ -1225,6 +1226,19 @@ class CliActorRunner:
             "-v",
             f"{self.worktree}:/app:{mount_mode}",
         ]
+        # Deps volume, role-aware (deps_mount_mode): the agent gets a
+        # writable warmed venv so it can self-verify (`uv run pytest`) —
+        # under codex's locked egress that's the ONLY way it can run tests;
+        # the SIM gets read-only; review / cli_review get no mount, keeping
+        # them deps-free (their prompt says so). The volume holds only
+        # cached public packages in a discardable per-run clone, so mounting
+        # it into a locked codex container adds nothing exfiltratable.
+        deps_mode = deps_mount_mode(role, mount_mode)
+        if self.config.deps_volume and deps_mode:
+            dv = self.config.deps_volume
+            cmd += ["-v", f"{dv.name}:/app/{dv.mount_path}:{deps_mode}"]
+            for key, value in dv.runtime_env:
+                cmd += ["-e", f"{key}={value}"]
         for host_path, container_path, mode in extra_mounts:
             cmd += ["-v", f"{host_path}:{container_path}:{mode}"]
         for name in self.driver.container_env_names():

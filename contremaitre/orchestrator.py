@@ -1487,12 +1487,15 @@ class Orchestrator:
         months-stale snapshot, silently no-op'ing when the lockfile was
         newly added upstream.
 
-        Skipped in fake-mode tests (no docker involved). DepsInstallError
-        propagates: continuing without deps makes L1 checks look like
-        real failures when the underlying issue is an install gap.
+        Runs for every real runtime (opencode AND cli): a codex agent under
+        locked egress can't fetch deps mid-run, so without a warmed volume
+        it can't self-verify at all; a claude agent would otherwise rebuild
+        the venv from PyPI every turn. Only fake mode (no docker) skips.
+        DepsInstallError propagates: continuing without deps makes L1 checks
+        look like real failures when the underlying issue is an install gap.
         """
 
-        if self.config.actor_mode != ActorMode.OPENCODE:
+        if self.config.actor_mode == ActorMode.FAKE:
             return
         try:
             handle = ensure_deps_volume(
@@ -1547,12 +1550,13 @@ class Orchestrator:
         on a heuristic we authored, and open egress leaves the agent room
         to install at runtime.
 
-        Opencode-only for now: deps volumes are provisioned only in that
-        mode (`_ensure_pristine_deps_volume`). PR extending the deps mount
-        to CLI containers would widen this gate to match.
+        Runs for every real runtime (opencode AND cli) — the assert mirrors
+        `config.docker_network`, so for a codex agent it probes under the
+        locked egress, catching exactly the "can't fetch the build backend"
+        wall that mode is prone to. Only fake mode skips.
         """
 
-        if self.config.actor_mode != ActorMode.OPENCODE:
+        if self.config.actor_mode == ActorMode.FAKE:
             return
         result = assert_deps_offline(
             worktree=self.paths.worktree,

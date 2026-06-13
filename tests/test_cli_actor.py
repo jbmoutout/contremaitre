@@ -235,6 +235,76 @@ class BuildCommandTest(unittest.TestCase):
             self.assertIn("HTTPS_PROXY", cmd)
             self.assertNotIn("http://egress-proxy:3128", joined)
 
+    def _deps_arg(self, role: str, mount_mode: str) -> str | None:
+        """The `vol:/app/.venv:MODE` deps arg `_build_command` emits for a
+        CLI role, or None if no deps mount was added.
+        """
+        from contremaitre.models import DepsVolume
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, _ = _make_runner(
+                Path(tmp),
+                docker_network="cmtr-int",
+                https_proxy="http://p:3128",
+                deps_volume=DepsVolume(
+                    name="vol-x",
+                    mount_path=".venv",
+                    runtime_env=(("VIRTUAL_ENV", "/app/.venv"), ("UV_NO_SYNC", "1")),
+                ),
+            )
+            cmd = runner._build_command(
+                prompt="p",
+                home=runner.agent_home,
+                session_id=None,
+                model="m",
+                mount_mode=mount_mode,
+                role=role,
+                extra_mounts=(),
+            )
+        for token in cmd:
+            if token.startswith("vol-x:/app/.venv:"):
+                return token
+        return None
+
+    def test_deps_mount_agent_rw_sim_ro_reviewers_none(self):
+        """CLI deps follow execution, same policy as opencode: the agent gets
+        a writable warmed venv (the only way a codex agent can self-verify
+        under locked egress), the SIM read-only, and review / cli_review get
+        no deps mount — keeping them deps-free per their prompt.
+        """
+
+        self.assertEqual(self._deps_arg("agent", "rw"), "vol-x:/app/.venv:rw")
+        self.assertEqual(self._deps_arg("sim", "ro"), "vol-x:/app/.venv:ro")
+        self.assertIsNone(self._deps_arg("review", "ro"))
+        self.assertIsNone(self._deps_arg("cli_review", "ro"))
+
+    def test_deps_runtime_env_passed_for_agent(self):
+        """The agent's deps mount carries the runtime env (VIRTUAL_ENV,
+        UV_NO_SYNC) so `uv run` resolves the warmed venv offline.
+        """
+        from contremaitre.models import DepsVolume
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, _ = _make_runner(
+                Path(tmp),
+                deps_volume=DepsVolume(
+                    name="vol-x",
+                    mount_path=".venv",
+                    runtime_env=(("VIRTUAL_ENV", "/app/.venv"), ("UV_NO_SYNC", "1")),
+                ),
+            )
+            cmd = runner._build_command(
+                prompt="p",
+                home=runner.agent_home,
+                session_id=None,
+                model="m",
+                mount_mode="rw",
+                role="agent",
+                extra_mounts=(),
+            )
+        self.assertIn("VIRTUAL_ENV=/app/.venv", cmd)
+        self.assertIn("UV_NO_SYNC=1", cmd)
+
     def test_resume_turn_places_opts_before_subcommand(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner, _ = _make_runner(
