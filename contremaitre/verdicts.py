@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -16,40 +15,55 @@ class VerdictParseError(ValueError):
     pass
 
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+def _balanced_json_objects(raw: str) -> list[str]:
+    """Yield every top-level balanced JSON object substring in `raw`, in order.
+
+    Uses the stdlib decoder's `raw_decode` at each `{`: a brace that doesn't
+    begin a parseable object (e.g. prose like ``{agent, sim}`` or
+    ``{"codex","auto"}``) is skipped rather than mistaken for the boundary of
+    the real object. Brace-counting alone can't do this — it can't tell a JSON
+    object from a set/dict literal mentioned in prose.
+    """
+
+    decoder = json.JSONDecoder()
+    objects: list[str] = []
+    idx = 0
+    while True:
+        start = raw.find("{", idx)
+        if start == -1:
+            return objects
+        try:
+            obj, end = decoder.raw_decode(raw, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(obj, dict):
+            objects.append(raw[start:end])
+        idx = end if end > start else start + 1
 
 
 def _extract_json_object(raw: str) -> str | None:
     """Return the JSON object embedded in `raw`.
 
-    LLM outputs commonly wrap structured JSON in markdown fences or leading
-    prose. We try, in order:
-
-      1. raw stripped (strict path — preserves prior behavior when the SIM
-         emits clean JSON);
-      2. content of the first ```json / ``` fenced block;
-      3. the substring from the first `{` to the matching last `}`.
+    LLM judges commonly emit reasoning prose and then the verdict object. That
+    prose routinely contains inline braces (set/dict literals like
+    ``{agent, sim}``, ``{"codex","auto"}``), so spanning from the first `{` to
+    the last `}` slices garbage. Instead we scan for every *parseable* balanced
+    object and prefer the one that actually carries a ``verdict`` key, falling
+    back to the last object emitted (the judge's final word).
 
     Return `None` if no candidate is found. The caller still runs the strict
     field/type checks on whatever we return.
     """
 
-    stripped = raw.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
-        return stripped
+    objects = _balanced_json_objects(raw)
+    if not objects:
+        return None
 
-    match = _FENCE_RE.search(raw)
-    if match:
-        candidate = match.group(1).strip()
-        if candidate:
+    for candidate in reversed(objects):
+        if '"verdict"' in candidate and "verdict" in json.loads(candidate):
             return candidate
-
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start != -1 and end > start:
-        return raw[start : end + 1]
-
-    return None
+    return objects[-1]
 
 
 def parse_sim_verdict(raw: str) -> ParsedVerdict:
