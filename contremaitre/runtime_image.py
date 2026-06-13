@@ -8,11 +8,12 @@ First run against a given lockfile populates the volume by running the
 install command in a one-shot container; subsequent runs reuse it
 verbatim. Different lockfile → different digest → fresh volume.
 
-The pristine cache is cloned into a per-run RW volume (so one run's
-mid-run `npm install` can't leak into the next); the clone is what
-agent / SIM / check containers mount. If the agent genuinely needs a
-new dep, it edits the manifest + lockfile; the next run sees a new
-digest and populates a fresh volume.
+The pristine cache is cloned into a per-run volume (so one run's mid-run
+`npm install` can't leak into the next). The clone is mounted role-aware
+(`deps_mount_mode`): the agent gets it RW (to self-verify / install), the
+SIM RO, and review roles not at all — deps follow execution. If the agent
+genuinely needs a new dep, it edits the manifest + lockfile; the next run
+sees a new digest and populates a fresh volume.
 
 Supported ecosystems are the ones with a deterministic lockfile +
 non-interactive install command. Unsupported targets get `None` —
@@ -196,6 +197,33 @@ def _recipe_tag(lockfile: _Lockfile) -> str:
 
 def _safe_name(lockfile_name: str) -> str:
     return lockfile_name.replace(".", "-")
+
+
+# Roles that read/reason over the diff but never execute the project's code.
+# Test execution is a separate deterministic gate (the agent's self-verify +
+# the L1 `check` sidecar), never an LLM reviewer's job.
+_NON_EXECUTING_ROLES = frozenset({"review", "cli_review"})
+
+
+def deps_mount_mode(role: str, worktree_mount_mode: str) -> str | None:
+    """Deps-volume mount mode for an actor role, or None to skip the mount.
+
+    Deps follow execution: only the **agent** runs the project's tests, so
+    only it needs a writable venv. The **sim** reasons over the diff with a
+    read-only venv; the **review / cli_review** roles never touch deps —
+    keeping them deps-free preserves "hard gates are deterministic, LLM
+    judgement never gates publication" and keeps the cli_reviewer prompt's
+    "(no deps…)" line literally true.
+
+    For executing/reasoning roles the deps mount mirrors the worktree mode
+    (agent → rw, sim → ro), so it never grants more write access than the
+    worktree it shadows. Single home for both `actors.py` (opencode) and
+    `cli_actor.py` (codex/claude) so the policy can't drift between them.
+    """
+
+    if role in _NON_EXECUTING_ROLES:
+        return None
+    return worktree_mount_mode
 
 
 def ensure_deps_volume(

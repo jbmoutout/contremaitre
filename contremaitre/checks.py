@@ -1,10 +1,14 @@
 """Executable check runner for PR-eval L1.
 
-In OPENCODE mode each check runs in a one-shot sidecar container that
-mounts the agent's worktree + per-run node_modules volume — the host
-worktree has no project deps, so running `npx tsc --noEmit` on the host
-hangs until the 600s timeout. The sidecar reuses the same image the
-agent ran in, so the check sees the same toolchain.
+Every real runtime (opencode AND cli) runs each check in a one-shot
+sidecar container that mounts the agent's worktree + per-run deps volume
+and reuses the agent's image — so the check sees the *same* toolchain the
+agent did, hermetically. The host worktree has no project deps, so
+running `npx tsc --noEmit` / `uv run pytest` on the host hangs or fails;
+and the sidecar joins the agent's `docker_network`, so for a codex run
+the gate executes under the same locked egress the agent faced (the deps
+volume makes that work offline). The sidecar is credential-free (worktree
++ deps + network only — no token/home), so it's safe under the lock.
 
 In FAKE mode (fixture smoke runs) the check runs on the host directly:
 fake mode never touches docker, and forcing it to here would make the
@@ -53,7 +57,9 @@ def run_checks(
     """
 
     results: list[CheckResult] = []
-    in_container = config.actor_mode == ActorMode.OPENCODE
+    # Every real runtime runs the gate in the hermetic sidecar (worktree +
+    # deps volume + the agent's network); only FAKE (no docker) runs on host.
+    in_container = config.actor_mode != ActorMode.FAKE
     for index, cmd in enumerate(config.check_cmds):
         if emit_event is not None:
             emit_event(events.CHECK_STARTED, cmd=cmd, index=index, in_container=in_container)

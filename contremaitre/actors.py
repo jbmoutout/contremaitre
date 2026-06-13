@@ -32,6 +32,7 @@ from typing import Protocol
 from . import events
 from .jsonlog import append_jsonl, append_text_event, append_transcript, read_jsonl
 from .models import ActorMode, RunConfig, RunPaths, is_zen_model
+from .runtime_image import deps_mount_mode
 
 
 class ActorError(RuntimeError):
@@ -615,16 +616,17 @@ def build_docker_command(
             f"{worktree}:/app:{mount_mode}",
         ]
     )
-    if config.deps_volume:
-        # Lockhash-keyed deps volume, RW so the agent can install
-        # mid-run when the design genuinely needs a new dep (test
-        # framework, lint plugin, etc.). The trade-off: parallel runs
-        # against the same lockfile share the volume and can race on
-        # writes. Acceptable for solo-operator sequential workflow;
-        # revisit if multi-run-in-parallel becomes a real pattern.
-        # Mounted over the worktree bind at /app/{mount_path}; the
-        # worktree's own copy of that directory (if any) is shadowed.
-        cmd.extend(["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:rw"])
+    deps_mode = deps_mount_mode(role, mount_mode)
+    if config.deps_volume and deps_mode:
+        # Lockhash-keyed deps volume, mounted over the worktree bind at
+        # /app/{mount_path} (shadowing the worktree's own copy, if any).
+        # Mode follows the role (deps_mount_mode): the agent gets RW so it
+        # can install mid-run when the design needs a new dep; the SIM gets
+        # RO; review roles get no mount at all. The per-run volume is a
+        # discardable clone, so the agent's writes never leak across runs.
+        cmd.extend(
+            ["-v", f"{config.deps_volume.name}:/app/{config.deps_volume.mount_path}:{deps_mode}"]
+        )
         for key, value in config.deps_volume.runtime_env:
             cmd.extend(["-e", f"{key}={value}"])
     if config.opencode_config:

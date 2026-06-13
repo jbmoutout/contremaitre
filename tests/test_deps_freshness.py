@@ -78,6 +78,25 @@ class DepsFreshnessTest(unittest.TestCase):
                 orch._ensure_pristine_deps_volume()
             fake.assert_not_called()
 
+    def test_ensure_pristine_provisions_in_cli_mode(self):
+        """CLI mode (codex/claude agent) must provision deps too — a codex
+        agent under locked egress can't fetch a runtime, so it needs the
+        warmed volume to self-verify. Only FAKE skips.
+        """
+
+        import dataclasses
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "cache-clone"
+            repo.mkdir()
+            runs = root / "runs"
+            orch = self._make_orch(repo=repo, runs_root=runs)
+            orch.config = dataclasses.replace(orch.config, actor_mode=ActorMode.CLI)
+            with patch("contremaitre.orchestrator.ensure_deps_volume", return_value=None) as fake:
+                orch._ensure_pristine_deps_volume()
+            fake.assert_called_once()
+
     def test_ensure_pristine_stores_handle_on_config(self):
         """Successful detection must update `config.deps_volume` so
         downstream actor/check mounts pick up the volume.
