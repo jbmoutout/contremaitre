@@ -12,8 +12,6 @@ from unittest.mock import patch
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
     _CLAUDE_OAUTH_ENV,
-    _CLAUDE_STATUSLINE_METER_SCRIPT_BODY,
-    _CLAUDE_STATUSLINE_SCRIPT_BODY,
     CliActorRunner,
     _access_token_exp,
     _claude_effort_arg,
@@ -1018,6 +1016,14 @@ class ClaudePrepareHomeTest(unittest.TestCase):
             self.assertNotIn(_CLAUDE_OAUTH_ENV, script)
             self.assertIn("used_percentage", meter)
             self.assertNotIn(_CLAUDE_OAUTH_ENV, meter)
+            # Container-fidelity guard: prepare_home must write the exact on-disk,
+            # version-controlled script bytes into the home (this is what the
+            # container executes), not some drifted copy.
+            scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
+            self.assertEqual(script, (scripts_dir / "statusline.py").read_text(encoding="utf-8"))
+            self.assertEqual(
+                meter, (scripts_dir / "statusline_meter.py").read_text(encoding="utf-8")
+            )
             self.assertTrue(global_config["hasCompletedOnboarding"])
             self.assertTrue(global_config["projects"]["/app"]["hasTrustDialogAccepted"])
             self.assertNotIn(_CLAUDE_OAUTH_ENV, json.dumps(global_config))
@@ -1037,9 +1043,6 @@ class ClaudePrepareHomeTest(unittest.TestCase):
 
         scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
         source = (scripts_dir / "statusline.py").read_text(encoding="utf-8")
-
-        # Verify the loaded content matches what cli_actor serves
-        self.assertEqual(source, _CLAUDE_STATUSLINE_SCRIPT_BODY)
 
         ns: dict = {"__name__": "__notmain__"}
         exec(compile(source, "statusline.py", "exec"), ns)
@@ -1095,14 +1098,15 @@ class ClaudePrepareHomeTest(unittest.TestCase):
                 self.assertEqual(snap["session_id"], "sess-abc123")
                 self.assertEqual(snap["model"]["id"], "claude-sonnet-4-6")
                 self.assertEqual(snap["rate_limits"]["five_hour"]["used_percentage"], 45.0)
-                self.assertNotIn("context_window", snap["cost"])
+                # context_window is its own top-level snapshot key, carried verbatim.
+                self.assertEqual(snap["context_window"], {"used": 500, "max": 10000})
                 self.assertIn("recorded_at", snap)
 
                 # One-rate-limit scenario: only five_hour has data.
-                three_hour = 45.0
+                five_hour_pct = 45.0
                 sample2 = {
                     "rate_limits": {
-                        "five_hour": {"used_percentage": three_hour, "max": 100.0},
+                        "five_hour": {"used_percentage": five_hour_pct, "max": 100.0},
                     },
                 }
                 out_file2 = _os.path.join(tmpdir, "statusline2.jsonl")
@@ -1129,14 +1133,6 @@ class ClaudePrepareHomeTest(unittest.TestCase):
                     _os.environ["CONTREMAITRE_CLAUDE_STATUSLINE_OUT"] = _old_out_env
                 else:
                     _os.environ.pop("CONTREMAITRE_CLAUDE_STATUSLINE_OUT", None)
-
-    def test_statusline_meter_file_content_fidelity(self):
-        from pathlib import Path
-
-        scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
-        meter_source = (scripts_dir / "statusline_meter.py").read_text(encoding="utf-8")
-        self.assertEqual(meter_source, _CLAUDE_STATUSLINE_METER_SCRIPT_BODY)
-        compile(meter_source, "statusline_meter.py", "exec")
 
     def test_reseed_preserves_existing_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:

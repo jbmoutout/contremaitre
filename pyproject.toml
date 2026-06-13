@@ -28,7 +28,9 @@ dev = ["pytest>=8", "rich>=13", "ruff>=0.6"]
 include = ["contremaitre*"]
 
 [tool.setuptools.package-data]
-contremaitre = ["Dockerfile", "Dockerfile.*", "prompts/*.md", "scripts/*.py", "*.conf"]
+# scripts/*.py are real modules of the contremaitre.scripts package (it has an
+# __init__.py), so setuptools collects them automatically — no package-data needed.
+contremaitre = ["Dockerfile", "Dockerfile.*", "prompts/*.md", "*.conf"]
 
 [tool.ruff]
 line-length = 100
