@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from .envfile import load_dotenv_defaults
 from .fixture import init_fixture
-from .models import ActorMode, Caps, ModelSpec, PublishMode, RunConfig
+from .models import ActorMode, Caps, ModelSpec, PublishMode, RunConfig, carries_live_credential
 from .orchestrator import run
 from .paths import slugify
 from .preflight import _image_exists, freshness_row, run_preflight
@@ -679,15 +679,20 @@ def _active_codex_roles(args: argparse.Namespace) -> bool:
     codex role is what triggers the locked egress. claude carries no in-container
     credential — the host auth-inject proxy (`cli_auth_proxy`) adds the bearer —
     so claude roles need no lock and run open egress. `auto` reviewer is treated
-    as possibly-codex (it picks the cross-family tool, which is codex when the
-    agent is claude); over-provisioning the lock is harmless because claude
-    containers ignore the internal network anyway.
+    as possibly-codex: it is unresolved at provision time (this walker runs on
+    the raw `args`, before any reviewer tool is chosen), so the lock is
+    over-provisioned — harmless because claude containers ignore the internal
+    network anyway.
     """
 
     agent_name = getattr(args, "agent", "fake")
     sim_name = getattr(args, "sim", None) or agent_name
     reviewer = getattr(args, "cli_reviewer", "none")
-    return "codex" in {agent_name, sim_name} or reviewer in {"codex", "auto"}
+    return (
+        any(carries_live_credential(t) for t in (agent_name, sim_name))
+        or carries_live_credential(reviewer)
+        or reviewer == "auto"
+    )
 
 
 def _cli_egress_is_auto(args: argparse.Namespace) -> bool:

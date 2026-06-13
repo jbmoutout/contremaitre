@@ -78,7 +78,7 @@ from typing import Protocol
 from . import events
 from .actors import ActorError, ActorOutput, _run_detached_container
 from .jsonlog import append_jsonl, append_transcript
-from .models import RunConfig, RunPaths
+from .models import RunConfig, RunPaths, carries_live_credential
 from .runtime_image import deps_mount_mode
 
 # codex REQUIRES tokens.refresh_token present and non-empty (parser + refresh
@@ -896,7 +896,7 @@ class CliActorRunner:
         early, free to run open egress.
         """
 
-        if self.driver.name == "claude":
+        if not carries_live_credential(self.driver.name):
             return
         if self.config.allow_open_egress:
             return
@@ -1098,7 +1098,7 @@ class CliActorRunner:
           locked internal network + allowlisting HTTPS proxy (the egress lock).
         """
 
-        if self.driver.name == "claude":
+        if not carries_live_credential(self.driver.name):
             return ["--add-host", "host.docker.internal:host-gateway"]
         flags: list[str] = []
         if self.config.docker_network:

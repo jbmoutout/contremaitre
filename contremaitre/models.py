@@ -72,6 +72,24 @@ def is_zen_model(model: str) -> bool:
     return bool(model) and model.startswith("opencode/")
 
 
+def carries_live_credential(tool: str) -> bool:
+    """True when a CLI tool mounts a live, exfiltratable credential *inside* its
+    per-run container — the one fact the egress posture turns on.
+
+    Only ``codex`` does: it mounts a short-lived subscription access token in its
+    home, so its container's egress must be locked to provider domains. ``claude``
+    carries no in-container credential — the host auth-inject proxy
+    (`cli_auth_proxy`) adds the bearer per request — and ``opencode`` / ``fake``
+    hold no CLI token, so they run open. The single source of truth shared by
+    egress provisioning (`cli._active_codex_roles`), preflight
+    (`_check_network_policy`), and the runner (`_assert_egress_locked` /
+    `_egress_docker_flags`), so a green preflight can't disagree with what the
+    container is actually launched with.
+    """
+
+    return tool == "codex"
+
+
 # The fixed shape the *legacy* `role_model_label` emitted for a CLI role —
 # `<model> (codex|claude, effort=<e>)`. Kept ONLY so `ModelSpec.from_record`
 # can read run dirs written before model identity became a structured record.

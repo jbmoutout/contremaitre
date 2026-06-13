@@ -58,10 +58,7 @@ def test_prefers_verdict_keyed_object_over_other_json():
     """An earlier non-verdict JSON object in the prose must not win over the
     real verdict object."""
 
-    raw = (
-        'Config was `{"codex": 1, "claude": 2}` at the time. '
-        "Final verdict:\n" + _emit(_VERDICT)
-    )
+    raw = 'Config was `{"codex": 1, "claude": 2}` at the time. Final verdict:\n' + _emit(_VERDICT)
     parsed = parse_sim_verdict(raw)
     assert parsed.verdict == ReviewVerdict.APPROVED
     assert parsed.summary == "looks good"
@@ -102,9 +99,8 @@ def test_invalid_final_verdict_not_masked_by_decoy():
     through: we prefer the last verdict-keyed object, so the broken one is
     what gets validated — and rejected."""
 
-    raw = (
-        'config was `{"codex": 1, "claude": 2}`. Final:\n'
-        + _emit(dict(_VERDICT, verdict="MAYBE"))
+    raw = 'config was `{"codex": 1, "claude": 2}`. Final:\n' + _emit(
+        dict(_VERDICT, verdict="MAYBE")
     )
     with pytest.raises(VerdictParseError):
         parse_sim_verdict(raw)
