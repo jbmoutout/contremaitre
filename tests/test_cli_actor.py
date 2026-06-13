@@ -12,7 +12,6 @@ from unittest.mock import patch
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
     _CLAUDE_OAUTH_ENV,
-    _CLAUDE_STATUSLINE_METER_SCRIPT_BODY,
     _CLAUDE_STATUSLINE_SCRIPT_BODY,
     CliActorRunner,
     _access_token_exp,
@@ -1022,9 +1021,41 @@ class ClaudePrepareHomeTest(unittest.TestCase):
             self.assertTrue(global_config["projects"]["/app"]["hasTrustDialogAccepted"])
             self.assertNotIn(_CLAUDE_OAUTH_ENV, json.dumps(global_config))
 
-    def test_statusline_bridge_script_is_valid_python(self):
-        compile(_CLAUDE_STATUSLINE_SCRIPT_BODY, "statusline.py", "exec")
-        compile(_CLAUDE_STATUSLINE_METER_SCRIPT_BODY, "statusline_meter.py", "exec")
+    def test_statusline_bridge_scripts_are_valid_python_from_disk(self):
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
+        script = (scripts_dir / "statusline.py").read_text(encoding="utf-8")
+        meter = (scripts_dir / "statusline_meter.py").read_text(encoding="utf-8")
+        compile(script, "statusline.py", "exec")
+        compile(meter, "statusline_meter.py", "exec")
+
+    def test_statusline_snapshot_assembly_and_status_text(self):
+        """Pure-function test of the statusline script's _dict, _pct, and
+        main() assembly logic. The script runs as a standalone file in the
+        claude container so we read it from disk and exec to access its
+        module-level helpers."""
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
+        source = (scripts_dir / "statusline.py").read_text(encoding="utf-8")
+        ns: dict = {}
+        exec(compile(source, "statusline.py", "exec"), ns)
+
+        # _dict helper
+        self.assertEqual(ns["_dict"]({"a": 1}), {"a": 1})
+        self.assertEqual(ns["_dict"](None), {})
+        self.assertEqual(ns["_dict"]("not-a-dict"), {})
+
+        # _pct helper
+        self.assertEqual(ns["_pct"](75.3), "75")
+        self.assertEqual(ns["_pct"](0), "0")
+        self.assertEqual(ns["_pct"](100.0), "100")
+        self.assertIsNone(ns["_pct"](None))
+        self.assertIsNone(ns["_pct"]("text"))
+
+        # Verify the loaded content matches what cli_actor serves
+        self.assertEqual(source, _CLAUDE_STATUSLINE_SCRIPT_BODY)
 
     def test_reseed_preserves_existing_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:

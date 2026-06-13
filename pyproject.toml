@@ -28,7 +28,7 @@ dev = ["pytest>=8", "rich>=13", "ruff>=0.6"]
 include = ["contremaitre*"]
 
 [tool.setuptools.package-data]
-contremaitre = ["Dockerfile", "Dockerfile.*", "prompts/*.md", "*.conf"]
+contremaitre = ["Dockerfile", "Dockerfile.*", "prompts/*.md", "scripts/*.py", "*.conf"]
 
 [tool.ruff]
 line-length = 100
