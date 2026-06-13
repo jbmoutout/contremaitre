@@ -128,6 +128,22 @@ class LockfileDetectionTest(unittest.TestCase):
         self.assertNotIn("UV_NO_SYNC", dict(poetry.runtime_env))
         self.assertEqual(poetry.canary_cmd, "")
 
+    def test_recipe_tag_changes_with_install_cmd(self):
+        """The volume key folds in a hash of the install command, so editing
+        a recipe forces a rebuild instead of reusing a volume built by the
+        old command. Same command → stable tag; changed command → new tag.
+        """
+
+        from contremaitre.runtime_image import _Lockfile, _recipe_tag
+
+        base = _Lockfile("uv.lock", "uv sync --frozen", ".venv")
+        same = _Lockfile("uv.lock", "uv sync --frozen", ".venv", canary_cmd="x")
+        changed = _Lockfile("uv.lock", "uv sync --frozen --no-install-project", ".venv")
+        # Stable across runtime_env / canary edits (they don't change contents).
+        self.assertEqual(_recipe_tag(base), _recipe_tag(same))
+        # Changes when the install command changes — the masked-fix bug.
+        self.assertNotEqual(_recipe_tag(base), _recipe_tag(changed))
+
     def test_only_uv_family_has_a_canary(self):
         """Canaries exist only where they exercise the proven-broken
         offline-run path (uv). Faking one for an ecosystem we can't test
@@ -186,7 +202,7 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         # Cache mount path is .venv, not node_modules. /app (not /install)
         # so uv's embedded shebangs (`#!/app/.venv/bin/python`) resolve
         # at runtime, which also mounts at /app.
-        self.assertRegex(joined, r"contremaitre-deps-test-project-uv-lock-[0-9a-f]+:/app/\.venv\b")
+        self.assertRegex(joined, r"contremaitre-deps-test-project-uv-lock-[0-9a-f-]+:/app/\.venv\b")
         self.assertIn("VIRTUAL_ENV=/app/.venv", cmd)
         # Full `uv sync --frozen` — NOT `--no-install-project`. The project
         # must be installed at warm time (open egress can fetch the build
@@ -196,11 +212,26 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         self.assertNotIn("--no-install-project", cmd[-1])
         self.assertNotIn("pip install --quiet uv", cmd[-1])
 
+    def test_volume_name_includes_recipe_tag(self):
+        """The volume name carries the recipe tag as a trailing segment
+        (`...-<digest>-<recipe>`), so editing a recipe forces a fresh volume
+        and the prefix-scoped prune still sweeps the superseded one. Without
+        this, an install-cmd change reuses the stale volume — the bug that
+        masked the uv parity fix on first test.
+        """
+
+        cmd = self._run_and_capture("uv.lock", "[]")
+        joined = " ".join(cmd)
+        self.assertRegex(
+            joined,
+            r"contremaitre-deps-test-project-uv-lock-[0-9a-f]+-[0-9a-f]+:/app/\.venv\b",
+        )
+
     def test_poetry_install_mounts_venv_and_sets_virtual_env(self):
         cmd = self._run_and_capture("poetry.lock", "")
         joined = " ".join(cmd)
         self.assertRegex(
-            joined, r"contremaitre-deps-test-project-poetry-lock-[0-9a-f]+:/app/\.venv\b"
+            joined, r"contremaitre-deps-test-project-poetry-lock-[0-9a-f-]+:/app/\.venv\b"
         )
         self.assertIn("VIRTUAL_ENV=/app/.venv", cmd)
         self.assertIn("POETRY_VIRTUALENVS_IN_PROJECT=true", cmd[-1])
@@ -210,7 +241,7 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         joined = " ".join(cmd)
         self.assertRegex(
             joined,
-            r"contremaitre-deps-test-project-package-lock-json-[0-9a-f]+:/app/node_modules\b",
+            r"contremaitre-deps-test-project-package-lock-json-[0-9a-f-]+:/app/node_modules\b",
         )
         # No VIRTUAL_ENV / CARGO_HOME / GOPATH for Node.
         for env_key in ("VIRTUAL_ENV", "CARGO_HOME", "GOPATH"):
@@ -220,7 +251,7 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         cmd = self._run_and_capture("Cargo.lock", "")
         joined = " ".join(cmd)
         self.assertRegex(
-            joined, r"contremaitre-deps-test-project-Cargo-lock-[0-9a-f]+:/app/\.cargo-cache\b"
+            joined, r"contremaitre-deps-test-project-Cargo-lock-[0-9a-f-]+:/app/\.cargo-cache\b"
         )
         self.assertIn("CARGO_HOME=/app/.cargo-cache", cmd)
 
@@ -228,7 +259,7 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         cmd = self._run_and_capture("go.sum", "")
         joined = " ".join(cmd)
         self.assertRegex(
-            joined, r"contremaitre-deps-test-project-go-sum-[0-9a-f]+:/app/\.go-mod-cache\b"
+            joined, r"contremaitre-deps-test-project-go-sum-[0-9a-f-]+:/app/\.go-mod-cache\b"
         )
         self.assertIn("GOPATH=/app/.go-mod-cache", cmd)
 

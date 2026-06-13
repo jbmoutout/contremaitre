@@ -173,6 +173,27 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
 
 
+def _recipe_tag(lockfile: _Lockfile) -> str:
+    """Short hash of the install command, folded into the volume name so a
+    recipe change forces a rebuild.
+
+    The lockfile-digest key alone is recipe-blind: editing `install_cmd`
+    (e.g. dropping `--no-install-project`) leaves the lockfile digest
+    unchanged, so the stale volume from the OLD recipe is reused and the
+    fix silently no-ops — exactly what masked the uv parity fix on first
+    test. Keying on the install command too means a recipe edit lands a new
+    volume name → cache miss → fresh install, and the prefix-scoped prune
+    sweeps the superseded volume on that same run (no manual
+    `cleanup --deps` needed).
+
+    Only `install_cmd` is hashed: it alone determines volume CONTENTS.
+    `runtime_env` / `canary_cmd` are consumed at mount/probe time, not
+    baked in, so editing them shouldn't trigger a needless 60-90s rebuild.
+    """
+
+    return hashlib.sha256(lockfile.install_cmd.encode()).hexdigest()[:8]
+
+
 def _safe_name(lockfile_name: str) -> str:
     return lockfile_name.replace(".", "-")
 
@@ -221,14 +242,19 @@ def ensure_deps_volume(
     produce paths that resolve at runtime. An /install vs /app skew
     here silently breaks every Python script in the cache.
 
-    Volume naming includes `project_id` (typically the cache-clone slug,
-    e.g. `github.com-owner-repo`) so two projects with the
-    same lockfile kind don't collide in `_prune_stale_deps_volumes`:
-    without the scope, running project A then project B would evict
-    A's cache because both have e.g. `package-lock.json` and the prune
-    looks at lockfile kind alone. Cross-project deduplication is
-    forfeit (same content in two repos → two copies cached) but that's
-    rare and the eviction was a concrete pain.
+    Volume naming is `contremaitre-deps-{project}-{lockfile}-{digest}-{recipe}`:
+    - `project_id` (typically the cache-clone slug, e.g.
+      `github.com-owner-repo`) so two projects with the same lockfile kind
+      don't collide in `_prune_stale_deps_volumes` — without the scope,
+      running project A then project B would evict A's cache because both
+      have e.g. `package-lock.json` and the prune looks at lockfile kind
+      alone. Cross-project dedup is forfeit (same content in two repos →
+      two copies cached) but that's rare and the eviction was a concrete
+      pain.
+    - `digest` keys on lockfile content (a dep bump → fresh volume).
+    - `recipe` (`_recipe_tag`) keys on the install command, so editing a
+      recipe forces a rebuild instead of silently reusing a volume built
+      by the old command.
 
     Side effects: docker volume create, docker run, and a per-lockhash
     install log at `<runs_root>/_deps_install_<lockhash>.log`.
@@ -240,7 +266,8 @@ def ensure_deps_volume(
     lockfile, lock_path = detected
     digest = _digest(lock_path)
     project_slug = _safe_name(project_id)
-    volume = f"contremaitre-deps-{project_slug}-{_safe_name(lockfile.name)}-{digest}"
+    recipe = _recipe_tag(lockfile)
+    volume = f"contremaitre-deps-{project_slug}-{_safe_name(lockfile.name)}-{digest}-{recipe}"
     handle = DepsVolume(
         name=volume,
         mount_path=lockfile.cache_mount_path,
