@@ -12,8 +12,6 @@ from unittest.mock import patch
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
     _CLAUDE_OAUTH_ENV,
-    _CLAUDE_STATUSLINE_METER_SCRIPT_BODY,
-    _CLAUDE_STATUSLINE_SCRIPT_BODY,
     CliActorRunner,
     _access_token_exp,
     _claude_effort_arg,
@@ -1018,13 +1016,123 @@ class ClaudePrepareHomeTest(unittest.TestCase):
             self.assertNotIn(_CLAUDE_OAUTH_ENV, script)
             self.assertIn("used_percentage", meter)
             self.assertNotIn(_CLAUDE_OAUTH_ENV, meter)
+            # Container-fidelity guard: prepare_home must write the exact on-disk,
+            # version-controlled script bytes into the home (this is what the
+            # container executes), not some drifted copy.
+            scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
+            self.assertEqual(script, (scripts_dir / "statusline.py").read_text(encoding="utf-8"))
+            self.assertEqual(
+                meter, (scripts_dir / "statusline_meter.py").read_text(encoding="utf-8")
+            )
             self.assertTrue(global_config["hasCompletedOnboarding"])
             self.assertTrue(global_config["projects"]["/app"]["hasTrustDialogAccepted"])
             self.assertNotIn(_CLAUDE_OAUTH_ENV, json.dumps(global_config))
 
-    def test_statusline_bridge_script_is_valid_python(self):
-        compile(_CLAUDE_STATUSLINE_SCRIPT_BODY, "statusline.py", "exec")
-        compile(_CLAUDE_STATUSLINE_METER_SCRIPT_BODY, "statusline_meter.py", "exec")
+    def test_statusline_bridge_scripts_are_valid_python_from_disk(self):
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
+        script = (scripts_dir / "statusline.py").read_text(encoding="utf-8")
+        meter = (scripts_dir / "statusline_meter.py").read_text(encoding="utf-8")
+        compile(script, "statusline.py", "exec")
+        compile(meter, "statusline_meter.py", "exec")
+
+    def test_statusline_snapshot_assembly_and_status_text(self):
+        from io import StringIO
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
+        source = (scripts_dir / "statusline.py").read_text(encoding="utf-8")
+
+        ns: dict = {"__name__": "__notmain__"}
+        exec(compile(source, "statusline.py", "exec"), ns)
+
+        # _dict helper
+        self.assertEqual(ns["_dict"]({"a": 1}), {"a": 1})
+        self.assertEqual(ns["_dict"](None), {})
+        self.assertEqual(ns["_dict"]("not-a-dict"), {})
+
+        # _pct helper
+        self.assertEqual(ns["_pct"](75.3), "75")
+        self.assertEqual(ns["_pct"](0), "0")
+        self.assertEqual(ns["_pct"](100.0), "100")
+        self.assertIsNone(ns["_pct"](None))
+        self.assertIsNone(ns["_pct"]("text"))
+
+        # main() snapshot assembly: feed realistic claude statusLine JSON,
+        # verify the file written to disk and the printed status line.
+        import json as _json
+        import os as _os
+        import tempfile
+        import time as _time
+
+        # Two-rate-limits scenario: both windows have usage.
+        sample = {
+            "session_id": "sess-abc123",
+            "version": "2026-06-01",
+            "model": {"id": "claude-sonnet-4-6"},
+            "rate_limits": {
+                "five_hour": {"reset": 1718000000.0, "used_percentage": 45.0, "max": 100.0},
+                "seven_day": {"reset": 1718300000.0, "used_percentage": 30.0, "max": 100.0},
+            },
+            "context_window": {"used": 500, "max": 10000},
+            "cost": {"usd": 0.42},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = tmp
+            out_file = _os.path.join(tmpdir, "statusline.jsonl")
+            _old_stdin = ns["sys"].stdin
+            _old_out_env = _os.environ.get("CONTREMAITRE_CLAUDE_STATUSLINE_OUT")
+            try:
+                ns["sys"].stdin = StringIO(_json.dumps(sample))
+                ns["OUT"] = out_file
+                ns["time"] = _time
+
+                rc = ns["main"]()
+                self.assertEqual(rc, 0)
+
+                lines = open(out_file, encoding="utf-8").readlines()
+                self.assertEqual(len(lines), 1)
+                snap = _json.loads(lines[0])
+                self.assertEqual(snap["session_id"], "sess-abc123")
+                self.assertEqual(snap["model"]["id"], "claude-sonnet-4-6")
+                self.assertEqual(snap["rate_limits"]["five_hour"]["used_percentage"], 45.0)
+                # context_window is its own top-level snapshot key, carried verbatim.
+                self.assertEqual(snap["context_window"], {"used": 500, "max": 10000})
+                self.assertIn("recorded_at", snap)
+
+                # One-rate-limit scenario: only five_hour has data.
+                five_hour_pct = 45.0
+                sample2 = {
+                    "rate_limits": {
+                        "five_hour": {"used_percentage": five_hour_pct, "max": 100.0},
+                    },
+                }
+                out_file2 = _os.path.join(tmpdir, "statusline2.jsonl")
+                ns["sys"].stdin = StringIO(_json.dumps(sample2))
+                ns["OUT"] = out_file2
+                rc2 = ns["main"]()
+                self.assertEqual(rc2, 0)
+                snap2 = _json.loads((open(out_file2, encoding="utf-8").readlines()[0]))
+                self.assertEqual(snap2["rate_limits"]["five_hour"]["used_percentage"], 45.0)
+                self.assertIsNone(snap2["rate_limits"].get("seven_day"))
+
+                # Empty/no-rate-limits scenario: no crash, no usage line.
+                empty = {"rate_limits": {}}
+                out_file3 = _os.path.join(tmpdir, "statusline3.jsonl")
+                ns["sys"].stdin = StringIO(_json.dumps(empty))
+                ns["OUT"] = out_file3
+                rc3 = ns["main"]()
+                self.assertEqual(rc3, 0)
+                snap3 = _json.loads((open(out_file3, encoding="utf-8").readlines()[0]))
+                self.assertEqual(snap3["rate_limits"], {})
+            finally:
+                ns["sys"].stdin = _old_stdin
+                if _old_out_env is not None:
+                    _os.environ["CONTREMAITRE_CLAUDE_STATUSLINE_OUT"] = _old_out_env
+                else:
+                    _os.environ.pop("CONTREMAITRE_CLAUDE_STATUSLINE_OUT", None)
 
     def test_reseed_preserves_existing_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
