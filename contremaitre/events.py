@@ -55,6 +55,15 @@ NO_PROGRESS_CAP = "no_progress_cap"
 CHECK_STARTED = "check_started"
 CHECK_COMPLETED = "check_completed"
 
+# ----- Deps-volume offline readiness (pre-agent) -----
+
+# Emitted once after the per-run deps volume is provisioned: did the
+# operator's check command (or the ecosystem canary) pass on the SAME
+# network the agent will face? Catches the warm/run parity gap — deps
+# cached with open egress at warm time, but a build backend the runtime
+# `uv run` needs is missing and can't be fetched under the locked egress.
+DEPS_OFFLINE_ASSERT = "deps_offline_assert"
+
 # ----- Host-side git -----
 
 HOST_COMMIT_CREATED = "host_commit_created"

@@ -8,15 +8,23 @@ First run against a given lockfile populates the volume by running the
 install command in a one-shot container; subsequent runs reuse it
 verbatim. Different lockfile → different digest → fresh volume.
 
-The volume is mounted read-only in agent + SIM + check containers so
-runs against the same lockhash don't poison each other. If the agent
-genuinely needs a new dep, it edits package.json + lockfile; the next
-run sees a new digest and populates a fresh volume.
+The pristine cache is cloned into a per-run RW volume (so one run's
+mid-run `npm install` can't leak into the next); the clone is what
+agent / SIM / check containers mount. If the agent genuinely needs a
+new dep, it edits the manifest + lockfile; the next run sees a new
+digest and populates a fresh volume.
 
 Supported ecosystems are the ones with a deterministic lockfile +
 non-interactive install command. Unsupported targets get `None` —
 publication continues without a deps volume (and without container
 checks that depend on installed deps).
+
+The warm step runs with open egress (it must fetch); the agent runs
+under locked egress. `assert_deps_offline` closes the gap between them:
+after the per-run clone, it runs the operator's check command (or an
+ecosystem canary) on the SAME network the agent will face, so a missing
+build backend surfaces before the agent — not as a mid-run wall that
+reads like agent damage.
 """
 
 from __future__ import annotations
@@ -62,12 +70,21 @@ class _Lockfile:
     (the install one-shot rewrites them to `/install/` automatically).
     Empty tuple for Node — npm/yarn/pnpm find `node_modules/` by
     convention without env hints.
+
+    `canary_cmd` is a minimal "the project actually runs offline" smoke
+    the host fires after warming the volume, on the SAME network the
+    agent will face (see `assert_deps_offline`). It exists to catch the
+    warm/run parity gap: deps cached at warm time (open egress) but a
+    build backend the runtime needs is missing and can't be fetched under
+    the locked egress. Only set where it exercises that path for real;
+    empty (`""`) means "no canary — rely on the operator's check command."
     """
 
     name: str
     install_cmd: str
     cache_mount_path: str
     runtime_env: tuple[tuple[str, str], ...] = ()
+    canary_cmd: str = ""
 
 
 _PY_VENV_ENV: tuple[tuple[str, str], ...] = (
@@ -77,6 +94,19 @@ _PY_VENV_ENV: tuple[tuple[str, str], ...] = (
         "/app/.venv/bin:/root/.local/bin:/root/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     ),
 )
+
+# uv's runtime env adds UV_NO_SYNC so `uv run` uses the warmed venv AS-IS
+# instead of re-syncing (which, for a packaged project, rebuilds it and
+# refetches the build backend `setuptools>=68` — blocked under locked
+# egress, the wall a deepseek run hit at turn 5). Deps are frozen at warm
+# time; a mid-run dep addition needs a fresh run (new lockhash → new
+# volume), which is already the module's model.
+_UV_RUNTIME_ENV: tuple[tuple[str, str], ...] = _PY_VENV_ENV + (("UV_NO_SYNC", "1"),)
+
+# The canary that exercises the proven-broken path: `uv run` resolving the
+# project against the warmed venv with no network. Passes on the fixed
+# recipe; fires only if warm/run parity regresses.
+_UV_CANARY = "uv run python -c ''"
 
 
 _LOCKFILES: tuple[_Lockfile, ...] = (
@@ -89,11 +119,18 @@ _LOCKFILES: tuple[_Lockfile, ...] = (
         ".venv",
         _PY_VENV_ENV,
     ),
+    # Full `uv sync --frozen` (NOT `--no-install-project`): install the
+    # project into the venv at warm time, where open egress can still
+    # fetch the build backend. `--no-install-project` deferred that build
+    # to the first runtime `uv run`, under locked egress, where it failed.
+    # Surfacing a broken build here (warm, networked, clear log) beats a
+    # turn-5 escalation that reads as agent damage.
     _Lockfile(
         "uv.lock",
-        "uv sync --frozen --no-install-project",
+        "uv sync --frozen",
         ".venv",
-        _PY_VENV_ENV,
+        _UV_RUNTIME_ENV,
+        _UV_CANARY,
     ),
     # rye / pip-tools. The lockfile is an exhaustive pip-installable
     # requirements file (each line is `name==version` with all transitive
@@ -106,7 +143,8 @@ _LOCKFILES: tuple[_Lockfile, ...] = (
         "requirements.lock",
         "uv venv .venv && uv pip install --no-deps -r requirements.lock",
         ".venv",
-        _PY_VENV_ENV,
+        _UV_RUNTIME_ENV,
+        _UV_CANARY,
     ),
     _Lockfile(
         "Cargo.lock",
@@ -133,6 +171,27 @@ def _detect(repo: Path) -> tuple[_Lockfile, Path] | None:
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+
+
+def _recipe_tag(lockfile: _Lockfile) -> str:
+    """Short hash of the install command, folded into the volume name so a
+    recipe change forces a rebuild.
+
+    The lockfile-digest key alone is recipe-blind: editing `install_cmd`
+    (e.g. dropping `--no-install-project`) leaves the lockfile digest
+    unchanged, so the stale volume from the OLD recipe is reused and the
+    fix silently no-ops — exactly what masked the uv parity fix on first
+    test. Keying on the install command too means a recipe edit lands a new
+    volume name → cache miss → fresh install, and the prefix-scoped prune
+    sweeps the superseded volume on that same run (no manual
+    `cleanup --deps` needed).
+
+    Only `install_cmd` is hashed: it alone determines volume CONTENTS.
+    `runtime_env` / `canary_cmd` are consumed at mount/probe time, not
+    baked in, so editing them shouldn't trigger a needless 60-90s rebuild.
+    """
+
+    return hashlib.sha256(lockfile.install_cmd.encode()).hexdigest()[:8]
 
 
 def _safe_name(lockfile_name: str) -> str:
@@ -183,14 +242,19 @@ def ensure_deps_volume(
     produce paths that resolve at runtime. An /install vs /app skew
     here silently breaks every Python script in the cache.
 
-    Volume naming includes `project_id` (typically the cache-clone slug,
-    e.g. `github.com-owner-repo`) so two projects with the
-    same lockfile kind don't collide in `_prune_stale_deps_volumes`:
-    without the scope, running project A then project B would evict
-    A's cache because both have e.g. `package-lock.json` and the prune
-    looks at lockfile kind alone. Cross-project deduplication is
-    forfeit (same content in two repos → two copies cached) but that's
-    rare and the eviction was a concrete pain.
+    Volume naming is `contremaitre-deps-{project}-{lockfile}-{digest}-{recipe}`:
+    - `project_id` (typically the cache-clone slug, e.g.
+      `github.com-owner-repo`) so two projects with the same lockfile kind
+      don't collide in `_prune_stale_deps_volumes` — without the scope,
+      running project A then project B would evict A's cache because both
+      have e.g. `package-lock.json` and the prune looks at lockfile kind
+      alone. Cross-project dedup is forfeit (same content in two repos →
+      two copies cached) but that's rare and the eviction was a concrete
+      pain.
+    - `digest` keys on lockfile content (a dep bump → fresh volume).
+    - `recipe` (`_recipe_tag`) keys on the install command, so editing a
+      recipe forces a rebuild instead of silently reusing a volume built
+      by the old command.
 
     Side effects: docker volume create, docker run, and a per-lockhash
     install log at `<runs_root>/_deps_install_<lockhash>.log`.
@@ -202,7 +266,8 @@ def ensure_deps_volume(
     lockfile, lock_path = detected
     digest = _digest(lock_path)
     project_slug = _safe_name(project_id)
-    volume = f"contremaitre-deps-{project_slug}-{_safe_name(lockfile.name)}-{digest}"
+    recipe = _recipe_tag(lockfile)
+    volume = f"contremaitre-deps-{project_slug}-{_safe_name(lockfile.name)}-{digest}-{recipe}"
     handle = DepsVolume(
         name=volume,
         mount_path=lockfile.cache_mount_path,
@@ -417,6 +482,118 @@ def clone_deps_volume_for_run(*, pristine: DepsVolume, run_id: str, base_image: 
         name=per_run,
         mount_path=pristine.mount_path,
         runtime_env=pristine.runtime_env,
+    )
+
+
+@dataclass(frozen=True)
+class OfflineAssertResult:
+    """Outcome of `assert_deps_offline`.
+
+    `source` is "check_cmd" (the operator's L1 gate, the commands joined
+    with `&&`) or "canary" (an ecosystem smoke we authored). `network` is
+    the docker network the probe ran on — None means open egress, where a
+    failure is advisory only (the agent could still fetch what's missing).
+    """
+
+    ok: bool
+    cmd: str
+    source: str
+    returncode: int
+    output: str
+    network: str | None
+
+
+def _offline_assert_cmd(*, worktree: Path, check_cmds: tuple[str, ...]) -> tuple[str, str] | None:
+    """Pick `(command, source)` to prove offline, or None if nothing to assert.
+
+    The operator's check command wins — it's the real contract the L1
+    sidecar runs later, so proving it offline now is the strongest signal.
+    With no check command, fall back to the detected ecosystem's canary;
+    ecosystems without one (Node/Rust/Go today) return None and the assert
+    is skipped rather than faking confidence we can't back.
+    """
+
+    if check_cmds:
+        return (" && ".join(check_cmds), "check_cmd")
+    detected = _detect(worktree)
+    if detected and detected[0].canary_cmd:
+        return (detected[0].canary_cmd, "canary")
+    return None
+
+
+# Captured probe output is tailed to this many chars in the result — enough
+# for the failing build/import traceback, bounded so a chatty check doesn't
+# bloat the guardrail log.
+_OFFLINE_ASSERT_OUTPUT_TAIL = 2000
+
+
+def assert_deps_offline(
+    *,
+    worktree: Path,
+    base_image: str,
+    docker_network: str | None,
+    container_user: str | None,
+    deps_volume: DepsVolume | None,
+    check_cmds: tuple[str, ...],
+    runner=subprocess.run,
+) -> OfflineAssertResult | None:
+    """Run the check command (or ecosystem canary) on the agent's network.
+
+    Mirrors the L1 sidecar mount shape (`checks._run_sidecar`): worktree
+    at /app, deps volume RW at the cache path, runtime env, and crucially
+    the SAME `docker_network` the agent uses — locked when the agent is
+    locked, open when open. That fidelity is the point: a pass here means
+    the agent's environment satisfies the command without egress, so the
+    warm/run parity gap (a build backend missing under the lock) can't
+    ambush the agent mid-run.
+
+    Returns None when there's nothing to assert (no check command and the
+    ecosystem has no canary). The caller owns severity — this function
+    only runs the probe and reports.
+    """
+
+    selected = _offline_assert_cmd(worktree=worktree, check_cmds=check_cmds)
+    if selected is None:
+        return None
+    cmd, source = selected
+
+    docker_cmd = ["docker", "run", "--rm", "--label", "contremaitre.role=deps-assert"]
+    if container_user:
+        docker_cmd.extend(["--user", container_user])
+    if docker_network:
+        docker_cmd.extend(["--network", docker_network])
+    docker_cmd.extend(["-v", f"{worktree}:/app:rw"])
+    if deps_volume:
+        # RW mirrors the L1 sidecar: a check that touches the venv (uv
+        # metadata, a pytest cache dir) must not hit EACCES and read as a
+        # failure when the real issue is a read-only mount.
+        docker_cmd.extend(["-v", f"{deps_volume.name}:/app/{deps_volume.mount_path}:rw"])
+        for key, value in deps_volume.runtime_env:
+            docker_cmd.extend(["-e", f"{key}={value}"])
+    # `sh -c`, not `-lc`: a login shell sources /etc/profile and resets
+    # PATH, dropping the venv passed via -e. Same reasoning as
+    # checks._run_sidecar.
+    docker_cmd.extend(["-w", "/app", base_image, "sh", "-c", cmd])
+
+    try:
+        proc = runner(docker_cmd, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return OfflineAssertResult(
+            ok=False,
+            cmd=cmd,
+            source=source,
+            returncode=-1,
+            output=f"assert container did not complete: {exc}",
+            network=docker_network,
+        )
+    combined = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return OfflineAssertResult(
+        ok=proc.returncode == 0,
+        cmd=cmd,
+        source=source,
+        returncode=proc.returncode,
+        output=combined[-_OFFLINE_ASSERT_OUTPUT_TAIL:],
+        network=docker_network,
     )
 
 
