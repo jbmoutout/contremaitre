@@ -297,8 +297,9 @@ class Orchestrator:
                 )
                 continue
 
-            self.sm.transition("approved", f"SIM approved round {review_round}")
-            # APPROVED — drift check + hard gates + publish + CLI review loop
+            # APPROVED — drift check + hard gates + publish + CLI review loop.
+            # The `approved` transition fires inside `_publish_or_block` after
+            # gates/checks pass, not here.
             return self._publish_or_block(
                 worktree_git=worktree_git,
                 branch=branch,
@@ -1027,6 +1028,12 @@ class Orchestrator:
                 sim_verdict=parsed,
             )
 
+        # All gates pass — commit the APPROVED transition before write/eval/
+        # publish so the state machine reflects the real terminal state.
+        # `force` is correct here: `_publish_or_block` is the point-of-no-return,
+        # reached only after gates and checks pass; the call site guarantees the
+        # state machine is past the REVIEW→APPROVED seam.
+        self.sm.force(State.APPROVED, note="SIM approved — gates passed")
         # Write eval BEFORE publish so `_derive_pr_metadata` can read the
         # scorecard into the PR body. Safe because eval inputs (hard_gates,
         # checks, parsed) are all in scope here, and `reason` is unused
@@ -1099,6 +1106,7 @@ class Orchestrator:
         reason: str,
         sim_verdict: ParsedVerdict | None,
     ) -> RunResult:
+        self.sm.force(State.NO_PR, note=reason)
         self._emit(
             events.PUBLICATION_BLOCKED,
             reason=reason,
@@ -1146,6 +1154,7 @@ class Orchestrator:
         checks: list[CheckResult] | None = None,
         sim_verdict: ParsedVerdict | None = None,
     ) -> RunResult:
+        self.sm.force(State.NO_PR, note=reason)
         record_publication(
             self.paths,
             PublishOutcome(
