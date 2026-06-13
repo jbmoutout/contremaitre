@@ -12,6 +12,7 @@ from unittest.mock import patch
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
 from contremaitre.cli_actor import (
     _CLAUDE_OAUTH_ENV,
+    _CLAUDE_STATUSLINE_METER_SCRIPT_BODY,
     _CLAUDE_STATUSLINE_SCRIPT_BODY,
     CliActorRunner,
     _access_token_exp,
@@ -1031,14 +1032,15 @@ class ClaudePrepareHomeTest(unittest.TestCase):
         compile(meter, "statusline_meter.py", "exec")
 
     def test_statusline_snapshot_assembly_and_status_text(self):
-        """Pure-function test of the statusline script's _dict, _pct, and
-        main() assembly logic. The script runs as a standalone file in the
-        claude container so we read it from disk and exec to access its
-        module-level helpers."""
+        from io import StringIO
         from pathlib import Path
 
         scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
         source = (scripts_dir / "statusline.py").read_text(encoding="utf-8")
+
+        # Verify the loaded content matches what cli_actor serves
+        self.assertEqual(source, _CLAUDE_STATUSLINE_SCRIPT_BODY)
+
         ns: dict = {}
         exec(compile(source, "statusline.py", "exec"), ns)
 
@@ -1054,8 +1056,87 @@ class ClaudePrepareHomeTest(unittest.TestCase):
         self.assertIsNone(ns["_pct"](None))
         self.assertIsNone(ns["_pct"]("text"))
 
-        # Verify the loaded content matches what cli_actor serves
-        self.assertEqual(source, _CLAUDE_STATUSLINE_SCRIPT_BODY)
+        # main() snapshot assembly: feed realistic claude statusLine JSON,
+        # verify the file written to disk and the printed status line.
+        import json as _json
+        import os as _os
+        import tempfile
+        import time as _time
+
+        # Two-rate-limits scenario: both windows have usage.
+        sample = {
+            "session_id": "sess-abc123",
+            "version": "2026-06-01",
+            "model": {"id": "claude-sonnet-4-6"},
+            "rate_limits": {
+                "five_hour": {"reset": 1718000000.0, "used_percentage": 45.0, "max": 100.0},
+                "seven_day": {"reset": 1718300000.0, "used_percentage": 30.0, "max": 100.0},
+            },
+            "context_window": {"used": 500, "max": 10000},
+            "cost": {"usd": 0.42},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = tmp
+            out_file = _os.path.join(tmpdir, "statusline.jsonl")
+            _old_stdin = ns["sys"].stdin
+            _old_out_env = _os.environ.get("CONTREMAITRE_CLAUDE_STATUSLINE_OUT")
+            try:
+                ns["sys"].stdin = StringIO(_json.dumps(sample))
+                ns["OUT"] = out_file
+                ns["time"] = _time
+
+                rc = ns["main"]()
+                self.assertEqual(rc, 0)
+
+                lines = open(out_file, encoding="utf-8").readlines()
+                self.assertEqual(len(lines), 1)
+                snap = _json.loads(lines[0])
+                self.assertEqual(snap["session_id"], "sess-abc123")
+                self.assertEqual(snap["model"]["id"], "claude-sonnet-4-6")
+                self.assertEqual(snap["rate_limits"]["five_hour"]["used_percentage"], 45.0)
+                self.assertNotIn("context_window", snap["cost"])
+                self.assertIn("recorded_at", snap)
+
+                # One-rate-limit scenario: only five_hour has data.
+                three_hour = 45.0
+                sample2 = {
+                    "rate_limits": {
+                        "five_hour": {"used_percentage": three_hour, "max": 100.0},
+                    },
+                }
+                out_file2 = _os.path.join(tmpdir, "statusline2.jsonl")
+                ns["sys"].stdin = StringIO(_json.dumps(sample2))
+                ns["OUT"] = out_file2
+                rc2 = ns["main"]()
+                self.assertEqual(rc2, 0)
+                snap2 = _json.loads((open(out_file2, encoding="utf-8").readlines()[0]))
+                self.assertEqual(snap2["rate_limits"]["five_hour"]["used_percentage"], 45.0)
+                self.assertIsNone(snap2["rate_limits"].get("seven_day"))
+
+                # Empty/no-rate-limits scenario: no crash, no usage line.
+                empty = {"rate_limits": {}}
+                out_file3 = _os.path.join(tmpdir, "statusline3.jsonl")
+                ns["sys"].stdin = StringIO(_json.dumps(empty))
+                ns["OUT"] = out_file3
+                rc3 = ns["main"]()
+                self.assertEqual(rc3, 0)
+                snap3 = _json.loads((open(out_file3, encoding="utf-8").readlines()[0]))
+                self.assertEqual(snap3["rate_limits"], {})
+            finally:
+                ns["sys"].stdin = _old_stdin
+                if _old_out_env is not None:
+                    _os.environ["CONTREMAITRE_CLAUDE_STATUSLINE_OUT"] = _old_out_env
+                else:
+                    _os.environ.pop("CONTREMAITRE_CLAUDE_STATUSLINE_OUT", None)
+
+    def test_statusline_meter_file_content_fidelity(self):
+        from pathlib import Path
+
+        scripts_dir = Path(__file__).resolve().parents[1] / "contremaitre" / "scripts"
+        meter_source = (scripts_dir / "statusline_meter.py").read_text(encoding="utf-8")
+        self.assertEqual(meter_source, _CLAUDE_STATUSLINE_METER_SCRIPT_BODY)
+        compile(meter_source, "statusline_meter.py", "exec")
 
     def test_reseed_preserves_existing_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
