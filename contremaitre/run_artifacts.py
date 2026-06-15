@@ -155,6 +155,22 @@ class RunArtifacts:
 
         return sum_token_usage_in_events(self.raw_export(), self.sim_raw_export())
 
+    def token_usage_all(self) -> dict[str, int]:
+        """Token rollup across EVERY actor stream — agent, SIM, and both
+        post-publish CLI reviewers (claude + codex). Distinct from
+        `token_usage()` (agent + SIM only), which feeds the orchestrator's
+        in-run cost cap *before* any reviewer runs: that gate must not count
+        post-publish work. This is the whole-run figure the index roster
+        shows. Absent reviewer streams read as empty, so it equals
+        `token_usage()` for runs that never published or were never reviewed."""
+
+        return sum_token_usage_in_events(
+            self.raw_export(),
+            self.sim_raw_export(),
+            self.cli_review_raw("claude"),
+            self.cli_review_raw("codex"),
+        )
+
     def resolved_model(self, *, sim: bool = False) -> str | None:
         """The model the stream reports it actually ran (claude `system/init`),
         for the agent stream by default or the SIM stream when `sim=True`. None

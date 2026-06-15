@@ -513,9 +513,12 @@ class TokenUsageRollupTest(unittest.TestCase):
                     ]
                 )
             )
+            # `input_tokens` is the TOTAL prompt (cached included); the cached
+            # subset is netted out of `input` so it isn't double-counted with
+            # `cache_read`. Fresh input = (100-80) + (40-30) = 30.
             self.assertEqual(
                 sum_token_usage_in_events(read_jsonl(p)),
-                {"input": 140, "output": 14, "reasoning": 6, "cache_read": 110},
+                {"input": 30, "output": 14, "reasoning": 6, "cache_read": 110},
             )
 
     def test_still_rolls_up_opencode_step_finish(self):

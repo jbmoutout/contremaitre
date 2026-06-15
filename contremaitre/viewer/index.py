@@ -74,7 +74,12 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         base = pr.get("base")
 
     cli_reviews = _read_cli_reviews(run_dir)
-    diffstat = RunArtifacts.from_run_dir(run_dir).diffstat()
+    # One reader: diffstat + the whole-run token rollup share the memoized
+    # stream reads (worktree_state for diffstat, the actor/reviewer exports
+    # for tokens). token_usage_all spans agent + SIM + both CLI reviewers.
+    arts = RunArtifacts.from_run_dir(run_dir)
+    diffstat = arts.diffstat()
+    tokens = arts.token_usage_all()
 
     return {
         "run_id": run_dir.name,
@@ -93,6 +98,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "impl_complete": _read_impl_complete(run_dir),
         "settled_preamble": _read_settled_preamble(run_dir),
         "diffstat": diffstat,
+        "tokens": tokens,
         "pr_kind": (pr or {}).get("kind") if isinstance(pr, dict) else None,
         "pr_url": (pr or {}).get("url") if isinstance(pr, dict) else None,
         "pr_title": (pr or {}).get("title") if isinstance(pr, dict) else None,
@@ -417,6 +423,41 @@ def _fmt_cost(cost: float | int | None) -> tuple[str, bool]:
 
 def _fmt_turns(turns: int | None) -> str:
     return "—" if turns is None else str(turns)
+
+
+def _fmt_token_count(n: int) -> str:
+    """Compact token count: 1_523_868 → '1.5M', 81_548 → '82k', 940 → '940'."""
+
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}k"
+    return str(n)
+
+
+def _tokens_pill(tokens: dict[str, int] | None) -> str:
+    """`{input, output, reasoning, cache_read}` → an "in · out · cache" pill.
+
+    `out` folds reasoning tokens in (they're billed as output). Empty string
+    when the run recorded no token usage (e.g. an infra failure before any
+    actor turn), so such rows show no pill rather than a misleading "0 in".
+    """
+
+    if not tokens:
+        return ""
+    inp = tokens.get("input") or 0
+    out = (tokens.get("output") or 0) + (tokens.get("reasoning") or 0)
+    cache = tokens.get("cache_read") or 0
+    if not (inp or out or cache):
+        return ""
+    return (
+        '<span class="score-pill" title="tokens across agent + SIM + CLI reviewers '
+        '(out includes reasoning; cache = cache-read)">'
+        f"<b>{_fmt_token_count(inp)}</b> in · "
+        f"<b>{_fmt_token_count(out)}</b> out · "
+        f"<b>{_fmt_token_count(cache)}</b> cache"
+        "</span>"
+    )
 
 
 def _diffstat_pill(diffstat: dict[str, int] | None) -> str:
@@ -1200,6 +1241,7 @@ def _render_row(r: dict[str, Any]) -> str:
         f'<span class="score-pill"><b>{_fmt_turns(r["turns"])}</b> turns</span>'
         f"{cost_pill}"
         f"{_diffstat_pill(r['diffstat'])}"
+        f"{_tokens_pill(r.get('tokens'))}"
     )
 
     verdict_display = _verdict_label(r["verdict"])

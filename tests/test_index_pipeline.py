@@ -21,6 +21,8 @@ from contremaitre.viewer.index import (
     _pipeline_run_metrics,
     _pr_review_verdict,
     _review_signals,
+    _summarize_run,
+    _tokens_pill,
     _verdict_tier,
 )
 
@@ -359,3 +361,29 @@ def test_collect_pairings_aggregates_with_coverage(tmp_path):
     assert p["impl"] == (1.0, 1)
     # tokens-per-line: out_tokens 200 / net LoC (60 + 20) = 2.5
     assert p["tok_per_loc"] == 2.5
+
+
+# --------------------------------------------------------------------------
+# Whole-run token rollup on the runs roster
+# --------------------------------------------------------------------------
+
+
+def test_summarize_run_carries_whole_run_token_rollup(tmp_path):
+    # _make_run writes one opencode step_finish (input 10, output 300) and no
+    # SIM / reviewer streams, so the roster's whole-run rollup is just that.
+    _make_run(tmp_path, "20260101-000000-run", agent="o", sim="s", output_tokens=300)
+    row = _summarize_run(tmp_path / "20260101-000000-run")
+    assert row["tokens"] == {"input": 10, "output": 300, "reasoning": 0, "cache_read": 0}
+
+
+def test_tokens_pill_formats_and_folds_reasoning():
+    # out folds reasoning in; counts humanize to k / M.
+    html = _tokens_pill({"input": 1_523_868, "output": 80_563, "reasoning": 985, "cache_read": 10_283_332})
+    assert "<b>1.5M</b> in" in html
+    assert "<b>82k</b> out" in html  # (80_563 + 985) rounds to 82k
+    assert "<b>10.3M</b> cache" in html
+
+
+def test_tokens_pill_empty_when_no_usage():
+    assert _tokens_pill(None) == ""
+    assert _tokens_pill({"input": 0, "output": 0, "reasoning": 0, "cache_read": 0}) == ""
