@@ -378,7 +378,9 @@ def test_summarize_run_carries_whole_run_token_rollup(tmp_path):
 
 def test_tokens_pill_formats_and_folds_reasoning():
     # out folds reasoning in; counts humanize to k / M.
-    html = _tokens_pill({"input": 1_523_868, "output": 80_563, "reasoning": 985, "cache_read": 10_283_332})
+    html = _tokens_pill(
+        {"input": 1_523_868, "output": 80_563, "reasoning": 985, "cache_read": 10_283_332}
+    )
     assert "<b>1.5M</b> in" in html
     assert "<b>82k</b> out" in html  # (80_563 + 985) rounds to 82k
     assert "<b>10.3M</b> cache" in html
