@@ -98,7 +98,7 @@ _run_flags = \
     --max-turns $(MAX_TURNS) --max-wall-minutes $(MAX_WALL_MIN) \
     --max-cost-usd $(MAX_COST_USD)
 
-.PHONY: help run run-log doctor models lint install-hooks eval
+.PHONY: help run run-log doctor models lint coverage test install-hooks eval
 
 help:
 	@grep -E '^[a-zA-Z_-]+:' Makefile | sed 's/:.*//' | sort
@@ -125,6 +125,13 @@ models:
 lint:
 	uvx ruff check --fix .
 	uvx ruff format .
+
+test:
+	uv run pytest
+
+# Coverage report (term + HTML in htmlcov/). HTML=0 to skip the HTML build.
+coverage:
+	uv run pytest --cov --cov-report=term-missing $(if $(filter 0,$(HTML)),,--cov-report=html)
 
 install-hooks:
 	uvx pre-commit install

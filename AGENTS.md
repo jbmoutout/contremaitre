@@ -7,12 +7,15 @@ Working notes for coding agents (Claude Code, opencode, Codex, etc.) modifying t
 ## Build / test
 
 ```bash
-uv run pytest
+uv run pytest        # or: make test
+make coverage        # term + HTML report (htmlcov/); HTML=0 to skip HTML
 ```
 
 No build step. Python ≥ 3.11. Core CLI is zero-dep; tests use the `dev`
 dependency group (`uv sync --group dev`). The TUI requires `textual`
-(optional extra).
+(optional extra). Coverage config lives under `[tool.coverage.*]` in
+`pyproject.toml` (entry shim, statusline scripts, and the fake actor are
+omitted — their 0% is expected, not a gap).
 
 ## Where to edit
 
