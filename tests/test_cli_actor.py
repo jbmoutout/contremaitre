@@ -264,17 +264,18 @@ class BuildCommandTest(unittest.TestCase):
                 return token
         return None
 
-    def test_deps_mount_agent_rw_sim_ro_reviewers_none(self):
+    def test_deps_mount_agent_rw_sim_ro_review_none_cli_review_follows(self):
         """CLI deps follow execution, same policy as opencode: the agent gets
         a writable warmed venv (the only way a codex agent can self-verify
-        under locked egress), the SIM read-only, and review / cli_review get
-        no deps mount — keeping them deps-free per their prompt.
+        under locked egress), the SIM read-only, the pre-publish `review` role
+        none (it never executes), and `cli_review` mirrors its (throwaway,
+        rw) worktree so it can run tests to ground its post-publish findings.
         """
 
         self.assertEqual(self._deps_arg("agent", "rw"), "vol-x:/app/.venv:rw")
         self.assertEqual(self._deps_arg("sim", "ro"), "vol-x:/app/.venv:ro")
         self.assertIsNone(self._deps_arg("review", "ro"))
-        self.assertIsNone(self._deps_arg("cli_review", "ro"))
+        self.assertEqual(self._deps_arg("cli_review", "rw"), "vol-x:/app/.venv:rw")
 
     def test_deps_runtime_env_passed_for_agent(self):
         """The agent's deps mount carries the runtime env (VIRTUAL_ENV,
@@ -1533,6 +1534,49 @@ class CliActorStartEventTest(unittest.TestCase):
             self.assertEqual(
                 post_turn_meter.kwargs["env"]["CONTREMAITRE_CLAUDE_METER_PROMPT"], "OK"
             )
+
+
+class CliReviewerWorktreeTest(unittest.TestCase):
+    def test_runs_in_throwaway_copy_rw_with_deps_real_worktree_untouched(self):
+        """cli_review mounts a THROWAWAY copy of the worktree rw at /app (so it
+        can run tests + write caches) with the deps volume rw, and never touches
+        the real worktree (the published diff stays clean)."""
+        from contremaitre.models import DepsVolume
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner, paths = _make_runner(
+                Path(tmp),
+                docker_network="cmtr-int",
+                https_proxy="http://p:3128",
+                deps_volume=DepsVolume(name="vol-x", mount_path=".venv"),
+            )
+            paths.worktree.mkdir(parents=True, exist_ok=True)
+            (paths.worktree / "sentinel.txt").write_text("orig")
+            runner.driver.parse_events = lambda *a, **k: ("LOOKS_GOOD", None, None, None)
+            review_dir = paths.run_dir / "rev"
+            review_dir.mkdir()
+
+            captured = {}
+
+            def _fake(**kwargs):
+                captured["cmd"] = kwargs["cmd"]
+                return (0, "", None)
+
+            with patch("contremaitre.cli_actor._run_detached_container", side_effect=_fake):
+                runner.cli_reviewer_turn(
+                    prompt="p", raw_export=paths.raw_export, round_n=1, review_dir=review_dir
+                )
+
+            joined = " ".join(captured["cmd"])
+            scratch = paths.run_dir / "cli-review-worktree-1"
+            # /app is the throwaway copy mounted rw — NOT the real worktree.
+            self.assertIn(f"{scratch}:/app:rw", joined)
+            self.assertNotIn(f"{runner.worktree}:/app", joined)
+            # deps mounted rw so offline tests run.
+            self.assertIn("vol-x:/app/.venv:rw", joined)
+            # the copy carries the worktree content; the real worktree is untouched.
+            self.assertEqual((scratch / "sentinel.txt").read_text(), "orig")
+            self.assertEqual((paths.worktree / "sentinel.txt").read_text(), "orig")
 
 
 if __name__ == "__main__":
