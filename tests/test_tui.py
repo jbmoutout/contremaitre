@@ -681,7 +681,7 @@ def test_phase_label_done_pr_needs_human_keeps_title_and_review_tail():
             phase="done",
             terminal_verdict="PR_NEEDS_HUMAN",
             pr_title="fix: harden cli review loop",
-            cli_review_states=[("codex", "completed", "MUST_FIX")],
+            cli_review_states=[("codex", [("completed", "MUST_FIX")])],
         )
     )
     assert "PR needs human" in text.plain
@@ -1093,7 +1093,7 @@ def test_derive_cli_review_states_streaming():
     # Tool started, not yet completed → surfaces as streaming.
     guardrails = [_g(events.CLI_REVIEW_STARTED, tool="claude")]
     states = _derive_cli_review_states(guardrails, "claude")
-    assert states == [("claude", "streaming", None)]
+    assert states == [("claude", [("streaming", None)])]
 
 
 def test_derive_cli_review_states_completed():
@@ -1103,7 +1103,7 @@ def test_derive_cli_review_states_completed():
         _g(events.CLI_REVIEW_COMPLETED, tool="claude", verdict="LOOKS_GOOD"),
     ]
     states = _derive_cli_review_states(guardrails, "claude")
-    assert states == [("claude", "completed", "LOOKS_GOOD")]
+    assert states == [("claude", [("completed", "LOOKS_GOOD")])]
 
 
 def test_derive_cli_review_states_failed_tool_surfaces_status():
@@ -1113,7 +1113,7 @@ def test_derive_cli_review_states_failed_tool_surfaces_status():
         _g(events.CLI_REVIEW_FAILED, tool="codex"),
     ]
     states = _derive_cli_review_states(guardrails, "codex")
-    assert states == [("codex", "failed", None)]
+    assert states == [("codex", [("failed", None)])]
 
 
 def test_derive_cli_review_states_filters_unstarted_tools():
@@ -1134,18 +1134,22 @@ def test_derive_cli_review_states_single_tool_returns_single_entry():
         _g(events.CLI_REVIEW_COMPLETED, tool="claude", verdict="NEEDS_ATTENTION"),
     ]
     assert _derive_cli_review_states(guardrails, "claude") == [
-        ("claude", "completed", "NEEDS_ATTENTION")
+        ("claude", [("completed", "NEEDS_ATTENTION")])
     ]
 
 
-def test_derive_cli_review_states_latest_round_wins():
+def test_derive_cli_review_states_accumulates_rounds():
+    # Each revision round adds a glyph; earlier rounds stay visible so the
+    # operator sees the review history, not just the latest round.
     guardrails = [
         _g(events.CLI_REVIEW_STARTED, tool="codex", round=1),
         _g(events.CLI_REVIEW_COMPLETED, tool="codex", round=1, verdict="MUST_FIX"),
         _g(events.CLI_REVIEW_STARTED, tool="codex", round=2),
     ]
 
-    assert _derive_cli_review_states(guardrails, "codex") == [("codex", "streaming", None)]
+    assert _derive_cli_review_states(guardrails, "codex") == [
+        ("codex", [("completed", "MUST_FIX"), ("streaming", None)])
+    ]
 
 
 def test_review_status_tail_renders_two_tool_glyphs_for_both():
@@ -1154,13 +1158,27 @@ def test_review_status_tail_renders_two_tool_glyphs_for_both():
     tail = _review_status_tail(
         sim_review_statuses=[],
         cli_review_states=[
-            ("claude", "completed", "LOOKS_GOOD"),
-            ("codex", "streaming", None),
+            ("claude", [("completed", "LOOKS_GOOD")]),
+            ("codex", [("streaming", None)]),
         ],
     )
     assert "CLAUDE Review" in tail.plain
     assert "CODEX Review" in tail.plain
     assert "✓" in tail.plain
+    assert "⏵" in tail.plain
+
+
+def test_review_status_tail_accumulates_round_glyphs():
+    # A tool that ran two rounds shows two glyphs in one segment so the
+    # revision history accumulates (MUST_FIX ✗ then re-review streaming ⏵).
+    tail = _review_status_tail(
+        sim_review_statuses=[],
+        cli_review_states=[
+            ("codex", [("completed", "MUST_FIX"), ("streaming", None)]),
+        ],
+    )
+    assert "CODEX Review" in tail.plain
+    assert "✗" in tail.plain
     assert "⏵" in tail.plain
 
 
@@ -1185,8 +1203,8 @@ def test_phase_label_cli_review_both_names_both_tools():
         **_default_label_kwargs(
             phase="cli_review",
             cli_review_states=[
-                ("claude", "streaming", None),
-                ("codex", "streaming", None),
+                ("claude", [("streaming", None)]),
+                ("codex", [("streaming", None)]),
             ],
         )
     )

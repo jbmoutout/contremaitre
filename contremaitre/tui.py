@@ -510,13 +510,14 @@ def _review_status_tail(
     cli_review_status: str | None = None,
     cli_review_tool: str = "",
     cli_review_verdict: str | None = None,
-    cli_review_states: list[tuple[str, str, str | None]] | None = None,
+    cli_review_states: list[tuple[str, list[tuple[str, str | None]]]] | None = None,
 ) -> Text:
-    """The `Review ✓ ✓  CODEX Review ⏵` footer tail.
+    """The `Review ✓ ✓  CODEX Review ✓ ⏵` footer tail.
 
-    `cli_review_states` (a list of `(tool, status, verdict)`) is the
-    multi-tool path — renders one glyph per active tool in execution
-    order.
+    `cli_review_states` (a list of `(tool, [(status, verdict), ...])`) is
+    the multi-tool path — renders one segment per tool in execution
+    order, with one glyph per revision round so the operator sees the
+    review history accumulate rather than only the latest round.
     """
 
     tail = Text()
@@ -529,13 +530,16 @@ def _review_status_tail(
             tail.append(g, style=st)
     states = cli_review_states
     if states is None and cli_review_status is not None:
-        states = [(cli_review_tool, cli_review_status, cli_review_verdict)]
+        states = [(cli_review_tool, [(cli_review_status, cli_review_verdict)])]
     if states:
-        for tool, status, verdict in states:
+        for tool, rounds in states:
             label = (tool or "CLI").upper()
             tail.append(f"  {label} Review ", style=_PAL_TEXT)
-            g, st = _cli_review_status_glyph(status, verdict)
-            tail.append(g, style=st)
+            for i, (status, verdict) in enumerate(rounds):
+                if i:
+                    tail.append(" ", style=_PAL_TEXT)
+                g, st = _cli_review_status_glyph(status, verdict)
+                tail.append(g, style=st)
     return tail
 
 
@@ -557,7 +561,7 @@ def _current_phase_label(
     cli_review_status: str | None = None,
     cli_review_tool: str = "",
     cli_review_verdict: str | None = None,
-    cli_review_states: list[tuple[str, str, str | None]] | None = None,
+    cli_review_states: list[tuple[str, list[tuple[str, str | None]]]] | None = None,
     provider_failure: dict | None = None,
 ) -> Text:
     """Phase name + sub-info (right of the trail).
@@ -644,7 +648,7 @@ def _current_phase_label(
                 # Multi-tool — name both reviewers in execution order so
                 # the operator sees which two are running, not a generic
                 # "CLI review".
-                tools = " + ".join(t.upper() for t, _, _ in cli_review_states)
+                tools = " + ".join(t.upper() for t, _ in cli_review_states)
                 label = f"{tools} review"
             else:
                 label = f"{(cli_review_tool or 'CLI').upper()} review"
@@ -1849,8 +1853,15 @@ def _aggregate_cli_review_verdict(verdicts: list[str | None]) -> str | None:
 
 def _derive_cli_review_states(
     guardrails: list[dict[str, Any]], choice: str
-) -> list[tuple[str, str, str | None]]:
-    """Return `[(tool, status, verdict)]` in render order for `choice`.
+) -> list[tuple[str, list[tuple[str, str | None]]]]:
+    """Return `[(tool, [(status, verdict), ...])]` in render order.
+
+    Each revision round re-runs every configured tool and re-emits
+    `cli_review_started`/`_completed`/`_failed` with an incrementing
+    `round`. The inner list holds one `(status, verdict)` per round in
+    chronological order, so the footer can show the revision history
+    accumulating (`CODEX Review ✓ ⏵`) rather than only the latest
+    round's glyph.
 
     `status` is one of `"streaming"`, `"completed"`, `"failed"`. Tools
     that haven't emitted `cli_review_started` yet are dropped — they'd
@@ -1863,43 +1874,46 @@ def _derive_cli_review_states(
     tools = _cli_reviewer_expand_choice(choice)
     if not tools:
         return []
-    out: list[tuple[str, str, str | None]] = []
+    out: list[tuple[str, list[tuple[str, str | None]]]] = []
     for tool in tools:
-        started_evt = next(
-            (
-                g
-                for g in reversed(guardrails)
-                if g.get("event") == "cli_review_started" and g.get("tool") == tool
-            ),
-            None,
-        )
-        if started_evt is None:
+        # One glyph per round, in first-seen order. Dedupe on round so a
+        # within-round retry doesn't spawn a duplicate glyph; `None`
+        # (round-less legacy events) collapses to a single round.
+        round_order: list[Any] = []
+        for g in guardrails:
+            if g.get("event") == "cli_review_started" and g.get("tool") == tool:
+                rn = g.get("round")
+                if rn not in round_order:
+                    round_order.append(rn)
+        if not round_order:
             continue
-        round_n = started_evt.get("round")
-        completed_evt = next(
-            (
-                g
-                for g in reversed(guardrails)
-                if g.get("event") == "cli_review_completed"
+        rounds: list[tuple[str, str | None]] = []
+        for round_n in round_order:
+            completed_evt = next(
+                (
+                    g
+                    for g in reversed(guardrails)
+                    if g.get("event") == "cli_review_completed"
+                    and g.get("tool") == tool
+                    and (round_n is None or g.get("round") == round_n)
+                ),
+                None,
+            )
+            failed = any(
+                g.get("event") == "cli_review_failed"
                 and g.get("tool") == tool
                 and (round_n is None or g.get("round") == round_n)
-            ),
-            None,
-        )
-        failed = any(
-            g.get("event") == "cli_review_failed"
-            and g.get("tool") == tool
-            and (round_n is None or g.get("round") == round_n)
-            for g in guardrails
-        )
-        if failed:
-            status = "failed"
-        elif completed_evt is not None:
-            status = "completed"
-        else:
-            status = "streaming"
-        verdict = completed_evt.get("verdict") if completed_evt else None
-        out.append((tool, status, verdict))
+                for g in guardrails
+            )
+            if failed:
+                status = "failed"
+            elif completed_evt is not None:
+                status = "completed"
+            else:
+                status = "streaming"
+            verdict = completed_evt.get("verdict") if completed_evt else None
+            rounds.append((status, verdict))
+        out.append((tool, rounds))
     return out
 
 
@@ -2488,13 +2502,15 @@ if _TEXTUAL_AVAILABLE:
             # reviewer is still streaming.
             cli_review_states = _derive_cli_review_states(guardrails, self.cli_reviewer)
             expected_tools = _cli_reviewer_expand_choice(self.cli_reviewer)
-            cli_review_started = any(
-                s[1] in ("streaming", "completed", "failed") for s in cli_review_states
-            )
-            cli_review_failed = any(s[1] == "failed" for s in cli_review_states)
+            # The aggregate flags describe the *latest* round per tool —
+            # the round currently in flight (or the one that just settled).
+            # Each tool's `rounds[-1]` is that round's state.
+            latest_status = {t: rounds[-1][0] for (t, rounds) in cli_review_states if rounds}
+            cli_review_started = bool(latest_status)
+            cli_review_failed = any(st == "failed" for st in latest_status.values())
             if expected_tools:
                 settled_tools = {
-                    t for (t, st, _v) in cli_review_states if st in ("completed", "failed")
+                    t for t, st in latest_status.items() if st in ("completed", "failed")
                 }
                 cli_review_completed = bool(settled_tools) and all(
                     t in settled_tools for t in expected_tools
@@ -2508,7 +2524,11 @@ if _TEXTUAL_AVAILABLE:
             # subprocess-exit-0 `✓`. Worst-case wins for `both`: if
             # either reviewer says MUST_FIX, the aggregate is MUST_FIX.
             cli_review_verdict: str | None = _aggregate_cli_review_verdict(
-                [v for (_t, st, v) in cli_review_states if st == "completed"]
+                [
+                    rounds[-1][1]
+                    for (_t, rounds) in cli_review_states
+                    if rounds and rounds[-1][0] == "completed"
+                ]
             )
 
             agent_turns = _text_event_count(agent_events)
@@ -2582,6 +2602,16 @@ if _TEXTUAL_AVAILABLE:
             cli_review_phase_live = cli_review_started and not (
                 cli_review_completed or cli_review_failed
             )
+            # The post-publish CLI review runs in its own reviewer
+            # container; the agent and SIM have already handed off. Their
+            # WORK-phase containers may linger a few seconds before
+            # teardown — without this, `_activity_state` would read the
+            # still-present-but-silent SIM container as `thinking…`,
+            # falsely implying the SIM is generating while the CLI
+            # reviewer is the only thing actually running.
+            if cli_review_phase_live:
+                agent_state = "idle"
+                sim_state = "idle"
             cli_review_running_state = _activity_state(
                 container_present=cli_review_phase_live,
                 file_age=cli_review_file_age,
