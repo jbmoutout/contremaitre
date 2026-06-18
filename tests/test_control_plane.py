@@ -99,6 +99,11 @@ class ControlPlaneTest(unittest.TestCase):
         self.assertEqual(result.verdict, TerminalVerdict.NO_PR_NEEDS_HUMAN)
         guardrails = (result.run_dir / "guardrail_events.jsonl").read_text(encoding="utf-8")
         self.assertIn(events.MALFORMED_VERDICT, guardrails)
+        # The run died before the L0 gate ran, so the eval records "NOT_EVALUATED"
+        # — not "FAIL". A run that never reached the gate is not a gate failure.
+        pr_eval = self._read_json(result.run_dir / "eval" / "pr_eval.json")
+        self.assertEqual(pr_eval["hard_gates"], "NOT_EVALUATED")
+        self.assertIsNone(pr_eval["hard_gate_details"])
 
     def test_forbidden_path_blocks_approved_publication(self):
         result, _ = self._run_fixture(run_slug="forbidden", agent_scenario="forbidden_path")
@@ -192,13 +197,13 @@ class CliReviewRevisionGateTest(unittest.TestCase):
 
         with (
             mock.patch.object(
-                orch, "_run_one_cli_reviewer", side_effect=lambda **_kw: next(reviews)
+                orch, "_run_one_cli_reviewer", side_effect=lambda **_kw: (next(reviews), None)
             ),
             mock.patch.object(orch, "_agent_turn", side_effect=agent_revision),
             mock.patch.object(orch, "_post_cli_review_status"),
             mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
         ):
-            verdict = orch._run_cli_review_loop(
+            verdict, _reason = orch._run_cli_review_loop(
                 worktree_git=worktree_git,
                 branch=branch,
                 outcome=outcome,
@@ -232,12 +237,14 @@ class CliReviewRevisionGateTest(unittest.TestCase):
             return "revision complete"
 
         with (
-            mock.patch.object(orch, "_run_one_cli_reviewer", return_value=self.MUST_FIX_REVIEW),
+            mock.patch.object(
+                orch, "_run_one_cli_reviewer", return_value=(self.MUST_FIX_REVIEW, None)
+            ),
             mock.patch.object(orch, "_agent_turn", side_effect=agent_revision),
             mock.patch.object(orch, "_post_cli_review_status"),
             mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
         ):
-            verdict = orch._run_cli_review_loop(
+            verdict, _reason = orch._run_cli_review_loop(
                 worktree_git=worktree_git,
                 branch=branch,
                 outcome=outcome,
@@ -264,7 +271,7 @@ class CliReviewRevisionGateTest(unittest.TestCase):
             mock.patch.object(orch, "_agent_turn") as agent_turn,
             mock.patch.object(orch, "_post_cli_review_status") as post_status,
         ):
-            verdict = orch._run_cli_review_loop(
+            verdict, reason = orch._run_cli_review_loop(
                 worktree_git=worktree_git,
                 branch=branch,
                 outcome=outcome,
@@ -274,18 +281,18 @@ class CliReviewRevisionGateTest(unittest.TestCase):
         self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
         agent_turn.assert_not_called()
         post_status.assert_called_once()
-        self.assertIn("review context failed", orch._last_cli_review_reason)
+        self.assertIn("review context failed", reason)
 
     def test_empty_cli_reviewer_output_requires_human_without_revision(self):
         orch, worktree_git, branch = self._prepared_orchestrator()
         outcome = self._published_outcome(orch, branch)
 
         with (
-            mock.patch.object(orch, "_run_one_cli_reviewer", return_value=""),
+            mock.patch.object(orch, "_run_one_cli_reviewer", return_value=("", None)),
             mock.patch.object(orch, "_agent_turn") as agent_turn,
             mock.patch.object(orch, "_post_cli_review_status"),
         ):
-            verdict = orch._run_cli_review_loop(
+            verdict, _reason = orch._run_cli_review_loop(
                 worktree_git=worktree_git,
                 branch=branch,
                 outcome=outcome,
@@ -313,7 +320,7 @@ class CliReviewRevisionGateTest(unittest.TestCase):
 
         with mock.patch("contremaitre.cli_actor.CliActorRunner") as runner_cls:
             runner_cls.return_value.cli_reviewer_turn.side_effect = ActorError(msg)
-            out = orch._run_one_cli_reviewer(
+            markdown, error = orch._run_one_cli_reviewer(
                 tool="codex",
                 prompt="review /review",
                 sink=orch.paths.codex_review_raw_export,
@@ -321,8 +328,8 @@ class CliReviewRevisionGateTest(unittest.TestCase):
                 review_dir=review_dir,
             )
 
-        self.assertIsNone(out)
-        self.assertEqual(orch._cli_review_last_error, f"codex: {msg}")
+        self.assertIsNone(markdown)
+        self.assertEqual(error, f"codex: {msg}")
         failures = [
             row
             for row in self._read_jsonl(orch.paths.guardrail_events)
@@ -337,18 +344,17 @@ class CliReviewRevisionGateTest(unittest.TestCase):
         orch, worktree_git, branch = self._prepared_orchestrator()
         outcome = self._published_outcome(orch, branch)
 
-        # None == hard failure already emitted by _run_one_cli_reviewer, which
-        # also records the specific reason on _cli_review_last_error.
+        # (None, error) == hard failure already emitted by _run_one_cli_reviewer,
+        # which returns the specific reason rather than stashing it on self.
         def _fail(**_kw):
-            orch._cli_review_last_error = "codex: token near expiry"
-            return None
+            return None, "codex: token near expiry"
 
         with (
             mock.patch.object(orch, "_run_one_cli_reviewer", side_effect=_fail),
             mock.patch.object(orch, "_agent_turn") as agent_turn,
             mock.patch.object(orch, "_post_cli_review_status"),
         ):
-            verdict = orch._run_cli_review_loop(
+            verdict, reason = orch._run_cli_review_loop(
                 worktree_git=worktree_git,
                 branch=branch,
                 outcome=outcome,
@@ -362,19 +368,21 @@ class CliReviewRevisionGateTest(unittest.TestCase):
             any(row.get("reason") == "empty_output" for row in guardrails),
             "must not re-log empty_output when the reviewer already emitted a failure",
         )
-        self.assertIn("token near expiry", orch._last_cli_review_reason)
+        self.assertIn("token near expiry", reason)
 
     def test_unparseable_cli_reviewer_output_requires_human_without_revision(self):
         orch, worktree_git, branch = self._prepared_orchestrator()
         outcome = self._published_outcome(orch, branch)
 
         with (
-            mock.patch.object(orch, "_run_one_cli_reviewer", return_value="Looks fine to me"),
+            mock.patch.object(
+                orch, "_run_one_cli_reviewer", return_value=("Looks fine to me", None)
+            ),
             mock.patch.object(orch, "_agent_turn") as agent_turn,
             mock.patch.object(orch, "_post_cli_review_status"),
             mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
         ):
-            verdict = orch._run_cli_review_loop(
+            verdict, _reason = orch._run_cli_review_loop(
                 worktree_git=worktree_git,
                 branch=branch,
                 outcome=outcome,
@@ -408,8 +416,7 @@ class CliReviewRevisionGateTest(unittest.TestCase):
         outcome = self._published_outcome(orch, branch)
 
         def cli_review_loop(**_kwargs):
-            orch._last_cli_review_reason = "post-publish CLI review exhausted"
-            return TerminalVerdict.PR_NEEDS_HUMAN
+            return TerminalVerdict.PR_NEEDS_HUMAN, "post-publish CLI review exhausted"
 
         publisher = SimpleNamespace(publish=mock.Mock(return_value=outcome))
         with (
@@ -473,7 +480,7 @@ class CliReviewRevisionGateTest(unittest.TestCase):
             runner = runner_cls.return_value
             runner.cli_reviewer_turn.return_value = SimpleNamespace(text="LOOKS_GOOD — clean")
 
-            out = orch._run_one_cli_reviewer(
+            markdown, error = orch._run_one_cli_reviewer(
                 tool="codex",
                 prompt="review /review",
                 sink=orch.paths.codex_review_raw_export,
@@ -481,7 +488,8 @@ class CliReviewRevisionGateTest(unittest.TestCase):
                 review_dir=review_dir,
             )
 
-        self.assertEqual(out, "LOOKS_GOOD — clean")
+        self.assertEqual(markdown, "LOOKS_GOOD — clean")
+        self.assertIsNone(error)
         self.assertIs(runner_cls.call_args.kwargs["config"], orch.config)
         self.assertFalse(runner_cls.call_args.kwargs["config"].allow_open_egress)
         runner.cli_reviewer_turn.assert_called_once_with(
@@ -496,12 +504,14 @@ class CliReviewRevisionGateTest(unittest.TestCase):
         outcome = self._published_outcome(orch, branch)
 
         with (
-            mock.patch.object(orch, "_run_one_cli_reviewer", return_value=self.MUST_FIX_REVIEW),
+            mock.patch.object(
+                orch, "_run_one_cli_reviewer", return_value=(self.MUST_FIX_REVIEW, None)
+            ),
             mock.patch.object(orch, "_agent_turn") as agent_turn,
             mock.patch.object(orch, "_post_cli_review_status"),
             mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
         ):
-            verdict = orch._run_cli_review_loop(
+            verdict, _reason = orch._run_cli_review_loop(
                 worktree_git=worktree_git,
                 branch=branch,
                 outcome=outcome,
@@ -545,13 +555,13 @@ class CliReviewRevisionGateTest(unittest.TestCase):
         with (
             mock.patch("contremaitre.cli_reviewer.expand_choice", return_value=("codex", "claude")),
             mock.patch.object(
-                orch, "_run_one_cli_reviewer", side_effect=lambda **_kw: next(reviews)
+                orch, "_run_one_cli_reviewer", side_effect=lambda **_kw: (next(reviews), None)
             ),
             mock.patch.object(orch, "_agent_turn", side_effect=agent_revision),
             mock.patch.object(orch, "_post_cli_review_status"),
             mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
         ):
-            verdict = orch._run_cli_review_loop(
+            verdict, _reason = orch._run_cli_review_loop(
                 worktree_git=worktree_git,
                 branch=branch,
                 outcome=outcome,

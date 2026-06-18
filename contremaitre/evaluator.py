@@ -19,7 +19,7 @@ patterns we adopt are copied in.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .checks import CheckResult
 from .diffscan import DiffScanResult
@@ -27,12 +27,30 @@ from .jsonlog import write_json
 from .models import RunPaths, TerminalVerdict
 from .run_artifacts import RunArtifacts
 
+if TYPE_CHECKING:
+    # Annotation-only: gates.py imports this module, so a runtime
+    # `from .gates import L0GateResult` would close evaluator → gates →
+    # evaluator. The body only touches `gate.passed` / `gate.payload`
+    # (duck-typed), so the type is needed by the checker, not at import time.
+    from .gates import L0GateResult
+
+
+def _hard_gates_status(gate: L0GateResult | None) -> str:
+    # Trichotomy mirroring the sibling `checks` field (`_checks_status` →
+    # "NOT_CONFIGURED"): a sentinel string in the status position, never a null
+    # status. `None` means the run ended before the L0 gate ran — distinct from
+    # FAIL ("the gate ran and refused"), so a pre-gate no-PR run is not recorded
+    # as a gate failure.
+    if gate is None:
+        return "NOT_EVALUATED"
+    return "PASS" if gate.passed else "FAIL"
+
 
 def write_eval_reports(
     *,
     paths: RunPaths,
     verdict: TerminalVerdict,
-    hard_gates: dict[str, Any],
+    gate: L0GateResult | None,
     checks: list[CheckResult],
     sim_review: dict[str, Any],
     trajectory: dict[str, Any],
@@ -71,7 +89,7 @@ def write_eval_reports(
 
     payload = {
         "verdict": verdict.value,
-        "hard_gates": "PASS" if hard_gates.get("passed") else "FAIL",
+        "hard_gates": _hard_gates_status(gate),
         "checks": checks_payload["status"],
         "sim_review": sim_review,
         "settled_conformance": "PENDING",
@@ -88,7 +106,7 @@ def write_eval_reports(
             "design_conformance": None,
             "architecture_value": None,
         },
-        "hard_gate_details": hard_gates,
+        "hard_gate_details": gate.payload if gate is not None else None,
     }
     write_json(paths.pr_eval, payload)
     paths.pr_eval_md.write_text(_render_md(payload), encoding="utf-8")

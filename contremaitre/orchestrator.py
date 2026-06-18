@@ -38,12 +38,11 @@ from .runtime_image import (
     clone_deps_volume_for_run,
     ensure_deps_volume,
 )
-from .diffscan import DiffScanResult
 from .evaluator import (
     sim_review_summary,
     write_eval_reports,
 )
-from .gates import INTERNAL_PATHS, evaluate_l0, only_internal_changes
+from .gates import INTERNAL_PATHS, L0GateResult, evaluate_l0, only_internal_changes
 from .extract import extract_run_artifacts
 from .viewer import build_viewer
 from .git_utils import GitRepo
@@ -55,6 +54,7 @@ from .models import (
     ParsedVerdict,
     ReviewVerdict,
     RunConfig,
+    RunOutcome,
     RunResult,
     State,
     TerminalVerdict,
@@ -105,14 +105,6 @@ class Orchestrator:
         # origin && git remote add origin <fork>` swap (which deletes
         # `refs/remotes/origin/<base>`).
         self._base_sha: str = ""
-        # Last-round SIM verdict. Stashed by _run_review so _write_eval can
-        # build the `sim_review` payload without threading it through the
-        # publication-gate path.
-        self._last_sim_parsed: ParsedVerdict | None = None
-        self._last_cli_review_reason: str | None = None
-        # Most recent per-tool CLI-review failure ("<tool>: <reason>"), used to
-        # surface a specific run-level reason instead of a generic message.
-        self._cli_review_last_error: str | None = None
 
     @property
     def _diff_base(self) -> str:
@@ -293,7 +285,7 @@ class Orchestrator:
             if parsed.verdict == ReviewVerdict.CHANGES_REQUESTED:
                 last_required_changes = list(parsed.required_changes)
                 last_parsed = parsed
-                last_sim = self._last_sim_parsed
+                last_sim = parsed
                 self._clear_implementation_complete()
                 self._emit(
                     events.REVISION_REQUESTED,
@@ -414,7 +406,6 @@ class Orchestrator:
         if sim_parsed is None:
             return None
         self._record_review_cycle(review_round, current_hash, sim_parsed, reviewer="sim")
-        self._last_sim_parsed = sim_parsed
         return sim_parsed, current_hash
 
     def _run_one_reviewer(
@@ -490,7 +481,7 @@ class Orchestrator:
         branch: str,
         outcome: PublishOutcome,
         actor,
-    ) -> TerminalVerdict:
+    ) -> tuple[TerminalVerdict, str | None]:
         """Post-PR CLI review loop: reviewer → revision → reviewer, up to max rounds.
 
         Each round runs every configured CLI tool and posts a PR comment. The
@@ -513,18 +504,19 @@ class Orchestrator:
         tools = list(_cli_reviewer.expand_choice(self.config.cli_reviewer))
 
         if not tools or not outcome.url:
-            self._last_cli_review_reason = None
-            return TerminalVerdict.READY_FOR_DRAFT_PR
+            return TerminalVerdict.READY_FOR_DRAFT_PR, None
 
         last_round_verdicts: list[tuple[str, str | None]] = []
-        self._last_cli_review_reason = "post-publish CLI review did not reach LOOKS_GOOD"
+        # Default reason for the max-rounds-exhausted exit; specific exits below
+        # return their own. Returned to the caller instead of stashed on self.
+        loop_reason: str | None = "post-publish CLI review did not reach LOOKS_GOOD"
 
         for cli_round in range(1, max_rounds + 1):
             self._transition(State.APPROVED, f"CLI review round {cli_round}/{max_rounds}")
             round_verdicts: list[tuple[str, str | None]] = []
             round_needs_revision = False
             round_reviewer_failed = False
-            self._cli_review_last_error = None
+            last_error: str | None = None
             all_required_changes: list[str] = []
 
             extras_dir = self.paths.run_dir / "extras" / f"cli_review_{cli_round:03d}"
@@ -537,7 +529,6 @@ class Orchestrator:
                     extras_dir=extras_dir,
                 )
             except Exception as exc:
-                self._last_cli_review_reason = f"review context failed: {exc}"
                 self._emit(
                     events.CLI_REVIEW_LOOP_BLOCKED,
                     round=cli_round,
@@ -548,7 +539,7 @@ class Orchestrator:
                     outcome=outcome,
                     verdicts=last_round_verdicts,
                 )
-                return TerminalVerdict.PR_NEEDS_HUMAN
+                return TerminalVerdict.PR_NEEDS_HUMAN, f"review context failed: {exc}"
 
             for tool in tools:
                 sink = _cli_reviewer.jsonl_sink_for(self.paths, tool)
@@ -562,7 +553,7 @@ class Orchestrator:
                     round_of=max_rounds,
                 )
                 start = time.monotonic()
-                markdown = self._run_one_cli_reviewer(
+                markdown, tool_error = self._run_one_cli_reviewer(
                     tool=tool,
                     prompt=prompt,
                     sink=sink,
@@ -578,14 +569,15 @@ class Orchestrator:
 
                 if markdown is None:
                     # Hard failure: _run_one_cli_reviewer already emitted a
-                    # specific CLI_REVIEW_FAILED and recorded the reason.
+                    # specific CLI_REVIEW_FAILED and returned the reason.
                     round_reviewer_failed = True
+                    last_error = tool_error or last_error
                     round_verdicts.append((tool, None))
                     continue
 
                 if not markdown:
                     round_reviewer_failed = True
-                    self._cli_review_last_error = f"{tool}: empty_output"
+                    last_error = f"{tool}: empty_output"
                     self._emit(
                         events.CLI_REVIEW_FAILED,
                         tool=tool,
@@ -663,12 +655,14 @@ class Orchestrator:
             last_round_verdicts = round_verdicts
 
             if round_reviewer_failed:
-                detail = self._cli_review_last_error or "no parseable verdict"
-                self._last_cli_review_reason = f"post-publish CLI review failed — {detail}"
+                detail = last_error or "no parseable verdict"
                 self._post_cli_review_status(
                     worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
                 )
-                return TerminalVerdict.PR_NEEDS_HUMAN
+                return (
+                    TerminalVerdict.PR_NEEDS_HUMAN,
+                    f"post-publish CLI review failed — {detail}",
+                )
 
             if not round_needs_revision:
                 self._emit(
@@ -676,11 +670,10 @@ class Orchestrator:
                     round=cli_round,
                     verdicts={t: v for t, v in round_verdicts},
                 )
-                self._last_cli_review_reason = None
                 self._post_cli_review_status(
                     worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
                 )
-                return TerminalVerdict.READY_FOR_DRAFT_PR
+                return TerminalVerdict.READY_FOR_DRAFT_PR, None
 
             if cli_round == max_rounds:
                 break
@@ -702,11 +695,13 @@ class Orchestrator:
                 max_rounds=max_rounds,
             )
             if not revision_ready:
-                self._last_cli_review_reason = "post-publish CLI review revision was blocked"
                 self._post_cli_review_status(
                     worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
                 )
-                return TerminalVerdict.PR_NEEDS_HUMAN
+                return (
+                    TerminalVerdict.PR_NEEDS_HUMAN,
+                    "post-publish CLI review revision was blocked",
+                )
 
         # Max rounds exhausted without reaching LOOKS_GOOD on all tools.
         self._emit(
@@ -717,7 +712,7 @@ class Orchestrator:
         self._post_cli_review_status(
             worktree_git=worktree_git, outcome=outcome, verdicts=last_round_verdicts
         )
-        return TerminalVerdict.PR_NEEDS_HUMAN
+        return TerminalVerdict.PR_NEEDS_HUMAN, loop_reason
 
     def _run_cli_review_revision(
         self,
@@ -837,15 +832,16 @@ class Orchestrator:
         sink: Path,
         round_n: int,
         review_dir: Path,
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         """Run one CLI reviewer tool in Docker for one round.
 
-        Returns the reviewer's markdown on success (may be an empty string if
-        the model genuinely produced nothing), or ``None`` on a hard failure —
-        in which case CLI_REVIEW_FAILED is already emitted with a specific
-        reason and that reason is stashed on ``self._cli_review_last_error`` for
-        run-level surfacing. The caller must distinguish ``None`` (failed, do
-        not re-log) from ``""`` (ran but empty).
+        Returns ``(markdown, error)``. On success ``markdown`` is the reviewer's
+        output (may be an empty string if the model genuinely produced nothing)
+        and ``error`` is ``None``. On a hard failure ``markdown`` is ``None`` and
+        ``error`` is the specific ``"<tool>: <reason>"`` detail — CLI_REVIEW_FAILED
+        is already emitted, so the caller carries the detail for run-level
+        surfacing rather than re-logging. The caller must distinguish ``None``
+        markdown (failed, do not re-log) from ``""`` (ran but empty).
 
         The reviewer sees only `/app:ro` plus the host-built `/review:ro`
         bundle. GitHub credentials and PR side effects stay host-owned. The
@@ -862,7 +858,7 @@ class Orchestrator:
                 round_n=round_n,
                 review_dir=review_dir,
             )
-            return output.text
+            return output.text, None
         except ActorError as exc:
             # Preflight/auth failures (e.g. token near expiry) carry a precise,
             # human-readable message already — surface it verbatim, not as an
@@ -870,14 +866,13 @@ class Orchestrator:
             reason = str(exc)
         except Exception as exc:
             reason = f"docker_error: {exc}"
-        self._cli_review_last_error = f"{tool}: {reason}"
         self._emit(
             events.CLI_REVIEW_FAILED,
             tool=tool,
             reason=reason,
             round=round_n,
         )
-        return None
+        return None, f"{tool}: {reason}"
 
     def _write_cli_review_context(
         self,
@@ -1015,9 +1010,7 @@ class Orchestrator:
             diff_base=self._diff_base,
             expected_hash=approved_hash,
         )
-        recomputed_hash = gate.recomputed_hash
         diff_scan = gate.diff_scan
-        hard_gates = gate.payload
         self._emit(
             events.HARD_GATES_CHECKED,
             passed=gate.passed,
@@ -1031,14 +1024,12 @@ class Orchestrator:
         # SIM approval + L0 hard gates still apply).
         checks_failed = any(not check.passed for check in checks)
 
-        if not hard_gates["passed"]:
+        if not gate.passed:
             return self._blocked_by_gates(
                 branch=branch,
                 approved_hash=approved_hash,
-                current_hash=recomputed_hash,
+                gate=gate,
                 checks=checks,
-                diff_scan=diff_scan,
-                hard_gates=hard_gates,
                 reason="hard gate failed",
                 sim_verdict=parsed,
             )
@@ -1046,22 +1037,20 @@ class Orchestrator:
             return self._blocked_by_gates(
                 branch=branch,
                 approved_hash=approved_hash,
-                current_hash=recomputed_hash,
+                gate=gate,
                 checks=checks,
-                diff_scan=diff_scan,
-                hard_gates=hard_gates,
                 reason="executable checks failed",
                 sim_verdict=parsed,
             )
 
         # Write eval BEFORE publish so `_derive_pr_metadata` can read the
-        # scorecard into the PR body. Safe because eval inputs (hard_gates,
-        # checks, parsed) are all in scope here, and `reason` is unused
-        # downstream when `sim_verdict` is set (always the case on this path).
+        # scorecard into the PR body. Safe because eval inputs (gate, checks,
+        # parsed) are all in scope here, and `reason` is unused downstream when
+        # `sim_verdict` is set (always the case on this path).
         self._write_eval(
             verdict=TerminalVerdict.READY_FOR_DRAFT_PR,
             checks=checks,
-            hard_gates=hard_gates,
+            gate=gate,
             needs_human=[],
             sim_verdict=parsed,
             reason="approved",
@@ -1084,7 +1073,7 @@ class Orchestrator:
         # triggers agent revisions on the same branch on any non-LOOKS_GOOD
         # verdict. Exits READY_FOR_DRAFT_PR (all LOOKS_GOOD) or PR_NEEDS_HUMAN
         # (max rounds exhausted). Never raises — the PR is already published.
-        terminal_verdict = self._run_cli_review_loop(
+        terminal_verdict, cli_reason = self._run_cli_review_loop(
             worktree_git=worktree_git,
             branch=branch,
             outcome=outcome,
@@ -1092,13 +1081,15 @@ class Orchestrator:
         )
         final_reason = outcome.reason
         if terminal_verdict != TerminalVerdict.READY_FOR_DRAFT_PR:
-            final_reason = (
-                self._last_cli_review_reason or "post-publish CLI review did not reach LOOKS_GOOD"
-            )
+            final_reason = cli_reason or "post-publish CLI review did not reach LOOKS_GOOD"
+            # Corrective eval write: the terminal verdict only exists after the
+            # CLI-review loop reviewed the already-published PR, so it cannot be
+            # folded into the provisional write above. Irreducible — see
+            # SETTLED_DESIGN.md (settled NO on collapsing to one write).
             self._write_eval(
                 verdict=terminal_verdict,
                 checks=checks,
-                hard_gates=hard_gates,
+                gate=gate,
                 needs_human=[final_reason],
                 sim_verdict=parsed,
                 reason=final_reason,
@@ -1119,49 +1110,31 @@ class Orchestrator:
         *,
         branch: str,
         approved_hash: str,
-        current_hash: str,
+        gate: L0GateResult,
         checks: list[CheckResult],
-        diff_scan: DiffScanResult,
-        hard_gates: dict[str, object],
         reason: str,
         sim_verdict: ParsedVerdict | None,
     ) -> RunResult:
+        diff_scan = gate.diff_scan
         self._emit(
             events.PUBLICATION_BLOCKED,
             reason=reason,
-            hard_gates=hard_gates,
-            forbidden_files=diff_scan.forbidden_files,
+            hard_gates=gate.payload,
+            forbidden_files=diff_scan.forbidden_files if diff_scan else [],
         )
-        record_publication(
-            self.paths,
-            PublishOutcome(
-                kind=PublishOutcomeKind.BLOCKED,
-                base=self.config.base,
-                publish_mode=self.config.publish_mode,
+        return self._finalize(
+            RunOutcome(
+                terminal_state=State.NO_PR,
+                verdict=TerminalVerdict.NO_PR_NEEDS_HUMAN,
                 reason=reason,
+                kind=PublishOutcomeKind.BLOCKED,
                 branch=branch,
-                approved_diff_hash=approved_hash,
-                current_diff_hash=current_hash,
-                dry_run=True,
-            ),
-        )
-        self._write_eval(
-            verdict=TerminalVerdict.NO_PR_NEEDS_HUMAN,
-            checks=checks,
-            hard_gates=hard_gates,
-            needs_human=[reason],
-            sim_verdict=sim_verdict,
-            reason=reason,
-        )
-        self._write_final_stats(State.NO_PR, TerminalVerdict.NO_PR_NEEDS_HUMAN, reason)
-        return RunResult(
-            run_id=self.run_id,
-            terminal_state=State.NO_PR,
-            verdict=TerminalVerdict.NO_PR_NEEDS_HUMAN,
-            run_dir=self.paths.run_dir,
-            worktree=self.paths.worktree,
-            pr_created=False,
-            reason=reason,
+                gate=gate,
+                checks=checks,
+                sim_verdict=sim_verdict,
+                approved_hash=approved_hash,
+                current_hash=gate.recomputed_hash,
+            )
         )
 
     def _terminal_no_pr(
@@ -1173,44 +1146,64 @@ class Orchestrator:
         checks: list[CheckResult] | None = None,
         sim_verdict: ParsedVerdict | None = None,
     ) -> RunResult:
+        return self._finalize(
+            RunOutcome(
+                terminal_state=State.NO_PR,
+                verdict=verdict,
+                reason=reason,
+                kind=PublishOutcomeKind.NO_PR,
+                branch=branch,
+                gate=None,
+                checks=checks or [],
+                sim_verdict=sim_verdict,
+            )
+        )
+
+    def _finalize(self, outcome: RunOutcome) -> RunResult:
+        """Record a no-PR terminal: pr.json + eval + stats + RunResult.
+
+        The single home of the terminal recipe shared by `_terminal_no_pr` and
+        `_blocked_by_gates`. NOT used by the publish path — its verdict is
+        late-bound (out of the post-publish CLI-review loop) and its `pr.json` is
+        written by the publisher itself, so `record_publication` here is
+        no-PR-only. See SETTLED_DESIGN.md.
+        """
         record_publication(
             self.paths,
             PublishOutcome(
-                kind=PublishOutcomeKind.NO_PR,
+                kind=outcome.kind,
                 base=self.config.base,
                 publish_mode=self.config.publish_mode,
-                reason=reason,
-                branch=branch,
+                reason=outcome.reason,
+                branch=outcome.branch,
+                approved_diff_hash=outcome.approved_hash,
+                current_diff_hash=outcome.current_hash,
                 dry_run=True,
             ),
         )
-        self._write_eval(
-            verdict=verdict,
-            checks=checks or [],
-            hard_gates={
-                "passed": False,
-                "checks": {
-                    "diff_scan": False,
-                    "clean_worktree": False,
-                    "diff_hash_matched": False,
-                    "draft_only": True,
-                },
-                "forbidden_files": [],
-                "changed_files": [],
-            },
-            needs_human=[reason] if verdict != TerminalVerdict.NO_PR_CHANGES_REQUESTED else [],
-            sim_verdict=sim_verdict,
-            reason=reason,
+        # NO_PR_CHANGES_REQUESTED means "the SIM kept asking for changes until we
+        # ran out of rounds" — not a human-escalation, so it carries no
+        # needs_human entry; every other no-PR terminal does.
+        needs_human = (
+            [] if outcome.verdict == TerminalVerdict.NO_PR_CHANGES_REQUESTED else [outcome.reason]
         )
-        self._write_final_stats(State.NO_PR, verdict, reason)
+        self._write_eval(
+            verdict=outcome.verdict,
+            checks=outcome.checks,
+            gate=outcome.gate,
+            needs_human=needs_human,
+            sim_verdict=outcome.sim_verdict,
+            reason=outcome.reason,
+        )
+        self._write_final_stats(outcome.terminal_state, outcome.verdict, outcome.reason)
         return RunResult(
             run_id=self.run_id,
-            terminal_state=State.NO_PR,
-            verdict=verdict,
+            terminal_state=outcome.terminal_state,
+            verdict=outcome.verdict,
             run_dir=self.paths.run_dir,
             worktree=self.paths.worktree,
             pr_created=False,
-            reason=reason,
+            reason=outcome.reason,
         )
 
     def _write_eval(
@@ -1218,24 +1211,12 @@ class Orchestrator:
         *,
         verdict: TerminalVerdict,
         checks: list[CheckResult],
-        hard_gates: dict[str, object],
+        gate: L0GateResult | None,
         needs_human: list[str],
         sim_verdict: ParsedVerdict | None,
         reason: str,
     ) -> None:
-        # `sim_verdict` is the verdict that drove publication (or the last seen
-        # before a terminal-no-pr). `_last_sim_parsed` carries the per-round
-        # breakdown set by `_run_review`.
-        sim_parsed = self._last_sim_parsed
-        if sim_verdict is not None and sim_parsed is not None:
-            sim_review = sim_review_summary(
-                verdict=sim_parsed.verdict.value,
-                confidence=sim_parsed.confidence,
-                summary=sim_parsed.summary,
-                required_changes=sim_parsed.required_changes,
-                checks_performed=sim_parsed.checks_performed,
-            )
-        elif sim_verdict is not None:
+        if sim_verdict is not None:
             sim_review = sim_review_summary(
                 verdict=sim_verdict.verdict.value,
                 confidence=sim_verdict.confidence,
@@ -1252,7 +1233,7 @@ class Orchestrator:
         write_eval_reports(
             paths=self.paths,
             verdict=verdict,
-            hard_gates=hard_gates,
+            gate=gate,
             checks=checks,
             sim_review=sim_review,
             trajectory={

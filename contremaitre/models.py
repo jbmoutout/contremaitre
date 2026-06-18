@@ -10,7 +10,17 @@ import re
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Annotation-only. models.py is the zero-dependency root; importing these at
+    # runtime would close import cycles (models → gates → evaluator → models;
+    # models → checks → models; models → publisher → models). `from __future__
+    # import annotations` (above) keeps the field annotations as lazy strings, so
+    # these names are only ever needed by a type checker, never at import time.
+    from .checks import CheckResult
+    from .gates import L0GateResult
+    from .publisher import PublishOutcomeKind
 
 
 class State(str, Enum):
@@ -423,3 +433,32 @@ class RunResult:
     worktree: Path
     pr_created: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """Everything a no-PR terminal needs to record how a run ended.
+
+    The value the two no-PR terminals (`_terminal_no_pr`, `_blocked_by_gates`)
+    build and hand to `Orchestrator._finalize`, which runs the identical
+    record-publication / write-eval / write-stats / build-RunResult recipe once.
+    The publish path does NOT use this — its outcome is late-bound (the terminal
+    verdict comes out of the post-publish CLI-review loop) and its eval write
+    straddles publish, so it reuses the shared *primitive writers* in its own
+    order instead.
+
+    `gate` is the real L0 result on the BLOCKED path and `None` on the no-gate
+    NO_PR path — never a fabricated dict. `write_eval_reports` renders `None` as
+    `"NOT_EVALUATED"`, distinguishing "the gate never ran" from "the gate failed".
+    """
+
+    terminal_state: State
+    verdict: TerminalVerdict
+    reason: str
+    kind: PublishOutcomeKind
+    branch: str | None
+    gate: L0GateResult | None
+    checks: list[CheckResult]
+    sim_verdict: ParsedVerdict | None
+    approved_hash: str | None = None
+    current_hash: str | None = None
