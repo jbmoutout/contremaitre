@@ -1,4 +1,4 @@
-Review this pull request (round {round_n} of {round_of}). Do not call `gh` — no GitHub credentials exist in this container. Do not run tests (no deps, no network — tests run as a separate gate).
+Review this pull request (round {round_n} of {round_of}). Do not call `gh` — no GitHub credentials exist in this container. You may run the project's tests to ground your findings: they run offline against the warmed dependency cache, in a throwaway copy of the worktree (your changes there are discarded — this review emits markdown only).
 
 ```diff
 {diff}

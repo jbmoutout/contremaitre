@@ -200,20 +200,21 @@ def _safe_name(lockfile_name: str) -> str:
 
 
 # Roles that read/reason over the diff but never execute the project's code.
-# Test execution is a separate deterministic gate (the agent's self-verify +
-# the L1 `check` sidecar), never an LLM reviewer's job.
-_NON_EXECUTING_ROLES = frozenset({"review", "cli_review"})
+# Publication gating stays a deterministic gate (the agent's self-verify + the L1
+# `check` sidecar): the pre-publish `review` (SIM) role never executes, so LLM
+# judgement can't blur into it. `cli_review` runs POST-publish (revision advice on
+# an already-drafted PR), so it may run tests to ground its findings — it gets deps.
+_NON_EXECUTING_ROLES = frozenset({"review"})
 
 
 def deps_mount_mode(role: str, worktree_mount_mode: str) -> str | None:
     """Deps-volume mount mode for an actor role, or None to skip the mount.
 
-    Deps follow execution: only the **agent** runs the project's tests, so
-    only it needs a writable venv. The **sim** reasons over the diff with a
-    read-only venv; the **review / cli_review** roles never touch deps —
-    keeping them deps-free preserves "hard gates are deterministic, LLM
-    judgement never gates publication" and keeps the cli_reviewer prompt's
-    "(no deps…)" line literally true.
+    Deps follow execution: the **agent** runs the project's tests (writable venv);
+    the **cli_review** role (post-publish revision advice) may run them too, against
+    a throwaway worktree copy. The **sim** reasons over the diff with a read-only
+    venv. The pre-publish **review** role never touches deps — keeping it deps-free
+    preserves "hard gates are deterministic, LLM judgement never gates publication."
 
     For executing/reasoning roles the deps mount mirrors the worktree mode
     (agent → rw, sim → ro), so it never grants more write access than the

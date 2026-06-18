@@ -684,10 +684,16 @@ def _active_codex_roles(args: argparse.Namespace) -> bool:
     containers ignore the internal network anyway.
     """
 
+    from .egress import CREDENTIAL_BEARING_CLI_TOOLS
+
     agent_name = getattr(args, "agent", "fake")
     sim_name = getattr(args, "sim", None) or agent_name
     reviewer = getattr(args, "cli_reviewer", "none")
-    return "codex" in {agent_name, sim_name} or reviewer in {"codex", "auto"}
+    # A credential-bearing CLI tool (codex) is what pulls in the egress lock; an
+    # `auto` reviewer is treated as possibly-codex (it picks the cross-family tool).
+    return bool({agent_name, sim_name} & CREDENTIAL_BEARING_CLI_TOOLS) or reviewer in (
+        CREDENTIAL_BEARING_CLI_TOOLS | {"auto"}
+    )
 
 
 def _cli_egress_is_auto(args: argparse.Namespace) -> bool:

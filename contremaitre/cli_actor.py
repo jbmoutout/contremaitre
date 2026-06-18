@@ -69,13 +69,14 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Protocol
 
-from . import events
+from . import egress, events
 from .actors import ActorError, ActorOutput, _run_detached_container
 from .jsonlog import append_jsonl, append_transcript
 from .models import RunConfig, RunPaths
@@ -859,18 +860,25 @@ class CliActorRunner:
     ) -> ActorOutput:
         """Single-shot post-PR CLI reviewer turn in Docker (no session resume).
 
-        The reviewer mounts the worktree read-only and receives host-owned PR
-        context at `/review:ro`. It emits markdown only; the host posts that
-        markdown to GitHub after the container exits. The `reviewer_id` routes
-        the log stream to the cli_reviewer pane in the TUI.
+        The reviewer receives host-owned PR context at `/review:ro` and emits
+        markdown only; the host posts that markdown to GitHub after the container
+        exits. To let it run the project's tests to ground its findings, `/app` is
+        a THROWAWAY copy of the worktree mounted RW (so pytest can write caches and
+        the deps volume mounts writable) — any edits it makes are discarded with the
+        run, keeping the published diff untouched. The `reviewer_id` routes the log
+        stream to the cli_reviewer pane in the TUI.
         """
         home = self.paths.run_dir / f"{self.driver.home_dir_prefix}-cli-review-{round_n}-home"
+        scratch = self.paths.run_dir / f"cli-review-worktree-{round_n}"
+        if scratch.exists():
+            shutil.rmtree(scratch)
+        shutil.copytree(self.worktree, scratch, symlinks=True)
         return self._cli_turn(
             role="cli_review",
             prompt=prompt,
             raw_export=raw_export,
             home=home,
-            mount_mode="ro",
+            mount_mode="rw",
             model="",  # falls through to codex_model / claude_model in driver
             session_attr=None,  # fresh session every round
             timeout_seconds=self.config.agent_timeout_seconds,
@@ -878,27 +886,25 @@ class CliActorRunner:
             speaker="cli_reviewer",
             reviewer_id="cli_review",
             extra_mounts=((review_dir, "/review", "ro"),),
+            worktree=scratch,
         )
 
     # ----- security-critical seam ------------------------------------------
 
     def _assert_egress_locked(self) -> None:
-        """Refuse to launch a token-carrying CLI container without locked egress.
+        """Refuse to launch a credential-bearing CLI container without locked egress.
 
-        Only codex carries an in-container credential (a short-lived access
-        token in the mounted home) that outlives the turn, so only codex needs
-        the lock: an `--internal` docker_network (no route, no external DNS) AND
-        an allowlisting https_proxy (the sole exit). `allow_open_egress` is the
-        explicit, warned escape hatch.
-
-        claude holds no usable credential — the host auth-inject proxy adds the
-        bearer per request — so there is nothing to exfiltrate and it returns
-        early, free to run open egress.
+        The single egress rule lives in `egress.cli_tool_locked` (codex carries a
+        short-lived in-container token → locked; claude is host-injected → open).
+        A container that doesn't need the lock returns early; one that does must
+        have BOTH an `--internal` docker_network (no route, no external DNS) AND an
+        allowlisting https_proxy (the sole exit). `allow_open_egress` is the
+        explicit, warned escape hatch (folded into `cli_tool_locked`).
         """
 
-        if self.driver.name == "claude":
-            return
-        if self.config.allow_open_egress:
+        if not egress.cli_tool_locked(
+            self.driver.name, allow_open_egress=self.config.allow_open_egress
+        ):
             return
         if not (self.config.docker_network and self.config.https_proxy):
             raise ActorError(
@@ -925,6 +931,7 @@ class CliActorRunner:
         speaker: str,
         reviewer_id: str | None = None,
         extra_mounts: tuple[tuple[Path, str, str], ...] = (),
+        worktree: Path | None = None,
     ) -> ActorOutput:
         self._assert_egress_locked()
         self.driver.ensure_ready()
@@ -960,6 +967,7 @@ class CliActorRunner:
             mount_mode=mount_mode,
             role=role,
             extra_mounts=extra_mounts,
+            worktree=worktree,
         )
         env = self.driver.container_env(self._docker_env())
         # Emit the runtime-agnostic actor-start guardrail BEFORE launch, exactly
@@ -1031,14 +1039,19 @@ class CliActorRunner:
         mount_mode: str,
         role: str,
         extra_mounts: tuple[tuple[Path, str, str], ...] = (),
+        worktree: Path | None = None,
     ) -> list[str]:
         """`docker run -d` argv for one CLI turn. The security-critical builder.
 
         Mounts: worktree -> /app:{rw|ro}; the per-run home -> the driver's mount
         target:rw (RW mandatory — the CLI writes session/state); any extra_mounts
-        (e.g. the /review context). Proxy + driver env vars are forwarded by NAME
-        only (`-e NAME`, value via the docker-run env), never inlined on argv.
+        (e.g. the /review context). `worktree` overrides the mounted tree (the
+        cli_review role passes a throwaway copy); defaults to the run's worktree.
+        Proxy + driver env vars are forwarded by NAME only (`-e NAME`, value via
+        the docker-run env), never inlined on argv.
         """
+
+        worktree = worktree or self.worktree
 
         inner = self.driver.inner_argv(
             prompt=prompt,
@@ -1062,7 +1075,7 @@ class CliActorRunner:
             "-v",
             f"{home}:{self.driver.home_mount_target}:rw",
             "-v",
-            f"{self.worktree}:/app:{mount_mode}",
+            f"{worktree}:/app:{mount_mode}",
         ]
         # Deps volume, role-aware (deps_mount_mode): the agent gets a
         # writable warmed venv so it can self-verify (`uv run pytest`) —
@@ -1087,18 +1100,19 @@ class CliActorRunner:
     def _egress_docker_flags(self) -> list[str]:
         """Per-tool network + proxy docker flags for a CLI container.
 
-        Resolved by the role's driver (each runner is bound to one tool):
+        Keyed on the central `egress` classification (each runner is bound to one
+        tool):
 
-        - **claude** carries no in-container credential — the host auth-inject
-          proxy adds the bearer — so it runs OPEN egress and only needs
-          `host.docker.internal` to reach that proxy. It must NOT join the
+        - **host-injected** tools (claude) carry no in-container credential — the
+          host auth-inject proxy adds the bearer — so they run OPEN egress and only
+          need `host.docker.internal` to reach that proxy. They must NOT join the
           internal egress-lock network (a codex reviewer in the same run sets
           `docker_network`), which has no route to the host.
-        - **codex** still mounts a short-lived access token, so it stays on the
-          locked internal network + allowlisting HTTPS proxy (the egress lock).
+        - **credential-bearing** tools (codex) mount a short-lived access token, so
+          they stay on the locked internal network + allowlisting HTTPS proxy.
         """
 
-        if self.driver.name == "claude":
+        if not egress.is_credential_bearing(self.driver.name):
             return ["--add-host", "host.docker.internal:host-gateway"]
         flags: list[str] = []
         if self.config.docker_network:

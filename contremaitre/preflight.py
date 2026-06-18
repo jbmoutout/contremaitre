@@ -212,17 +212,19 @@ def _check_readonly_mount(config: RunConfig) -> PreflightCheck:
 
 
 def _check_network_policy(config: RunConfig) -> PreflightCheck:
+    from . import egress
+
     active = _active_cli_tools(config)
     codex_active = "codex" in active
     claude_active = "claude" in active
     opencode_active = ActorMode.OPENCODE in {config.actor_mode, config.sim_actor_mode}
-    # Only codex carries a token INSIDE its container, so only codex requires the
-    # egress lock: an `--internal` docker network AND an allowlisting https proxy
-    # (exactly `cli_actor._assert_egress_locked` for codex). Gate on BOTH — a
-    # generic "either is set" check would pass a half-configured run the first
-    # codex turn then refuses. `_maybe_provision_cli_egress` sets both before we
-    # land.
-    if codex_active and not config.allow_open_egress:
+    # The egress rule lives in `egress` (a credential-bearing CLI tool needs the
+    # lock). Requiring the lock means BOTH an `--internal` docker network AND an
+    # allowlisting https proxy (exactly `cli_actor._assert_egress_locked`). Gate on
+    # BOTH — a generic "either is set" check would pass a half-configured run the
+    # first codex turn then refuses. `_maybe_provision_cli_egress` sets both before
+    # we land.
+    if egress.any_locked_cli_tool(active, allow_open_egress=config.allow_open_egress):
         if config.docker_network and config.https_proxy:
             return _pass(
                 "network_policy",

@@ -233,7 +233,10 @@ HARD GATES (host, all must pass; deterministic)
 
 POST-PUBLISH CLI REVIEW LOOP  (only when --cli-reviewer != none)
 
-  Runs in Docker (role=cli_review, /review :ro, provider-only CLI egress).
+  Runs in Docker (role=cli_review, /review :ro, provider-only CLI egress). /app is
+  a throwaway copy of the worktree mounted rw + the deps volume, so the reviewer
+  may run the project's tests offline to ground its findings; its edits are
+  discarded (it emits markdown only, the published diff is untouched).
   Up to max_cli_review_rounds (default 3) rounds. cli_reviewer.py + _run_cli_review_loop():
 
     - host writes extras/cli_review_{n:03d}/input/ with:
@@ -391,6 +394,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`checks.py`](../contremaitre/checks.py) — `--check-cmd` runner. Every real runtime (opencode AND cli) runs each check in a sidecar container with the run's worktree + deps volume, joined to the agent's `docker_network`, 600s timeout — so the gate is hermetic and executes under the same toolchain + egress the agent faced (a codex gate runs under the lock, offline, against the warmed deps). Only FAKE mode (no docker) runs on the host. The sidecar is credential-free (no token/home), so it's safe under the lock.
 - [`cli.py`](../contremaitre/cli.py) — argparse, subcommand dispatch (`run`, `doctor`, `models`, `fixture`, `image`, `tui`, `cleanup`, `eval`), auto-derived clone cache at `~/.cache/contremaitre/<host>-<owner>-<repo>/`, slim launch sequence (Zen picker → pre-flight presence check → recap+Y/n → egress provision), codex egress auto-provision (`_maybe_provision_cli_egress`), image staleness rebuild (compares `contremaitre.dockerfile-sha256` label).
 - [`cli_actor.py`](../contremaitre/cli_actor.py) — `CliActorRunner` + the `CliDriver` abstraction (`CodexDriver` / `ClaudeDriver`): drives `codex` or `claude` headless in the per-run container as agent / SIM / reviewer. The runner owns shared orchestration (egress lock, per-run home, detached run + stdout→raw_export, timestamp back-fill, session-attr, transcript, docker wrapper); each driver owns its auth (codex: neutered refresh token, per-turn re-seed, host-side expiry refresh / claude: no in-container token — base-url + dummy bearer, with the real token injected by the host `cli_auth_proxy`), in-container argv, and event parsing. See [CLI actor (codex / claude)](#cli-actor-codex--claude-auth--egress-lock).
+- [`egress.py`](../contremaitre/egress.py) — single source of truth for CLI egress posture: `CREDENTIAL_BEARING_CLI_TOOLS` + `is_credential_bearing` / `cli_tool_locked` / `any_locked_cli_tool`. The one rule (codex token-bearing → locked; claude host-injected → open) that provisioning (`cli.py`), preflight, the runner's refuse-to-launch guard, and the docker flags all read from so it can't drift.
 - [`cli_egress.py`](../contremaitre/cli_egress.py) (+ [`cli_egress_squid.conf`](../contremaitre/cli_egress_squid.conf)) — turnkey two-layer egress lock for codex: an `--internal` docker network + an allowlist squid proxy (`ensure_egress_proxy`). Idempotent + shared across runs; recreates the proxy on squid-conf hash drift (`contremaitre.squid-sha256` label).
 - [`cli_reviewer.py`](../contremaitre/cli_reviewer.py) — post-publish CLI review loop helpers: prompt assembly (`build_prompt` with round context), verdict parsing (`parse_verdict`, `extract_required_changes`), model extraction, H3 metadata header (`format_header`), `gh pr comment` posting, worst-of-N verdict → `gh api` commit-status projection (context `contremaitre/cli-review`). The reviewer itself runs via `CliActorRunner.cli_reviewer_turn()` in Docker; this module owns only the stateless helpers + host-side `gh` calls.
 - [`costs.py`](../contremaitre/costs.py) — recorded-cost extraction from JSONL streams; provider-side limits remain the real guardrail.
