@@ -8,7 +8,9 @@ from unittest.mock import patch, MagicMock
 from contremaitre.models import DepsVolume
 from contremaitre.runtime_image import (
     _LOCKFILES,
+    DepsInstallError,
     _detect,
+    _is_lock_sync_failure,
     _offline_assert_cmd,
     assert_deps_offline,
     clone_deps_volume_for_run,
@@ -315,6 +317,97 @@ class EnsureDepsVolumeInstallShapeTest(unittest.TestCase):
         # Project slug is in the volume name so two repos with the same
         # lockfile kind don't evict each other in _prune_stale_deps_volumes.
         self.assertIn("myproject", handle.name)
+
+
+class NpmCiFallbackTest(unittest.TestCase):
+    """`npm ci` refusing a platform-incomplete lockfile (EUSAGE) falls back
+    to `npm install` at warm time, then restores the worktree lockfile so
+    the agent's diff carries only its own work. A non-EUSAGE failure (a
+    genuinely broken repo) stays terminal — no fallback.
+    """
+
+    EUSAGE = (
+        "npm error code EUSAGE\n"
+        "npm error `npm ci` can only install packages when your package.json "
+        "and package-lock.json or npm-shrinkwrap.json are in sync.\n"
+        "npm error Missing: @emnapi/runtime@1.11.1 from lock file\n"
+    )
+
+    def _drive(self, *, ci_rc, ci_stderr, fallback_rc):
+        """Run ensure_deps_volume with subprocess.run faked per-command.
+
+        Returns (calls, error, log_text).
+        """
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append([str(c) for c in cmd])
+            joined = " ".join(str(c) for c in cmd)
+            if "volume" in cmd and "create" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "git" in cmd and "checkout" in cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "npm ci" in joined:
+                return MagicMock(returncode=ci_rc, stdout="", stderr=ci_stderr)
+            if "npm install" in joined:
+                return MagicMock(returncode=fallback_rc, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")  # volume rm
+
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as runs:
+            repo = Path(tmp)
+            (repo / "package-lock.json").write_text("{}", encoding="utf-8")
+            runs_root = Path(runs)
+            error: DepsInstallError | None = None
+            with (
+                patch("contremaitre.runtime_image._volume_exists", return_value=False),
+                patch("contremaitre.runtime_image._prune_stale_deps_volumes"),
+                patch("contremaitre.runtime_image.subprocess.run", side_effect=fake_run),
+            ):
+                try:
+                    ensure_deps_volume(
+                        repo=repo, base_image="img", runs_root=runs_root, project_id="p"
+                    )
+                except DepsInstallError as exc:
+                    error = exc
+            logs = list(runs_root.glob("_deps_install_*.log"))
+            log_text = logs[0].read_text(encoding="utf-8") if logs else ""
+        return calls, error, log_text
+
+    def test_signature_requires_both_markers(self):
+        self.assertTrue(_is_lock_sync_failure(self.EUSAGE))
+        # A bare usage error (bad flag) is EUSAGE too, but not a sync failure.
+        self.assertFalse(_is_lock_sync_failure("npm error code EUSAGE\nUsage: npm ci"))
+        self.assertFalse(_is_lock_sync_failure("npm error code E404 not found"))
+
+    def test_eusage_triggers_fallback_then_restores_lockfile(self):
+        calls, error, log_text = self._drive(ci_rc=1, ci_stderr=self.EUSAGE, fallback_rc=0)
+        self.assertIsNone(error)  # fallback succeeded → run proceeds
+        joined_calls = [" ".join(c) for c in calls]
+        self.assertTrue(any("npm install" in c for c in joined_calls), "fallback not attempted")
+        # The worktree lockfile is restored so it doesn't leak into the diff.
+        self.assertTrue(
+            any("checkout" in c and "package-lock.json" in c for c in joined_calls),
+            "lockfile not restored after fallback",
+        )
+        self.assertIn("falling back", log_text)
+
+    def test_fallback_failure_stays_terminal(self):
+        calls, error, _ = self._drive(ci_rc=1, ci_stderr=self.EUSAGE, fallback_rc=1)
+        self.assertIsInstance(error, DepsInstallError)  # fallback also failed
+        joined_calls = [" ".join(c) for c in calls]
+        self.assertTrue(any("npm install" in c for c in joined_calls), "fallback not attempted")
+        # No restore when the fallback itself failed.
+        self.assertFalse(any("checkout" in c for c in joined_calls))
+
+    def test_non_eusage_failure_does_not_fall_back(self):
+        calls, error, log_text = self._drive(
+            ci_rc=1, ci_stderr="npm error code ELIFECYCLE\npostinstall failed", fallback_rc=0
+        )
+        self.assertIsInstance(error, DepsInstallError)  # a real break stays terminal
+        joined_calls = [" ".join(c) for c in calls]
+        self.assertFalse(any("npm install" in c for c in joined_calls), "should not fall back")
+        self.assertNotIn("falling back", log_text)
 
 
 class PruneScopeTest(unittest.TestCase):

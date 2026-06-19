@@ -79,6 +79,19 @@ class _Lockfile:
     build backend the runtime needs is missing and can't be fetched under
     the locked egress. Only set where it exercises that path for real;
     empty (`""`) means "no canary — rely on the operator's check command."
+
+    `fallback_cmd` is a re-resolving install to retry with when the
+    frozen `install_cmd` refuses a lockfile it judges out-of-sync (npm
+    ci's EUSAGE — see `_is_lock_sync_failure`). A valid lockfile can be
+    platform-incomplete: optional native/wasm bindings whose caret-ranged
+    deps the frozen path on linux insists be pinned (tailwind v4's
+    `oxide-wasm32-wasi` floats `@emnapi/*` at `^1.10.0`; the lock works
+    on macOS and Vercel, only `npm ci` on linux rejects it). The fallback
+    runs at warm time under open egress, so it can fetch and re-resolve.
+    It mutates the worktree lockfile as a side effect; the caller restores
+    it afterward so the agent's diff stays clean. Empty (`""`) means "no
+    fallback — a frozen-install failure is terminal," which is right for
+    ecosystems where a sync failure does signal a genuinely broken repo.
     """
 
     name: str
@@ -86,6 +99,7 @@ class _Lockfile:
     cache_mount_path: str
     runtime_env: tuple[tuple[str, str], ...] = ()
     canary_cmd: str = ""
+    fallback_cmd: str = ""
 
 
 _PY_VENV_ENV: tuple[tuple[str, str], ...] = (
@@ -111,7 +125,12 @@ _UV_CANARY = "uv run python -c ''"
 
 
 _LOCKFILES: tuple[_Lockfile, ...] = (
-    _Lockfile("package-lock.json", "npm ci --no-audit --no-fund", "node_modules"),
+    _Lockfile(
+        "package-lock.json",
+        "npm ci --no-audit --no-fund",
+        "node_modules",
+        fallback_cmd="npm install --no-audit --no-fund",
+    ),
     _Lockfile("pnpm-lock.yaml", "corepack pnpm install --frozen-lockfile", "node_modules"),
     _Lockfile("yarn.lock", "yarn install --frozen-lockfile --non-interactive", "node_modules"),
     _Lockfile(
@@ -199,6 +218,26 @@ def _safe_name(lockfile_name: str) -> str:
     return lockfile_name.replace(".", "-")
 
 
+def _is_lock_sync_failure(stderr: str) -> bool:
+    """True when npm ci refused a lockfile it judged out-of-sync (EUSAGE).
+
+    `npm ci` aborts with `code EUSAGE` and "can only install packages when
+    your package.json and package-lock.json ... are in sync" when the lock
+    doesn't pin a dependency it resolves. The common benign cause is a
+    lockfile that's valid but platform-incomplete — optional native/wasm
+    bindings (tailwind v4 `oxide-wasm32-wasi`, sharp, etc.) whose
+    caret-ranged transitive deps the host that generated the lock never
+    descended into, but linux `npm ci` insists be pinned. That repo builds
+    fine locally and on Vercel; only the strict frozen path rejects it, so
+    we retry with `npm install`. A genuinely broken repo (a real missing
+    package, a crashing postinstall) fails with a different code and does
+    NOT match here — it stays terminal. Both markers are required so a bare
+    EUSAGE from a bad flag can't trigger a fallback.
+    """
+
+    return "code EUSAGE" in stderr and "in sync" in stderr
+
+
 # Roles that read/reason over the diff but never execute the project's code.
 # Publication gating stays a deterministic gate (the agent's self-verify + the L1
 # `check` sidecar): the pre-publish `review` (SIM) role never executes, so LLM
@@ -263,7 +302,10 @@ def ensure_deps_volume(
     fresh repo. RW is safe here: (a) the source is the per-run
     worktree, removed in `finally`; (b) HUSKY=0/CI=1 disables the
     lifecycle hooks that historically wrote to source files; (c) the
-    install commands themselves don't write to source.
+    install commands themselves don't write to source — the one
+    exception is the npm-ci → npm-install fallback (see `_Lockfile`),
+    which rewrites the lockfile and is explicitly restored afterward so
+    the agent's diff stays clean.
 
     Crucially the path matches the runtime mount (also /app) so that
     tools embedding the venv path into their output (uv writes
@@ -369,16 +411,51 @@ def ensure_deps_volume(
             "-w",
             "/app",
             base_image,
-            "sh",
-            "-lc",
-            lockfile.install_cmd,
         ]
     )
-    proc = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=900)
-    log_path.write_text(
-        f"$ {lockfile.install_cmd}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
-        encoding="utf-8",
-    )
+
+    def _run_install(install_cmd: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [*docker_cmd, "sh", "-lc", install_cmd],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+
+    proc = _run_install(lockfile.install_cmd)
+    log = f"$ {lockfile.install_cmd}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+
+    # A frozen install (npm ci) can refuse a lockfile that is valid but
+    # platform-incomplete (see `_is_lock_sync_failure`). Retry with the
+    # re-resolving install rather than fail a run for a project that builds
+    # everywhere it actually runs. Warm time + open egress, so it can fetch.
+    if proc.returncode != 0 and lockfile.fallback_cmd and _is_lock_sync_failure(proc.stderr):
+        print(
+            f"contremaitre: {lockfile.name} frozen install rejected the lockfile as "
+            f"out-of-sync; retrying with `{lockfile.fallback_cmd}`",
+            file=sys.stderr,
+        )
+        proc = _run_install(lockfile.fallback_cmd)
+        log += (
+            f"\n\n--- frozen install rejected lockfile (EUSAGE); falling back ---\n"
+            f"$ {lockfile.fallback_cmd}\n--- stdout ---\n{proc.stdout}\n"
+            f"--- stderr ---\n{proc.stderr}"
+        )
+        if proc.returncode == 0:
+            # The fallback re-resolved and rewrote the worktree lockfile.
+            # node_modules (the cache) is what we needed; the lockfile edit
+            # is a side effect that would otherwise surface in the agent's
+            # diff. Restore it so the run's PR carries only the agent's work.
+            restore = subprocess.run(
+                ["git", "-C", str(repo), "checkout", "--", lockfile.name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if restore.returncode != 0:
+                log += f"\n--- WARNING: could not restore {lockfile.name} ---\n{restore.stderr}"
+
+    log_path.write_text(log, encoding="utf-8")
     if proc.returncode != 0:
         subprocess.run(
             ["docker", "volume", "rm", "-f", volume],
