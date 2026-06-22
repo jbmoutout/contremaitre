@@ -6,6 +6,9 @@ them as module-level constants.
 
 Files:
   - `initial_prompt.md`        — sent to the agent on turn 1 of the WORK session.
+  - `resume_prompt.md`         — sent to the agent on the first WORK turn of a
+                                 `run --continue` (budget-cap) resume, in place
+                                 of `initial_prompt.md`.
   - `sim_tooled_persona.md`    — sent to the SIM on its first turn of the WORK session.
   - `sim_review_prompt.md`     — sent to the SIM in the single-shot REVIEW pass.
   - `cli_reviewer_prompt.md`   — sent to the local CLI reviewer (claude / codex)
@@ -27,6 +30,7 @@ if TYPE_CHECKING:
 _HERE = Path(__file__).resolve().parent
 
 INITIAL_PROMPT: str = (_HERE / "initial_prompt.md").read_text(encoding="utf-8")
+RESUME_PROMPT: str = (_HERE / "resume_prompt.md").read_text(encoding="utf-8")
 SIM_TOOLED_PERSONA: str = (_HERE / "sim_tooled_persona.md").read_text(encoding="utf-8")
 SIM_REVIEW_PROMPT: str = (_HERE / "sim_review_prompt.md").read_text(encoding="utf-8")
 CLI_REVIEWER_PROMPT: str = (_HERE / "cli_reviewer_prompt.md").read_text(encoding="utf-8")

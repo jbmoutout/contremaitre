@@ -77,7 +77,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import egress, events
-from .actors import ActorError, ActorOutput, _run_detached_container
+from .actors import ActorError, ActorOutput, _SessionStateMixin, _run_detached_container
 from .jsonlog import append_jsonl, append_transcript
 from .models import RunConfig, RunPaths
 from .runtime_image import deps_mount_mode
@@ -752,7 +752,7 @@ def _make_driver(tool: str, config: RunConfig) -> CliDriver:
 # ===== the runner =============================================================
 
 
-class CliActorRunner:
+class CliActorRunner(_SessionStateMixin):
     """Drive a frontier CLI headless in the per-run container as agent / SIM / reviewer.
 
     Implements the `ActorRunner` protocol (agent_turn / sim_turn / sim_review) so

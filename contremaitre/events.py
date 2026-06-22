@@ -50,6 +50,15 @@ WALL_CAP = "wall_cap"
 RECORDED_COST_CAP = "recorded_cost_cap"
 NO_PROGRESS_CAP = "no_progress_cap"
 
+# Emitted when a budget-cap exit leaves a resumable checkpoint (resume.json +
+# preserved worktree + session homes). Carries the `run --continue` hint.
+RESUMABLE = "resumable"
+# Emitted at the start of a resumed run, before re-entering the WORK loop.
+RUN_RESUMED = "run_resumed"
+# Recorded (in recoveries.jsonl) when a per-turn resume checkpoint write fails;
+# best-effort, never fatal — only the in-flight turn's resumability is lost.
+RESUME_CHECKPOINT_FAILED = "resume_checkpoint_failed"
+
 # ----- Executable checks (L1) -----
 
 CHECK_STARTED = "check_started"
