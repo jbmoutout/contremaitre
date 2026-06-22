@@ -60,6 +60,7 @@ from .models import (
     TerminalVerdict,
 )
 from .paths import build_run_paths, new_run_id, validate_slug
+from .resume import ResumeState, resume_path, write_resume_state
 from .run_artifacts import RunArtifacts
 from .preflight import enforce_preflight
 from .publisher import (
@@ -89,22 +90,41 @@ class _WorktreeSnapshot:
 
 
 class Orchestrator:
-    def __init__(self, config: RunConfig):
+    def __init__(self, config: RunConfig, *, resume_from: ResumeState | None = None):
         self.config = config
-        self.run_id = new_run_id(config.run_slug)
-        self.paths = build_run_paths(config.runs_root, self.run_id)
+        self._resume = resume_from
+        if resume_from is not None:
+            # Re-attach to the prior run's identity: same run_id → same run_dir,
+            # same branch, same worktree path, same session homes.
+            self.run_id = resume_from.run_id
+            self.paths = build_run_paths(config.runs_root, self.run_id)
+            self._base_sha = resume_from.base_sha
+            self.turns = resume_from.turns
+            # Fresh turn budget: the cap counts turns taken AFTER the resume.
+            self._turn_base = resume_from.turns
+        else:
+            self.run_id = new_run_id(config.run_slug)
+            self.paths = build_run_paths(config.runs_root, self.run_id)
+            self._base_sha = ""
+            self.turns = 0
+            self._turn_base = 0
         self.started = time.monotonic()
-        self.turns = 0
         self.trajectory: list[dict[str, object]] = []
         self.no_progress_streak = 0
         self._last_progress_key: tuple[str, str] | None = None
-        # SHA of `origin/<base>` captured at worktree creation, right
-        # after `git fetch origin <base>` and before any remote rewiring.
-        # Used as the diff base by all later operations — pinning to a
-        # commit instead of a ref name survives the `git remote remove
-        # origin && git remote add origin <fork>` swap (which deletes
-        # `refs/remotes/origin/<base>`).
-        self._base_sha: str = ""
+        # Which budget cap tripped (set by `_cap_tripped`); drives the
+        # resumable-exit decision and the RESUMABLE hint.
+        self._tripped_cap: str | None = None
+        # Branch + review-round + required-changes, tracked so every turn's
+        # resume checkpoint reflects the live position in the state machine.
+        self._branch: str = resume_from.branch if resume_from else ""
+        self._review_round: int = resume_from.review_round if resume_from else 1
+        self._required_changes: list[str] = (
+            list(resume_from.required_changes) if resume_from else []
+        )
+        # Consumed on the first WORK turn of a resumed run to send the
+        # continuation prompt instead of INITIAL_PROMPT.
+        self._resume_pending: bool = resume_from is not None
 
     @property
     def _diff_base(self) -> str:
@@ -118,6 +138,7 @@ class Orchestrator:
         self._prepare_run_dir()
         repo = GitRepo(self.config.repo, self.paths.git_log)
         branch = f"{validate_slug(self.config.branch_prefix, 'branch prefix')}/{self.run_id}"
+        self._branch = branch
 
         # Signal handler for operator-initiated death. SIGTERM is caught so
         # the in-flight container is `docker stop`'d (by label), the final
@@ -143,13 +164,31 @@ class Orchestrator:
         signal.signal(signal.SIGTERM, _on_sigterm)
         try:
             enforce_preflight(self.config, self.paths)
-            self._transition(State.INIT, "creating worktree")
-            self._create_worktree(repo, branch)
+            if self._resume is not None:
+                self._transition(State.INIT, "reattaching worktree (resume)")
+                self._reattach_worktree()
+            else:
+                self._transition(State.INIT, "creating worktree")
+                self._create_worktree(repo, branch)
+            # Deps volumes are per-run and may have been pruned since the capped
+            # run; (re-)provisioning is idempotent (`docker volume create` is a
+            # no-op when the volume already exists, the clone re-copies pristine).
             self._ensure_pristine_deps_volume()
             self._provision_run_deps_volume()
             self._assert_deps_offline()
             worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
             actor = make_actor_runner(config=self.config, paths=self.paths)
+            if self._resume is not None:
+                actor.restore_session_state(
+                    {"agent": self._resume.agent_session, "sim": self._resume.sim_session}
+                )
+                self._emit(
+                    events.RUN_RESUMED,
+                    from_turn=self._turn_base,
+                    review_round=self._review_round,
+                    agent_session=self._resume.agent_session,
+                    sim_session=self._resume.sim_session,
+                )
 
             return self._review_rounds(actor=actor, worktree_git=worktree_git, branch=branch)
         except Exception as exc:
@@ -189,9 +228,42 @@ class Orchestrator:
             )
         finally:
             self._extract_artifacts_safely()
-            if not self.config.keep_worktree:
+            self._finalize_resumability()
+            # A resumable (cap) exit keeps its worktree + session homes + deps
+            # volumes so `run --continue` can reattach; normal cleanup would
+            # destroy exactly what resume needs.
+            if not self.config.keep_worktree and not self._resumable_exit():
                 self._cleanup_worktree()
             signal.signal(signal.SIGTERM, prior_term)
+
+    def _resumable_exit(self) -> bool:
+        """True when this run ended by tripping a budget cap — the one exit a
+        `run --continue` can pick up. Clean PRs, NEEDS_HUMAN, and infra failures
+        are terminal: nothing to continue."""
+
+        return self._tripped_cap is not None
+
+    def _finalize_resumability(self) -> None:
+        """Decide the fate of the per-turn resume checkpoint at terminal.
+
+        Cap exit → keep resume.json and tell the operator how to continue.
+        Any other exit → delete the stale checkpoint so the run isn't
+        accidentally continuable.
+        """
+
+        checkpoint = resume_path(self.paths.run_dir)
+        if self._resumable_exit():
+            self._emit(
+                events.RESUMABLE,
+                cap=self._tripped_cap,
+                turns=self.turns,
+                review_round=self._review_round,
+                run_id=self.run_id,
+                hint=f"contremaitre run --continue {self.run_id}",
+            )
+            return
+        if checkpoint.exists():
+            checkpoint.unlink()
 
     def _extract_artifacts_safely(self) -> None:
         """Run the subagent + files extractor, then build the viewer.
@@ -220,6 +292,7 @@ class Orchestrator:
         last_sim: ParsedVerdict | None = None
 
         for review_round in range(1, self.config.caps.max_review_rounds + 1):
+            self._review_round = review_round
             self._transition(State.WORK, f"WORK session round {review_round}")
             outcome = self._run_work_session(
                 actor=actor,
@@ -284,6 +357,7 @@ class Orchestrator:
 
             if parsed.verdict == ReviewVerdict.CHANGES_REQUESTED:
                 last_required_changes = list(parsed.required_changes)
+                self._required_changes = last_required_changes
                 last_parsed = parsed
                 last_sim = parsed
                 self._clear_implementation_complete()
@@ -328,7 +402,13 @@ class Orchestrator:
         Returns a short reason string describing why the loop exited.
         """
 
-        if review_round == 1:
+        if self._resume_pending:
+            # First WORK turn of a `run --continue`: the agent's prior session +
+            # the worktree edits carry the context, so nudge it to pick up where
+            # it left off rather than re-sending INITIAL_PROMPT / the revision.
+            first_message = prompts.RESUME_PROMPT
+            self._resume_pending = False
+        elif review_round == 1:
             first_message = prompts.INITIAL_PROMPT
         else:
             first_message = prompts.revision_followup(
@@ -373,12 +453,14 @@ class Orchestrator:
         label = f"after-agent-turn-{self.turns}"
         snapshot = self._record_worktree_state(worktree_git, label)
         self._record_progress(snapshot, label, text)
+        self._checkpoint_resume(actor)
         return text
 
     def _sim_turn(self, actor: ActorRunner, message: str) -> str:
         # Actor owns raw_export + transcript writes for its own turn.
         self._before_turn()
         output = actor.sim_turn(message)
+        self._checkpoint_resume(actor)
         return output.text
 
     # ----- review pass -----
@@ -1249,12 +1331,25 @@ class Orchestrator:
     # ----- worktree + git helpers -----
 
     def _prepare_run_dir(self) -> None:
-        self.paths.run_dir.mkdir(parents=True, exist_ok=False)
+        resuming = self._resume is not None
+        # Fresh runs must not collide on run_id; a resume deliberately re-enters
+        # the prior run's directory, appending to its artifacts.
+        self.paths.run_dir.mkdir(parents=True, exist_ok=resuming)
         self.paths.eval_dir.mkdir(parents=True, exist_ok=True)
-        self.paths.initial_prompt.write_text(prompts.INITIAL_PROMPT, encoding="utf-8")
-        self.paths.transcript.write_text(
-            f"# Contremaitre transcript - {self.run_id}\n", encoding="utf-8"
-        )
+        if not resuming:
+            self.paths.initial_prompt.write_text(prompts.INITIAL_PROMPT, encoding="utf-8")
+            self.paths.transcript.write_text(
+                f"# Contremaitre transcript - {self.run_id}\n", encoding="utf-8"
+            )
+        else:
+            from .jsonlog import append_transcript
+
+            append_transcript(
+                self.paths.transcript,
+                speaker="orchestrator",
+                phase="RESUME",
+                text=f"--- resumed at turn {self.turns}, review round {self._review_round} ---",
+            )
         # Provenance manifest. Records models, image, target, base, and the
         # version of the system under test (contremaitre SHA + prompt /
         # skills-lock / dockerfile hashes). Downstream readers (`tui attach`,
@@ -1299,6 +1394,26 @@ class Orchestrator:
             worktree_git.run("remote", "remove", "upstream", check=False)
             worktree_git.run("remote", "add", "upstream", self.config.upstream)
         self._record_worktree_state(worktree_git, "after-worktree")
+
+    def _reattach_worktree(self) -> None:
+        """Resume path: pick up the kept worktree instead of creating one.
+
+        A budget-cap exit preserves the worktree (with the agent's uncommitted
+        in-progress edits — they are only committed AFTER a WORK session reaches
+        IMPLEMENTATION_COMPLETE) and the per-run session homes. There is nothing
+        to fetch or branch: the branch already exists, the remotes are already
+        rewired, and `_base_sha` was restored from the checkpoint. We only
+        validate the worktree is still there and re-snapshot its state.
+        """
+
+        if not self.paths.worktree.exists():
+            raise RuntimeError(
+                f"cannot resume run {self.run_id!r}: its worktree is gone "
+                f"({self.paths.worktree}). The capped run's worktree must be "
+                "preserved to continue; it may have been cleaned up."
+            )
+        worktree_git = GitRepo(self.paths.worktree, self.paths.git_log)
+        self._record_worktree_state(worktree_git, "after-reattach")
 
     def _commit_drift(self, repo: GitRepo) -> None:
         drift = self.paths.worktree / ".contremaitre" / "drift_after_approval.txt"
@@ -1363,12 +1478,50 @@ class Orchestrator:
         self.turns += 1
         append_jsonl(self.paths.timeline, {"event": events.TURN, "turn": self.turns})
 
+    def _checkpoint_resume(self, actor) -> None:
+        """Persist resume.json so a later `run --continue` can pick up here.
+
+        Refreshed after every agent/SIM turn: the session ids advance each turn
+        and the worktree edits accumulate, so the checkpoint must track the live
+        position (turns, review round, session ids). Written unconditionally
+        (the fake actor's sessions are just None); a non-resumable terminal
+        deletes the file so only a genuine cap exit stays continuable.
+        Best-effort — a failed checkpoint must never break the run, only forfeit
+        resumability of the in-flight turn.
+        """
+
+        try:
+            sessions = actor.session_state()
+            write_resume_state(
+                self.paths.run_dir,
+                ResumeState(
+                    config=self.config,
+                    run_id=self.run_id,
+                    base_sha=self._base_sha,
+                    branch=self._branch,
+                    review_round=self._review_round,
+                    required_changes=self._required_changes,
+                    agent_session=sessions.get("agent"),
+                    sim_session=sessions.get("sim"),
+                    turns=self.turns,
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            append_jsonl(
+                self.paths.recoveries,
+                {"kind": events.RESUME_CHECKPOINT_FAILED, "error": repr(exc)},
+            )
+
     def _cap_tripped(self) -> bool:
         wall_minutes = (time.monotonic() - self.started) / 60.0
-        if self.turns >= self.config.caps.max_turns:
+        # `_turn_base` is 0 for a fresh run and the prior turn count on a resume,
+        # so the turn cap always measures turns taken in THIS process.
+        if self.turns - self._turn_base >= self.config.caps.max_turns:
+            self._tripped_cap = events.TURN_CAP
             self._emit(events.TURN_CAP, turns=self.turns)
             return True
         if wall_minutes >= self.config.caps.max_wall_minutes:
+            self._tripped_cap = events.WALL_CAP
             self._emit(events.WALL_CAP, wall_minutes=wall_minutes)
             return True
         arts = RunArtifacts(self.paths)
@@ -1384,6 +1537,7 @@ class Orchestrator:
             },
         )
         if recorded_cost >= self.config.caps.max_cost_usd:
+            self._tripped_cap = events.RECORDED_COST_CAP
             self._emit(
                 events.RECORDED_COST_CAP,
                 recorded_cost_usd=recorded_cost,
@@ -1391,6 +1545,7 @@ class Orchestrator:
             )
             return True
         if self.no_progress_streak >= self.config.caps.no_progress_turns:
+            self._tripped_cap = events.NO_PROGRESS_CAP
             self._emit(
                 events.NO_PROGRESS_CAP,
                 no_progress_streak=self.no_progress_streak,
@@ -1733,5 +1888,5 @@ def _write_previous_cli_reviews(*, extras_root: Path, current_round: int, dst: P
         dst.write_text("No previous CLI-review comments in this run.\n", encoding="utf-8")
 
 
-def run(config: RunConfig) -> RunResult:
-    return Orchestrator(config).run()
+def run(config: RunConfig, *, resume_from: ResumeState | None = None) -> RunResult:
+    return Orchestrator(config, resume_from=resume_from).run()

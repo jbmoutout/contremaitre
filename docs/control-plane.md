@@ -288,14 +288,14 @@ The orchestrator's POV. `State` enum in [models.py](../contremaitre/models.py).
 
 ```
 INIT  ──►  WORK  ──►  REVIEW  ──►  APPROVED  ──►  (hard gates + publish)
-                              ↘
-                              CHANGES_REQUESTED  ──►  WORK  (up to max_review_rounds)
-                              ↘
+  ▲                           ↘
+  └─ run --continue           CHANGES_REQUESTED  ──►  WORK  (up to max_review_rounds)
+     (resume after cap)       ↘
                               NO_PR
                               FAILED
 ```
 
-- **INIT** — worktree creation, deps volume provisioning, the offline-readiness assert (`assert_deps_offline`), preflight. Transition to WORK on success.
+- **INIT** — worktree creation, deps volume provisioning, the offline-readiness assert (`assert_deps_offline`), preflight. Transition to WORK on success. On a **resume** (`run --continue <run-id>`), INIT reattaches the kept worktree + per-run session homes instead of creating them (`_reattach_worktree`), restores the pinned `_base_sha`, re-provisions the per-run deps volume (idempotent), pre-seeds the actor's session ids, and re-enters WORK with a fresh budget. See [Resume](#resume-after-a-cap).
 - **WORK** — one multi-turn opencode session. Terminates on `.contremaitre/IMPLEMENTATION_COMPLETE` (harness gate), cap trip, or `max_turns`.
 - **REVIEW** — single-shot reviewer container (role=review) reads `/review/diff.patch` + `/review/SETTLED_DESIGN.md`, emits JSON verdict.
 - **APPROVED** — runs hard gates, then the publisher. Success → `READY_FOR_DRAFT_PR`.
@@ -314,6 +314,22 @@ All six values from `TerminalVerdict` ([models.py](../contremaitre/models.py)); 
 | `NO_PR_NEEDS_HUMAN` | NEEDS_HUMAN verdict / malformed verdict (after retries) / missing SETTLED / missing IMPLEMENTATION_COMPLETE / cap trip / hard-gates fail / executable check fail |
 | `FAILED_INFRA` | Unhandled exception during run; SIGTERM |
 | `QUOTA_EXHAUSTED` | `ActorError` with `kind == PROVIDER_QUOTA_EXHAUSTED` (e.g. OpenCode Zen `FreeUsageLimitError`). Distinct from FAILED_INFRA so the eval canary aborts the n=3 batch instead of retrying. |
+
+A **cap trip** (any of `turn_cap` / `wall_cap` / `recorded_cost_cap` / `no_progress_cap`) lands on `NO_PR_NEEDS_HUMAN` but is **resumable**: see below.
+
+## Resume after a cap
+
+A budget cap is the one terminal a `run --continue <run-id>` can pick up — clean PRs, `NEEDS_HUMAN`, and infra failures are done. The mechanism leans on two pieces of state that already persist past a cap exit:
+
+- **The worktree** carries the agent's *uncommitted* in-progress edits (the host only commits after a WORK session reaches `IMPLEMENTATION_COMPLETE`, so a mid-WORK cap leaves them uncommitted).
+- **The per-run session homes** under the run dir carry the agent/SIM CLI sessions (codex `sessions/`, claude `projects/*.jsonl`) — the same store that already makes multi-turn resume work across `docker run`s ([Multi-turn](#multi-turn)).
+
+Resume hands the agent back its own session plus its worktree, so it does **not** replay turns. Two new things make that reattachable:
+
+1. **`resume.json`** ([resume.py](../contremaitre/resume.py)) — a per-turn checkpoint of the full `RunConfig`, the pinned `_base_sha`, the branch, the review round, the agent/SIM session ids, and the turn count. Written after every turn; on a non-cap terminal it is deleted (only a genuine cap exit stays continuable).
+2. **Worktree + deps-volume preservation on a cap exit** — `_resumable_exit()` (true iff a cap tripped) skips `_cleanup_worktree`, so the worktree, session homes, and per-run deps volumes survive. The orchestrator emits a `resumable` event carrying the `contremaitre run --continue <run-id>` hint.
+
+`run --continue` loads the checkpoint, refuses on an opencode run (cross-process opencode session resume is unverified — CLI actor only for now), applies the invocation's cap flags as the **fresh** budget (turn/wall budgets reset; `--max-cost-usd` stays cumulative), and re-enters the state machine at INIT-reattach. The first WORK turn sends `resume_prompt.md` (a "pick up where you left off" nudge) instead of `initial_prompt.md`.
 
 ## Host-owned boundaries
 
@@ -415,7 +431,8 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
 - [`paths.py`](../contremaitre/paths.py) — slug validation, run-id generation, contained-path builder (prevents escape outside `run_dir`).
 - [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + CLI runs, validated as the per-role union plus the post-publish CLI reviewer: repo/base ref, Docker image, `:ro` mount, network policy (CLI defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), codex / claude auth checks for active CLI tools, CLI freshness vs npm (active CLI tools, WARN-only). See [Preflight](#preflight).
-- [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
+- [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `resume_prompt.md` (first turn of a `run --continue`), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
+- [`resume.py`](../contremaitre/resume.py) — the resume checkpoint: serialize `RunConfig` + runtime state (base SHA, branch, review round, session ids, turns) to `<run_dir>/resume.json` and read it back for `run --continue`. See [Resume after a cap](#resume-after-a-cap).
 - [`publisher.py`](../contremaitre/publisher.py) — publication boundary: `StubPublisher` (dry-run) vs `GhPublisher` (real `gh pr create --draft`). PR title + body derived from `.contremaitre/SETTLED_DESIGN.md` + SIM verdict summary; `--pr-title` / `--pr-body` override.
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
 - [`tui.py`](../contremaitre/tui.py) — read-only Textual TUI tailing JSONL artifacts. 7-phase footer (init → exploring → grilling → implementing → reviewing → cli_review → done) + SIM reviewer status glyphs + CLI review loop status + warning tokens + subscription-window usage (codex rollout snapshots / claude statusLine snapshots) + verdict badge.
@@ -473,6 +490,7 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 ### Provenance + viewer
 
 - `run_config.json` — provenance manifest ([manifest.py](../contremaitre/manifest.py))
+- `resume.json` — resume checkpoint, present **only** while the run is continuable (a budget-cap exit); deleted on any other terminal ([resume.py](../contremaitre/resume.py), [Resume after a cap](#resume-after-a-cap))
 - `viewer.html` — self-contained run viewer (built in orchestrator's `finally`; lands on success and failure)
 
 The runs root also gets a top-level **`index.html`** rebuilt on each run, summarising every run under it ([viewer/index.py](../contremaitre/viewer/index.py)).

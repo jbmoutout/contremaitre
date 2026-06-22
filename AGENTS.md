@@ -22,6 +22,7 @@ omitted — their 0% is expected, not a gap).
 - **Prompts** — `contremaitre/prompts/*.md`. Tweak the markdown, not the Python wrapper.
 - **Event names** — `contremaitre/events.py` constants. Don't write `"some_event"` string literals when emitting to `guardrail_events.jsonl` / `recoveries.jsonl`; renaming a constant breaks at import time instead of silently at runtime.
 - **State machine / caps / cleanup** — `orchestrator.py`.
+- **Resume after a cap** — `resume.py` (checkpoint serializer) + `orchestrator.py` (`_reattach_worktree`, `_checkpoint_resume`, `_resumable_exit`) + `cli.py` (`_continue_cmd`).
 - **Docker / opencode launch** — `actors.py` (`OpencodeActorRunner.build_docker_command`).
 - **CLI actor auth / egress** — `cli_actor.py` (`CodexDriver` / `ClaudeDriver`, `_egress_docker_flags`), `cli_auth_proxy.py` (host-side claude token injection — the container never holds the credential), `cli_egress.py` (codex squid lock).
 - **Hard gates** — `evaluator.py` + `diffscan.py` + `verdicts.py`. Strict by design.

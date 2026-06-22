@@ -18,6 +18,7 @@ from .fixture import init_fixture
 from .models import ActorMode, Caps, ModelSpec, PublishMode, RunConfig
 from .orchestrator import run
 from .paths import slugify
+from .resume import ResumeError, load_resume_state
 from .preflight import _image_exists, freshness_row, run_preflight
 from .runtime_image import list_deps_volumes
 from .viewer import VIEWER_FILENAME, build_viewer
@@ -275,6 +276,18 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--no-progress-turns", type=int, default=5)
     run_p.add_argument("--malformed-verdict-retries", type=int, default=2)
     run_p.add_argument("--max-review-rounds", type=int, default=3)
+    run_p.add_argument(
+        "--continue",
+        dest="continue_run",
+        metavar="RUN_ID",
+        default=None,
+        help=(
+            "Continue a prior run that exited by tripping a budget cap, reusing "
+            "its worktree + agent session with a fresh budget. The target / "
+            "models / mounts all come from the saved run; the cap flags "
+            "(--max-wall-minutes etc.) set the NEW budget. CLI actor only."
+        ),
+    )
     run_p.set_defaults(func=_run_cmd)
 
     doctor_p = sub.add_parser(
@@ -493,6 +506,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_cmd(args: argparse.Namespace) -> int:
+    if getattr(args, "continue_run", None):
+        return _continue_cmd(args)
     source_url = args.upstream or args.fork
     if source_url is None:
         print(
@@ -564,6 +579,67 @@ def _run_cmd(args: argparse.Namespace) -> int:
     if rc != 0:
         return rc
     result = run(config)
+    print(f"{result.verdict.value}: {result.reason}")
+    print(f"run_dir={result.run_dir}")
+    if result.pr_created:
+        return 0
+    return 2 if result.verdict.value.startswith("NO_PR") else 1
+
+
+def _continue_cmd(args: argparse.Namespace) -> int:
+    """`run --continue <run_id>`: resume a budget-capped run with a fresh budget.
+
+    Everything that defines the task — target, models, mounts, branch — comes
+    from the saved checkpoint; only the caps are taken from this invocation's
+    flags so the operator can hand the run more wall-clock / turns. The worktree
+    and per-run session homes from the capped run are reattached in place.
+    """
+
+    import dataclasses
+
+    runs_root = args.runs_root.resolve()
+    run_id = args.continue_run
+    try:
+        state = load_resume_state(runs_root, run_id)
+    except ResumeError as exc:
+        print(f"contremaitre: cannot continue {run_id!r}: {exc}", file=sys.stderr)
+        return 1
+
+    # v1 supports the CLI actor (codex/claude). The opencode runtime's session
+    # resume across processes is unverified, so refuse rather than silently
+    # restart it from scratch.
+    modes = {state.config.actor_mode, state.config.sim_actor_mode or state.config.actor_mode}
+    if ActorMode.OPENCODE in modes:
+        print(
+            "contremaitre: --continue does not yet support the opencode actor "
+            f"(run {run_id!r} used opencode). Only CLI (codex/claude) runs are resumable.",
+            file=sys.stderr,
+        )
+        return 1
+
+    fresh_caps = Caps(
+        max_turns=args.max_turns,
+        max_wall_minutes=args.max_wall_minutes,
+        max_cost_usd=args.max_cost_usd,
+        no_progress_turns=args.no_progress_turns,
+        malformed_verdict_retries=args.malformed_verdict_retries,
+        max_review_rounds=args.max_review_rounds,
+    )
+    config = dataclasses.replace(state.config, caps=fresh_caps)
+    state = dataclasses.replace(state, config=config)
+
+    print(
+        f"contremaitre: continuing {run_id} from turn {state.turns} "
+        f"(review round {state.review_round}); fresh budget "
+        f"{fresh_caps.max_wall_minutes}m / {fresh_caps.max_turns} turns. "
+        f"Note: --max-cost-usd is cumulative across the original run.",
+        file=sys.stderr,
+    )
+
+    rc = _ensure_default_image_built(config)
+    if rc != 0:
+        return rc
+    result = run(config, resume_from=state)
     print(f"{result.verdict.value}: {result.reason}")
     print(f"run_dir={result.run_dir}")
     if result.pr_created:

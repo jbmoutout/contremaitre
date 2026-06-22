@@ -62,6 +62,25 @@ class ActorOutput:
     returncode: int = 0
 
 
+class _SessionStateMixin:
+    """Default `session_state`/`restore_session_state` for runners that keep the
+    resumable session ids in `_agent_session` / `_sim_session` attributes.
+
+    Used by the fake, opencode, and CLI runners. `getattr` defaults keep it
+    safe for the fake runner, which never sets the attributes.
+    """
+
+    def session_state(self) -> dict[str, str | None]:
+        return {
+            "agent": getattr(self, "_agent_session", None),
+            "sim": getattr(self, "_sim_session", None),
+        }
+
+    def restore_session_state(self, state: dict[str, str | None]) -> None:
+        self._agent_session = state.get("agent")
+        self._sim_session = state.get("sim")
+
+
 class ActorRunner(Protocol):
     def agent_turn(self, message: str) -> ActorOutput: ...
 
@@ -78,11 +97,24 @@ class ActorRunner(Protocol):
         model_override: str | None = None,
     ) -> ActorOutput: ...
 
+    def session_state(self) -> dict[str, str | None]:
+        """Resumable per-role session ids: {"agent": id|None, "sim": id|None}.
+
+        Checkpointed by the orchestrator after every turn so a budget-cap exit
+        can be continued (`run --continue`). Runtimes without cross-process
+        session resume return Nones.
+        """
+        ...
+
+    def restore_session_state(self, state: dict[str, str | None]) -> None:
+        """Adopt session ids from a prior run before re-entering WORK."""
+        ...
+
 
 # ------------------------------- Fake --------------------------------
 
 
-class FakeActorRunner:
+class FakeActorRunner(_SessionStateMixin):
     """Deterministic subprocess actor for fixture smoke runs.
 
     The fake agent writes `.contremaitre/SETTLED_DESIGN.md`, a small
@@ -169,7 +201,7 @@ class FakeActorRunner:
 # ----------------------------- Opencode ------------------------------
 
 
-class OpencodeActorRunner:
+class OpencodeActorRunner(_SessionStateMixin):
     """Run agent and SIM turns through opencode inside Docker.
 
     The agent gets a writable `/app` mount and one persistent session across
@@ -510,6 +542,17 @@ class CompositeActorRunner:
 
     def sim_review(self, **kwargs) -> ActorOutput:
         return self._sim.sim_review(**kwargs)
+
+    def session_state(self) -> dict[str, str | None]:
+        # Each role's session lives on its own sub-runner.
+        return {
+            "agent": self._agent.session_state().get("agent"),
+            "sim": self._sim.session_state().get("sim"),
+        }
+
+    def restore_session_state(self, state: dict[str, str | None]) -> None:
+        self._agent.restore_session_state({"agent": state.get("agent"), "sim": None})
+        self._sim.restore_session_state({"agent": None, "sim": state.get("sim")})
 
 
 def _make_single_runner(
