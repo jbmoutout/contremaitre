@@ -16,8 +16,7 @@ from contremaitre.orchestrator import Orchestrator
 from contremaitre.paths import build_run_paths
 from contremaitre.publisher import GhPublisher
 
-# Module-level alias so existing tests keep calling build_docker_command(...)
-build_docker_command = DockerContainerLifecycle().build_argv
+
 
 
 class OpencodeBoundaryTest(unittest.TestCase):
@@ -78,7 +77,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 http_proxy=None,
             )
 
-            cmd, _ = build_docker_command(
+            cmd, _ = DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -128,7 +127,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
             opencode_config=cfg,
         )
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "k"}, clear=False):
-            build_docker_command(
+            DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -171,7 +170,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
                     runtime_env=(("VIRTUAL_ENV", "/app/.venv"),),
                 ),
             )
-            cmd, _ = build_docker_command(
+            cmd, _ = DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -234,7 +233,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 http_proxy="http://proxy.local:8080",
             )
 
-            cmd, env = build_docker_command(
+            cmd, env = DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -545,7 +544,7 @@ class ZenKeyClassificationTest(unittest.TestCase):
                 actor_mode=ActorMode.OPENCODE,
                 docker_image="img",
             )
-            return build_docker_command(
+            return DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
