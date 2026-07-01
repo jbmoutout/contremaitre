@@ -24,6 +24,7 @@ from .runtime_image import deps_mount_mode
 
 # ---- result types -----------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class ContainerResult:
     """Outcome of one `run_detached` call."""
@@ -34,6 +35,7 @@ class ContainerResult:
 
 
 # ---- seam (ABC) -------------------------------------------------------------
+
 
 class ContainerLifecycle(ABC):
     """Container lifecycle — two substitutable methods."""
@@ -71,6 +73,7 @@ class ContainerLifecycle(ABC):
 
 
 # ---- real implementation (Docker subprocess) --------------------------------
+
 
 class DockerContainerLifecycle(ContainerLifecycle):
     """Real Docker subprocess lifecycle — launches, streams, waits, cleans up."""
@@ -139,9 +142,7 @@ class DockerContainerLifecycle(ContainerLifecycle):
         deps_mode = deps_mount_mode(role, mount_mode)
         if config.deps_volume and deps_mode:
             d = config.deps_volume
-            cmd.extend(
-                ["-v", f"{d.name}:/app/{d.mount_path}:{deps_mode}"]
-            )
+            cmd.extend(["-v", f"{d.name}:/app/{d.mount_path}:{deps_mode}"])
             for key, value in d.runtime_env:
                 cmd.extend(["-e", f"{key}={value}"])
         if config.opencode_config:
@@ -216,9 +217,7 @@ class DockerContainerLifecycle(ContainerLifecycle):
                                 wait_proc.wait(timeout=10)
                             except subprocess.TimeoutExpired:
                                 wait_proc.kill()
-                            raise ActorError(
-                                f"{role} opencode timed out after {timeout_seconds}s"
-                            )
+                            raise ActorError(f"{role} opencode timed out after {timeout_seconds}s")
                         if stdout_stall_seconds is not None:
                             cur_stdout = (
                                 stdout_path.stat().st_size
@@ -227,17 +226,13 @@ class DockerContainerLifecycle(ContainerLifecycle):
                             )
                             cur_internal = _latest_internal_log_size(state_dir)
                             grew = (
-                                cur_stdout > stall_last_stdout
-                                or cur_internal > stall_last_internal
+                                cur_stdout > stall_last_stdout or cur_internal > stall_last_internal
                             )
                             if grew:
                                 stall_last_stdout = cur_stdout
                                 stall_last_internal = cur_internal
                                 stall_last_growth_at = time.monotonic()
-                            elif (
-                                time.monotonic() - stall_last_growth_at
-                                > stdout_stall_seconds
-                            ):
+                            elif time.monotonic() - stall_last_growth_at > stdout_stall_seconds:
                                 subprocess.run(
                                     ["docker", "stop", "-t", "5", container_id],
                                     capture_output=True,

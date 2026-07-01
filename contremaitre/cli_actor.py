@@ -762,7 +762,11 @@ class CliActorRunner:
     """
 
     def __init__(
-        self, *, config: RunConfig, paths: RunPaths, tool: str = "codex",
+        self,
+        *,
+        config: RunConfig,
+        paths: RunPaths,
+        tool: str = "codex",
         container: ContainerLifecycle | None = None,
     ):
         self.config = config

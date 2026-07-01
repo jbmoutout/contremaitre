@@ -17,8 +17,6 @@ from contremaitre.paths import build_run_paths
 from contremaitre.publisher import GhPublisher
 
 
-
-
 class OpencodeBoundaryTest(unittest.TestCase):
     def test_initial_prompt_invokes_skill_and_keeps_host_owned_boundaries(self):
         prompt = prompts.INITIAL_PROMPT

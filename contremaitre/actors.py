@@ -567,12 +567,6 @@ def make_actor_runner(*, config: RunConfig, paths: RunPaths) -> ActorRunner:
     )
 
 
-
-
-
-
-
-
 def _count_text_events(path: Path) -> int:
     return sum(1 for event in read_jsonl(path) if event.get("type") == "text")
 
