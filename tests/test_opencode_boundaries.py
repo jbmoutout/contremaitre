@@ -9,12 +9,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from contremaitre import prompts
-from contremaitre.actors import build_docker_command
+from contremaitre.container import DockerContainerLifecycle
 from contremaitre.git_utils import GitRepo
 from contremaitre.models import ActorMode, DepsVolume, PublishMode, RunConfig
 from contremaitre.orchestrator import Orchestrator
 from contremaitre.paths import build_run_paths
 from contremaitre.publisher import GhPublisher
+
+# Module-level alias so existing tests keep calling build_docker_command(...)
+build_docker_command = DockerContainerLifecycle().build_argv
 
 
 class OpencodeBoundaryTest(unittest.TestCase):
@@ -406,7 +409,8 @@ class OpencodeBoundaryTest(unittest.TestCase):
             settled_dir = orch.paths.worktree / ".contremaitre"
             settled_dir.mkdir(exist_ok=True)
             (settled_dir / "SETTLED_DESIGN.md").write_text(
-                "# Settled design — Consolidate Prisma seam\n\n## What\n\nDelete the duplicate singleton.\n",
+                "# Settled design — Consolidate Prisma seam\n"
+                "\n## What\n\nDelete the duplicate singleton.\n",
                 encoding="utf-8",
             )
 
@@ -527,8 +531,6 @@ class ZenKeyClassificationTest(unittest.TestCase):
     Zen-only run that passes preflight would fail here at launch (F1)."""
 
     def _build(self, model: str):
-        from contremaitre.actors import build_docker_command
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths = build_run_paths(root / "runs", f"20260606-{root.name}")

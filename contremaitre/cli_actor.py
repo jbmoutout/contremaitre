@@ -77,7 +77,8 @@ from pathlib import Path
 from typing import Protocol
 
 from . import egress, events
-from .actors import ActorError, ActorOutput, _run_detached_container
+from .actors import ActorError, ActorOutput
+from .container import ContainerLifecycle, DockerContainerLifecycle
 from .jsonlog import append_jsonl, append_transcript
 from .models import RunConfig, RunPaths
 from .runtime_image import deps_mount_mode
@@ -760,11 +761,15 @@ class CliActorRunner:
     delegated to `self.driver` (`CodexDriver` / `ClaudeDriver`).
     """
 
-    def __init__(self, *, config: RunConfig, paths: RunPaths, tool: str = "codex"):
+    def __init__(
+        self, *, config: RunConfig, paths: RunPaths, tool: str = "codex",
+        container: ContainerLifecycle | None = None,
+    ):
         self.config = config
         self.paths = paths
         self.worktree = paths.worktree
         self.tool = tool
+        self.container = container or DockerContainerLifecycle()
         self.driver = _make_driver(tool, config)
         # Per-role homes persist across turns within a run, so session state
         # accumulates and `resume` works. Named by the driver so codex and claude
@@ -988,7 +993,7 @@ class CliActorRunner:
         # Bracket the container with wall-clock so we can back-fill real
         # timestamps onto the (clockless) CLI event slice it appends.
         t_start = time.time()
-        returncode, stderr, _fast_fail = _run_detached_container(
+        cr = self.container.run_detached(
             cmd=cmd,
             env=env,
             stdout_path=raw_export,
@@ -996,6 +1001,7 @@ class CliActorRunner:
             role=role,
             stdout_stall_seconds=self.config.opencode_stdout_stall_seconds or None,
         )
+        returncode, stderr = cr.returncode, cr.stderr
         _stamp_event_slice(
             raw_export, start_offset=start_offset, t_start=t_start, t_end=time.time()
         )
@@ -1147,7 +1153,7 @@ class CliActorRunner:
             env["CONTREMAITRE_CLAUDE_METER_MODEL"] = model
             env["CONTREMAITRE_CLAUDE_METER_PROMPT"] = "OK"
             env["CONTREMAITRE_CLAUDE_METER_TIMEOUT_SECONDS"] = "75"
-            returncode, stderr, _fast_fail = _run_detached_container(
+            cr = self.container.run_detached(
                 cmd=cmd,
                 env=env,
                 stdout_path=stdout_path,
@@ -1155,6 +1161,7 @@ class CliActorRunner:
                 role=f"{role} claude usage meter",
                 stdout_stall_seconds=None,
             )
+            returncode, stderr = cr.returncode, cr.stderr
             if returncode != 0:
                 error_path.write_text(
                     f"claude usage meter exited {returncode}: {stderr[:500]}",
