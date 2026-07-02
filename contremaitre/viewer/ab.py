@@ -166,8 +166,7 @@ def collect_run_row(case: CaseDef, config: ConfigDef, run_dir: Path) -> dict[str
         "extras": {
             "pr_landed": verdict in {"READY_FOR_DRAFT_PR", "PR_NEEDS_HUMAN"},
             "agent_tokens_in": agent_tok.get("input") or None,
-            "agent_tokens_out": (agent_tok.get("output") or 0)
-            + (agent_tok.get("reasoning") or 0)
+            "agent_tokens_out": (agent_tok.get("output") or 0) + (agent_tok.get("reasoning") or 0)
             or None,
             "sim_tokens_out": (sim_tok.get("output") or 0) + (sim_tok.get("reasoning") or 0)
             or None,
@@ -210,99 +209,400 @@ def _x(field: str) -> Callable[[dict[str, Any]], Any]:
 
 METRICS: tuple[Metric, ...] = (
     # outcome ---------------------------------------------------------------
-    Metric("terminal_verdict", "terminal verdict", "outcome", "context", "cat", hl=True,
-           get=_h("terminal_verdict")),
-    Metric("terminal_score", "terminal score", "outcome", "higher", "num", "num2",
-           note="READY_FOR_DRAFT_PR=1.0 · PR_NEEDS_HUMAN=0.5 · NO_PR_*=0.0", get=_h("terminal_score")),
-    Metric("pr_landed", "draft PR landed", "outcome", "higher", "bool", hl=True, get=_x("pr_landed")),
-    Metric("hard_gates_passed", "hard gates passed", "outcome", "higher", "bool",
-           get=_d("format_compliance", "hard_gates_passed")),
+    Metric(
+        "terminal_verdict",
+        "terminal verdict",
+        "outcome",
+        "context",
+        "cat",
+        hl=True,
+        get=_h("terminal_verdict"),
+    ),
+    Metric(
+        "terminal_score",
+        "terminal score",
+        "outcome",
+        "higher",
+        "num",
+        "num2",
+        note="READY_FOR_DRAFT_PR=1.0 · PR_NEEDS_HUMAN=0.5 · NO_PR_*=0.0",
+        get=_h("terminal_score"),
+    ),
+    Metric(
+        "pr_landed", "draft PR landed", "outcome", "higher", "bool", hl=True, get=_x("pr_landed")
+    ),
+    Metric(
+        "hard_gates_passed",
+        "hard gates passed",
+        "outcome",
+        "higher",
+        "bool",
+        get=_d("format_compliance", "hard_gates_passed"),
+    ),
     # LLM judge (cli_review) --------------------------------------------------
-    Metric("cli_review_verdict", "judge verdict", "LLM judge (cli_review)", "context", "cat", hl=True,
-           get=_h("cli_review_verdict_key")),
-    Metric("cli_review_score", "judge score", "LLM judge (cli_review)", "higher", "num", "num2",
-           note="LOOKS_GOOD=1.0 · NEEDS_ATTENTION=0.5 · MUST_FIX=0.0", hl=True,
-           get=_h("cli_review_score")),
-    Metric("cli_findings_weighted", "findings (weighted)", "LLM judge (cli_review)", "lower", "num", "num1",
-           note="issue×3 + suggestion×2 + nit×1", hl=True, get=_h("cli_findings_weighted")),
-    Metric("cli_issue_count", "issue count", "LLM judge (cli_review)", "lower", "num", "num1",
-           get=_h("cli_issue_count")),
-    Metric("cli_suggestion_count", "suggestion count", "LLM judge (cli_review)", "lower", "num", "num1",
-           get=_h("cli_suggestion_count")),
-    Metric("cli_nit_count", "nit count", "LLM judge (cli_review)", "lower", "num", "num1",
-           get=_h("cli_nit_count")),
-    Metric("cli_citation_density", "citation density", "LLM judge (cli_review)", "higher", "num", "num2",
-           note="fraction of findings citing path:line", get=_h("cli_citation_density")),
-    Metric("cli_review_parse_ok", "judge output parseable", "LLM judge (cli_review)", "higher", "bool",
-           get=_d("format_compliance", "cli_review_parse_ok")),
+    Metric(
+        "cli_review_verdict",
+        "judge verdict",
+        "LLM judge (cli_review)",
+        "context",
+        "cat",
+        hl=True,
+        get=_h("cli_review_verdict_key"),
+    ),
+    Metric(
+        "cli_review_score",
+        "judge score",
+        "LLM judge (cli_review)",
+        "higher",
+        "num",
+        "num2",
+        note="LOOKS_GOOD=1.0 · NEEDS_ATTENTION=0.5 · MUST_FIX=0.0",
+        hl=True,
+        get=_h("cli_review_score"),
+    ),
+    Metric(
+        "cli_findings_weighted",
+        "findings (weighted)",
+        "LLM judge (cli_review)",
+        "lower",
+        "num",
+        "num1",
+        note="issue×3 + suggestion×2 + nit×1",
+        hl=True,
+        get=_h("cli_findings_weighted"),
+    ),
+    Metric(
+        "cli_issue_count",
+        "issue count",
+        "LLM judge (cli_review)",
+        "lower",
+        "num",
+        "num1",
+        get=_h("cli_issue_count"),
+    ),
+    Metric(
+        "cli_suggestion_count",
+        "suggestion count",
+        "LLM judge (cli_review)",
+        "lower",
+        "num",
+        "num1",
+        get=_h("cli_suggestion_count"),
+    ),
+    Metric(
+        "cli_nit_count",
+        "nit count",
+        "LLM judge (cli_review)",
+        "lower",
+        "num",
+        "num1",
+        get=_h("cli_nit_count"),
+    ),
+    Metric(
+        "cli_citation_density",
+        "citation density",
+        "LLM judge (cli_review)",
+        "higher",
+        "num",
+        "num2",
+        note="fraction of findings citing path:line",
+        get=_h("cli_citation_density"),
+    ),
+    Metric(
+        "cli_review_parse_ok",
+        "judge output parseable",
+        "LLM judge (cli_review)",
+        "higher",
+        "bool",
+        get=_d("format_compliance", "cli_review_parse_ok"),
+    ),
     # process / discipline ----------------------------------------------------
-    Metric("agent_discipline_score", "agent discipline", "process / discipline", "higher", "num", "num2",
-           note="exploration + sim_useful_call_ratio + self_verified", hl=True,
-           get=_h("agent_discipline_score")),
-    Metric("settled_before_code", "settled before code", "process / discipline", "higher", "bool",
-           get=_d("discipline", "settled_before_code")),
-    Metric("self_verified", "self-verified (ran tests)", "process / discipline", "higher", "bool",
-           get=_d("discipline", "self_verified")),
-    Metric("exploration_convergence", "exploration convergence", "process / discipline", "context", "cat",
-           get=_d("discipline", "exploration_convergence")),
-    Metric("sim_useful_call_ratio", "SIM useful-call ratio", "process / discipline", "higher", "num", "num2",
-           note="fraction of SIM greps cited in its verdict", get=_d("discipline", "sim_useful_call_ratio")),
-    Metric("context_pollution_events", "context pollution events", "process / discipline", "lower", "num", "num1",
-           get=_d("discipline", "context_pollution_events")),
-    Metric("runtime_install_required", "runtime install required", "process / discipline", "lower", "bool",
-           get=_d("discipline", "runtime_install_required")),
-    Metric("time_to_settled", "time to SETTLED (s)", "process / discipline", "context", "num", "num0",
-           get=_d("discipline", "time_to_settled_design_seconds")),
-    Metric("tokens_to_settled", "tokens to SETTLED", "process / discipline", "context", "num", "tok",
-           get=_d("discipline", "tokens_to_settled_design")),
-    Metric("implementation_complete_written", "IMPLEMENTATION_COMPLETE written", "process / discipline",
-           "higher", "bool", get=_d("format_compliance", "implementation_complete_written")),
+    Metric(
+        "agent_discipline_score",
+        "agent discipline",
+        "process / discipline",
+        "higher",
+        "num",
+        "num2",
+        note="exploration + sim_useful_call_ratio + self_verified",
+        hl=True,
+        get=_h("agent_discipline_score"),
+    ),
+    Metric(
+        "settled_before_code",
+        "settled before code",
+        "process / discipline",
+        "higher",
+        "bool",
+        get=_d("discipline", "settled_before_code"),
+    ),
+    Metric(
+        "self_verified",
+        "self-verified (ran tests)",
+        "process / discipline",
+        "higher",
+        "bool",
+        get=_d("discipline", "self_verified"),
+    ),
+    Metric(
+        "exploration_convergence",
+        "exploration convergence",
+        "process / discipline",
+        "context",
+        "cat",
+        get=_d("discipline", "exploration_convergence"),
+    ),
+    Metric(
+        "sim_useful_call_ratio",
+        "SIM useful-call ratio",
+        "process / discipline",
+        "higher",
+        "num",
+        "num2",
+        note="fraction of SIM greps cited in its verdict",
+        get=_d("discipline", "sim_useful_call_ratio"),
+    ),
+    Metric(
+        "context_pollution_events",
+        "context pollution events",
+        "process / discipline",
+        "lower",
+        "num",
+        "num1",
+        get=_d("discipline", "context_pollution_events"),
+    ),
+    Metric(
+        "runtime_install_required",
+        "runtime install required",
+        "process / discipline",
+        "lower",
+        "bool",
+        get=_d("discipline", "runtime_install_required"),
+    ),
+    Metric(
+        "time_to_settled",
+        "time to SETTLED (s)",
+        "process / discipline",
+        "context",
+        "num",
+        "num0",
+        get=_d("discipline", "time_to_settled_design_seconds"),
+    ),
+    Metric(
+        "tokens_to_settled",
+        "tokens to SETTLED",
+        "process / discipline",
+        "context",
+        "num",
+        "tok",
+        get=_d("discipline", "tokens_to_settled_design"),
+    ),
+    Metric(
+        "implementation_complete_written",
+        "IMPLEMENTATION_COMPLETE written",
+        "process / discipline",
+        "higher",
+        "bool",
+        get=_d("format_compliance", "implementation_complete_written"),
+    ),
     # review gates -------------------------------------------------------------
-    Metric("review_rounds", "SIM review rounds", "review gates", "context", "num", "num1",
-           get=_h("review_rounds")),
-    Metric("total_checks_performed", "SIM checks performed", "review gates", "context", "num", "num1",
-           get=_d("review_depth", "total_checks_performed")),
-    Metric("total_required_changes", "SIM required changes", "review gates", "context", "num", "num1",
-           get=_d("review_depth", "total_required_changes")),
-    Metric("sim_review_confidence", "SIM review confidence", "review gates", "higher", "num", "num2",
-           get=_d("review_depth", "sim_review_confidence")),
-    Metric("process_reliability", "process reliability", "review gates", "higher", "num", "num2",
-           get=_d("review_depth", "process_reliability")),
-    Metric("sim_verdicts_parse_ok", "SIM verdicts parseable", "review gates", "higher", "bool",
-           get=_d("format_compliance", "sim_verdicts_parse_ok")),
+    Metric(
+        "review_rounds",
+        "SIM review rounds",
+        "review gates",
+        "context",
+        "num",
+        "num1",
+        get=_h("review_rounds"),
+    ),
+    Metric(
+        "total_checks_performed",
+        "SIM checks performed",
+        "review gates",
+        "context",
+        "num",
+        "num1",
+        get=_d("review_depth", "total_checks_performed"),
+    ),
+    Metric(
+        "total_required_changes",
+        "SIM required changes",
+        "review gates",
+        "context",
+        "num",
+        "num1",
+        get=_d("review_depth", "total_required_changes"),
+    ),
+    Metric(
+        "sim_review_confidence",
+        "SIM review confidence",
+        "review gates",
+        "higher",
+        "num",
+        "num2",
+        get=_d("review_depth", "sim_review_confidence"),
+    ),
+    Metric(
+        "process_reliability",
+        "process reliability",
+        "review gates",
+        "higher",
+        "num",
+        "num2",
+        get=_d("review_depth", "process_reliability"),
+    ),
+    Metric(
+        "sim_verdicts_parse_ok",
+        "SIM verdicts parseable",
+        "review gates",
+        "higher",
+        "bool",
+        get=_d("format_compliance", "sim_verdicts_parse_ok"),
+    ),
     # code output ---------------------------------------------------------------
-    Metric("files_changed", "files changed", "code output", "context", "num", "num1",
-           get=_h("files_changed")),
-    Metric("loc_added", "LoC added", "code output", "context", "num", "num0",
-           get=_d("diff_detail", "loc_added")),
-    Metric("loc_deleted", "LoC deleted", "code output", "context", "num", "num0",
-           get=_d("diff_detail", "loc_deleted")),
-    Metric("loc_net_delta", "LoC net delta", "code output", "context", "num", "num0", hl=True,
-           get=_h("loc_net_delta")),
-    Metric("design_rounds", "design/grilling exchanges", "code output", "context", "num", "num1",
-           get=_x("design_rounds")),
-    Metric("impl_turns", "implementation turns", "code output", "context", "num", "num1",
-           get=_x("impl_turns")),
+    Metric(
+        "files_changed",
+        "files changed",
+        "code output",
+        "context",
+        "num",
+        "num1",
+        get=_h("files_changed"),
+    ),
+    Metric(
+        "loc_added",
+        "LoC added",
+        "code output",
+        "context",
+        "num",
+        "num0",
+        get=_d("diff_detail", "loc_added"),
+    ),
+    Metric(
+        "loc_deleted",
+        "LoC deleted",
+        "code output",
+        "context",
+        "num",
+        "num0",
+        get=_d("diff_detail", "loc_deleted"),
+    ),
+    Metric(
+        "loc_net_delta",
+        "LoC net delta",
+        "code output",
+        "context",
+        "num",
+        "num0",
+        hl=True,
+        get=_h("loc_net_delta"),
+    ),
+    Metric(
+        "design_rounds",
+        "design/grilling exchanges",
+        "code output",
+        "context",
+        "num",
+        "num1",
+        get=_x("design_rounds"),
+    ),
+    Metric(
+        "impl_turns",
+        "implementation turns",
+        "code output",
+        "context",
+        "num",
+        "num1",
+        get=_x("impl_turns"),
+    ),
     # efficiency / spend ----------------------------------------------------------
-    Metric("wall_seconds", "wall clock", "efficiency / spend", "lower", "num", "dur", hl=True,
-           get=_h("wall_seconds")),
-    Metric("turns", "total turns", "efficiency / spend", "lower", "num", "num0",
-           get=_d("efficiency", "turns")),
-    Metric("cost_usd", "recorded cost", "efficiency / spend", "lower", "num", "usd",
-           note="$0 for subscription/free runs — tokens are the real spend", hl=True,
-           get=_h("cost_usd")),
-    Metric("agent_tokens_out", "agent output tokens", "efficiency / spend", "context", "num", "tok",
-           note="the code-production signal", hl=True, get=_x("agent_tokens_out")),
-    Metric("agent_tokens_in", "agent input tokens", "efficiency / spend", "context", "num", "tok",
-           get=_x("agent_tokens_in")),
-    Metric("sim_tokens_out", "SIM output tokens", "efficiency / spend", "context", "num", "tok",
-           get=_x("sim_tokens_out")),
-    Metric("tokens_total", "total tokens (all streams)", "efficiency / spend", "context", "num", "tok",
-           note="agent + SIM + CLI reviewers", get=_x("tokens_total")),
-    Metric("agent_tool_call_count", "agent tool calls", "efficiency / spend", "context", "num", "num0",
-           get=_d("efficiency", "agent_tool_call_count")),
-    Metric("sim_tool_call_count", "SIM tool calls", "efficiency / spend", "context", "num", "num0",
-           get=_d("efficiency", "sim_tool_call_count")),
+    Metric(
+        "wall_seconds",
+        "wall clock",
+        "efficiency / spend",
+        "lower",
+        "num",
+        "dur",
+        hl=True,
+        get=_h("wall_seconds"),
+    ),
+    Metric(
+        "turns",
+        "total turns",
+        "efficiency / spend",
+        "lower",
+        "num",
+        "num0",
+        get=_d("efficiency", "turns"),
+    ),
+    Metric(
+        "cost_usd",
+        "recorded cost",
+        "efficiency / spend",
+        "lower",
+        "num",
+        "usd",
+        note="$0 for subscription/free runs — tokens are the real spend",
+        hl=True,
+        get=_h("cost_usd"),
+    ),
+    Metric(
+        "agent_tokens_out",
+        "agent output tokens",
+        "efficiency / spend",
+        "context",
+        "num",
+        "tok",
+        note="the code-production signal",
+        hl=True,
+        get=_x("agent_tokens_out"),
+    ),
+    Metric(
+        "agent_tokens_in",
+        "agent input tokens",
+        "efficiency / spend",
+        "context",
+        "num",
+        "tok",
+        get=_x("agent_tokens_in"),
+    ),
+    Metric(
+        "sim_tokens_out",
+        "SIM output tokens",
+        "efficiency / spend",
+        "context",
+        "num",
+        "tok",
+        get=_x("sim_tokens_out"),
+    ),
+    Metric(
+        "tokens_total",
+        "total tokens (all streams)",
+        "efficiency / spend",
+        "context",
+        "num",
+        "tok",
+        note="agent + SIM + CLI reviewers",
+        get=_x("tokens_total"),
+    ),
+    Metric(
+        "agent_tool_call_count",
+        "agent tool calls",
+        "efficiency / spend",
+        "context",
+        "num",
+        "num0",
+        get=_d("efficiency", "agent_tool_call_count"),
+    ),
+    Metric(
+        "sim_tool_call_count",
+        "SIM tool calls",
+        "efficiency / spend",
+        "context",
+        "num",
+        "num0",
+        get=_d("efficiency", "sim_tool_call_count"),
+    ),
 )
 
 
@@ -376,7 +676,9 @@ def mix(values: list[Any]) -> dict[str, int]:
     return out
 
 
-def compare_metric(metric: Metric, rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]]) -> dict[str, Any]:
+def compare_metric(
+    metric: Metric, rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]]
+) -> dict[str, Any]:
     """One registry entry → the full comparison record one table row needs."""
 
     va = metric_vector(metric, rows_a)
@@ -456,7 +758,9 @@ def validity_checks(
             {
                 "name": f"base pinned @ {case.expected_base_sha[:12]}",
                 "status": "fail" if bad else "pass",
-                "detail": f"mismatched: {', '.join(bad)}" if bad else f"all {len(all_rows)} runs match",
+                "detail": f"mismatched: {', '.join(bad)}"
+                if bad
+                else f"all {len(all_rows)} runs match",
             }
         )
     else:
@@ -512,7 +816,9 @@ def validity_checks(
             {
                 "name": "single variable (models only)",
                 "status": "pass" if moved else "warn",
-                "detail": f"moved: {', '.join(moved)}" if moved else "configs are identical — nothing to compare",
+                "detail": f"moved: {', '.join(moved)}"
+                if moved
+                else "configs are identical — nothing to compare",
             }
         )
 
@@ -542,7 +848,9 @@ def validity_checks(
         {
             "name": "clean contremaitre tree",
             "status": "warn" if dirty else "pass",
-            "detail": f"dirty during: {', '.join(dirty)}" if dirty else "all runs on committed code",
+            "detail": f"dirty during: {', '.join(dirty)}"
+            if dirty
+            else "all runs on committed code",
         }
     )
 
@@ -571,7 +879,11 @@ def validity_checks(
             "name": "sample size (n≥3 per arm)",
             "status": "pass" if min(n_a, n_b) >= 3 else "warn",
             "detail": f"arm A n={n_a}, arm B n={n_b}"
-            + ("" if min(n_a, n_b) >= 3 else " — below the n=3 floor; treat every delta as anecdote"),
+            + (
+                ""
+                if min(n_a, n_b) >= 3
+                else " — below the n=3 floor; treat every delta as anecdote"
+            ),
         }
     )
 
@@ -795,7 +1107,9 @@ def _render_html(data: dict[str, Any]) -> str:
 def _arm_header(label: str, cls: str, config: ConfigDef, rows: list[dict[str, Any]]) -> str:
     n_healthy = sum(1 for r in rows if r["healthy"])
     n_infra = len(rows) - n_healthy
-    resolved_agent = next((r["resolved_agent_model"] for r in rows if r["resolved_agent_model"]), None)
+    resolved_agent = next(
+        (r["resolved_agent_model"] for r in rows if r["resolved_agent_model"]), None
+    )
     resolved_sim = next((r["resolved_sim_model"] for r in rows if r["resolved_sim_model"]), None)
     kv = [
         ("config", f"<b><code>{_escape(config.name)}</code></b>"),
@@ -819,7 +1133,7 @@ def _render_checklist(checks: list[dict[str, Any]]) -> str:
     items = "".join(
         f'<li><span class="st {c["status"]}">{c["status"].upper()}</span>'
         f'<span class="nm">{_escape(c["name"])}</span>'
-        f'<span>{_escape(c["detail"])}</span></li>'
+        f"<span>{_escape(c['detail'])}</span></li>"
         for c in checks
     )
     return f'<ul class="checklist">{items}</ul>'
@@ -891,6 +1205,7 @@ def _render_metric_row(rec: dict[str, Any]) -> str:
             f'<td class="num pts">{_points(rec["values_b"], metric.fmt)}</td>'
         )
     elif metric.kind == "bool":
+
         def _rate_cell(side: dict[str, Any], cls: str) -> str:
             if side["rate"] is None:
                 return f'<td class="{cls}">—</td>'
@@ -913,6 +1228,7 @@ def _render_metric_row(rec: dict[str, Any]) -> str:
             f'<td class="num pts">{_bool_points(rec["values_b"])}</td>'
         )
     else:  # cat
+
         def _mix_cell(side: dict[str, Any]) -> str:
             m = side.get("mix") or {}
             if not m:
@@ -959,6 +1275,7 @@ def _diff_size_card(by_key: dict[str, dict[str, Any]]) -> str:
 
     rows = []
     for side, arm_cls in (("a", "arm-a"), ("b", "arm-b")):
+
         def _med(rec: dict[str, Any] | None) -> float | None:
             return rec[side].get("median") if rec else None
 
@@ -975,8 +1292,7 @@ def _diff_size_card(by_key: dict[str, dict[str, Any]]) -> str:
             f'<div class="sb-row"><span class="sb-arm {arm_cls}">{side.upper()}</span>{body}</div>'
         )
     return (
-        '<div class="sb-card"><div class="sb-title">diff size (median)</div>'
-        f'{"".join(rows)}</div>'
+        f'<div class="sb-card"><div class="sb-title">diff size (median)</div>{"".join(rows)}</div>'
     )
 
 
@@ -1072,12 +1388,18 @@ def _render_run_card(row: dict[str, Any]) -> str:
     elif row["pr_kind"]:
         pr_bit = f'<span class="score-pill pr-pill-no-pr"><b>{_escape(row["pr_kind"])}</b></span>'
 
-    infra_bit = "" if row["healthy"] else ' <span class="badge-infra">INFRA — excluded from metrics</span>'
+    infra_bit = (
+        "" if row["healthy"] else ' <span class="badge-infra">INFRA — excluded from metrics</span>'
+    )
 
     review_badges = ""
     for cr in row["cli_reviews"]:
         cli_tier = _cli_review_tier(cr["verdict"])
-        src = f' <span style="color:var(--text-muted)">({_escape(cr["source"])})</span>' if cr["source"] != "orchestrator" else ""
+        src = (
+            f' <span style="color:var(--text-muted)">({_escape(cr["source"])})</span>'
+            if cr["source"] != "orchestrator"
+            else ""
+        )
         review_badges += (
             f' <span class="sim-dot {cli_tier}"></span>'
             f'<span style="color:var(--accent)">{_escape(cr["tool"])} {_escape(cr["verdict"] or "?")}</span>{src}'
@@ -1085,7 +1407,9 @@ def _render_run_card(row: dict[str, Any]) -> str:
 
     blurb = row["impl_complete"] or row["settled_preamble"] or row["reason"]
     blurb_html = (
-        f'<div class="rep-meta" style="color:var(--text-dim)">{_escape(blurb[:280])}</div>' if blurb else ""
+        f'<div class="rep-meta" style="color:var(--text-dim)">{_escape(blurb[:280])}</div>'
+        if blurb
+        else ""
     )
 
     def _pill(label: str, value: str) -> str:
