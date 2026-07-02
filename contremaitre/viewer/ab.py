@@ -929,7 +929,8 @@ def _render_metric_row(rec: dict[str, Any]) -> str:
             '<td class="num pts"></td>'
         )
 
-    return f'<tr{" class=\"hl\"" if metric.hl else ""}>{label}{cells}</tr>'
+    hl_attr = ' class="hl"' if metric.hl else ""
+    return f"<tr{hl_attr}>{label}{cells}</tr>"
 
 
 # Scoreboard rows, in display order — the ~8 questions an operator asks first.
