@@ -76,6 +76,30 @@ from .scaffolds import (
 from .verdicts import VerdictParseError, diff_hash, parse_sim_verdict, write_review_diff
 
 
+# Total attempts for a post-publish revision push (1 initial + resyncs). A
+# concurrent writer (e.g. a CI auto-formatter pushing to the PR branch) can
+# advance origin/<branch> under us; each resync fetches + rebases + re-gates
+# before retrying. Bounded so a bot that pushes on every push degrades to
+# PR_NEEDS_HUMAN instead of spinning forever.
+MAX_PUSH_ATTEMPTS = 3
+
+
+def _is_non_fast_forward(stderr: str) -> bool:
+    """True when a push was rejected because the remote branch advanced.
+
+    Distinguishes a recoverable divergence (a concurrent writer pushed to the
+    PR branch) from a real push failure (auth, network, protected branch) so
+    the revision loop only fetch-rebase-retries on the former. Matches the
+    specific non-fast-forward signal, not the generic "failed to push some
+    refs" line that accompanies every rejection.
+    """
+
+    lowered = (stderr or "").lower()
+    return any(
+        marker in lowered for marker in ("fetch first", "non-fast-forward", "remote contains work")
+    )
+
+
 @dataclass(frozen=True)
 class _WorktreeSnapshot:
     """One pair of git read-only queries shared across the two per-turn records.
@@ -686,7 +710,7 @@ class Orchestrator:
                 required_changes_count=len(all_required_changes),
                 verdicts={t: v for t, v in round_verdicts},
             )
-            revision_ready = self._run_cli_review_revision(
+            revision_ready, revision_reason = self._run_cli_review_revision(
                 actor=actor,
                 worktree_git=worktree_git,
                 branch=branch,
@@ -698,9 +722,10 @@ class Orchestrator:
                 self._post_cli_review_status(
                     worktree_git=worktree_git, outcome=outcome, verdicts=round_verdicts
                 )
+                detail = revision_reason or "revision was blocked"
                 return (
                     TerminalVerdict.PR_NEEDS_HUMAN,
-                    "post-publish CLI review revision was blocked",
+                    f"post-publish CLI review {detail}",
                 )
 
         # Max rounds exhausted without reaching LOOKS_GOOD on all tools.
@@ -723,8 +748,15 @@ class Orchestrator:
         required_changes: list[str],
         cli_round: int,
         max_rounds: int,
-    ) -> bool:
-        """Apply one post-publish CLI-review revision and gate it before push."""
+    ) -> tuple[bool, str | None]:
+        """Apply one post-publish CLI-review revision and gate it before push.
+
+        Returns `(ready, reason)`. `ready` is True only when the revised HEAD
+        gated clean and reached the remote. On failure `reason` carries the
+        specific cause (e.g. `"resync rebase conflict"`) so the caller can
+        project it onto the terminal `PR_NEEDS_HUMAN` verdict instead of a
+        generic "revision was blocked".
+        """
 
         revision_prompt = prompts.cli_revision_followup(
             required_changes, round_n=cli_round, round_of=max_rounds
@@ -732,54 +764,146 @@ class Orchestrator:
         self._clear_implementation_complete()
         self._agent_turn(actor, revision_prompt)
         if not self._implementation_complete():
-            self._emit(
-                events.CLI_REVIEW_LOOP_BLOCKED,
-                round=cli_round,
-                reason="revision ended without IMPLEMENTATION_COMPLETE",
-            )
-            return False
+            reason = "revision ended without IMPLEMENTATION_COMPLETE"
+            self._emit(events.CLI_REVIEW_LOOP_BLOCKED, round=cli_round, reason=reason)
+            return False, reason
         if self._cap_tripped():
-            self._emit(
-                events.CLI_REVIEW_LOOP_BLOCKED,
-                round=cli_round,
-                reason="cap tripped during CLI revision",
-            )
-            return False
+            reason = "cap tripped during CLI revision"
+            self._emit(events.CLI_REVIEW_LOOP_BLOCKED, round=cli_round, reason=reason)
+            return False, reason
 
         self._commit_agent_changes(worktree_git)
-        revision_hash = diff_hash(worktree_git, self._diff_base)
-        try:
-            checks = run_checks(
-                config=self.config,
-                paths=self.paths,
-                emit_event=self._emit,
-            )
-        except Exception as exc:
-            self._emit(
-                events.CLI_REVIEW_LOOP_BLOCKED,
-                round=cli_round,
-                reason=f"executable checks raised: {exc}",
-            )
-            return False
-        self._record_worktree_state(worktree_git, f"after-cli-revision-checks-round{cli_round}")
-        if not self._cli_revision_gates_passed(
-            worktree_git=worktree_git,
-            revision_hash=revision_hash,
-            checks=checks,
-            cli_round=cli_round,
-        ):
-            return False
+        return self._gate_check_and_push(
+            worktree_git=worktree_git, branch=branch, cli_round=cli_round
+        )
 
-        push = worktree_git.run("push", "origin", f"HEAD:{branch}", check=False)
-        if push.returncode != 0:
+    def _gate_check_and_push(
+        self,
+        *,
+        worktree_git: GitRepo,
+        branch: str,
+        cli_round: int,
+    ) -> tuple[bool, str | None]:
+        """Gate the revised HEAD (L0 + L1) and push it, resyncing on divergence.
+
+        A concurrent writer (e.g. a CI auto-formatter pushing to the PR branch)
+        can advance `origin/{branch}` between the initial publish push and this
+        revision push, making the push a non-fast-forward. Force-push is
+        forbidden, so we integrate instead: fetch the remote tip, rebase the
+        revision onto it, re-run the deterministic gates on the merged tree
+        (its diff — and thus its hash — legitimately grows to include the
+        remote's commits), and push again. Bounded to MAX_PUSH_ATTEMPTS so a
+        bot that pushes on every push degrades to PR_NEEDS_HUMAN rather than
+        spinning forever. The happy path (no divergence) runs exactly one
+        gate + push and pays nothing for the resync machinery.
+        """
+
+        for attempt in range(1, MAX_PUSH_ATTEMPTS + 1):
+            revision_hash = diff_hash(worktree_git, self._diff_base)
+            try:
+                checks = run_checks(
+                    config=self.config,
+                    paths=self.paths,
+                    emit_event=self._emit,
+                )
+            except Exception as exc:
+                reason = f"executable checks raised: {exc}"
+                self._emit(events.CLI_REVIEW_LOOP_BLOCKED, round=cli_round, reason=reason)
+                return False, reason
+            self._record_worktree_state(
+                worktree_git,
+                f"after-cli-revision-checks-round{cli_round}-attempt{attempt}",
+            )
+            if not self._cli_revision_gates_passed(
+                worktree_git=worktree_git,
+                revision_hash=revision_hash,
+                checks=checks,
+                cli_round=cli_round,
+            ):
+                return False, "revised HEAD failed hard gates"
+
+            push = worktree_git.run("push", "origin", f"HEAD:{branch}", check=False)
+            if push.returncode == 0:
+                return True, None
+            if not _is_non_fast_forward(push.stderr):
+                reason = "push failed"
+                self._emit(
+                    events.CLI_REVIEW_LOOP_BLOCKED,
+                    round=cli_round,
+                    reason=reason,
+                    stderr=push.stderr[-1000:],
+                )
+                return False, reason
+            if attempt == MAX_PUSH_ATTEMPTS:
+                reason = f"push rejected after {MAX_PUSH_ATTEMPTS} resync attempts"
+                self._emit(
+                    events.CLI_REVIEW_LOOP_BLOCKED,
+                    round=cli_round,
+                    reason=reason,
+                    stderr=push.stderr[-1000:],
+                )
+                return False, reason
+            resynced, resync_reason = self._resync_onto_remote(
+                worktree_git=worktree_git,
+                branch=branch,
+                cli_round=cli_round,
+                attempt=attempt,
+            )
+            if not resynced:
+                return False, resync_reason
+        return False, "revision push did not converge"
+
+    def _resync_onto_remote(
+        self,
+        *,
+        worktree_git: GitRepo,
+        branch: str,
+        cli_round: int,
+        attempt: int,
+    ) -> tuple[bool, str | None]:
+        """Fetch `origin/{branch}` and rebase the local revision onto it.
+
+        Returns `(True, None)` when the worktree HEAD now descends from the
+        remote tip (the next push will fast-forward). On fetch failure or a
+        rebase conflict (e.g. the remote reformatted the exact lines the agent
+        edited) the rebase is aborted and `(False, reason)` is returned — the
+        caller degrades to PR_NEEDS_HUMAN and the gated fix is preserved in the
+        run's worktree and git log for a human to land. Only remote-tracking
+        state is trusted: we rebase onto the just-fetched `FETCH_HEAD`, never a
+        local guess.
+        """
+
+        local_before = worktree_git.output("rev-parse", "HEAD").strip()
+        fetch = worktree_git.run("fetch", "origin", branch, check=False)
+        if fetch.returncode != 0:
+            reason = "resync fetch failed"
             self._emit(
                 events.CLI_REVIEW_LOOP_BLOCKED,
                 round=cli_round,
-                reason="push failed",
-                stderr=push.stderr[-1000:],
+                reason=reason,
+                stderr=fetch.stderr[-1000:],
             )
-            return False
-        return True
+            return False, reason
+        onto = worktree_git.output("rev-parse", "FETCH_HEAD").strip()
+        rebase = worktree_git.run("rebase", "FETCH_HEAD", check=False)
+        if rebase.returncode != 0:
+            worktree_git.run("rebase", "--abort", check=False)
+            reason = "resync rebase conflict"
+            self._emit(
+                events.CLI_REVIEW_LOOP_BLOCKED,
+                round=cli_round,
+                reason=reason,
+                stderr=rebase.stderr[-1000:],
+            )
+            return False, reason
+        self._emit(
+            events.CLI_REVIEW_LOOP_RESYNC,
+            round=cli_round,
+            attempt=attempt,
+            onto=onto[:12],
+            local_before=local_before[:12],
+        )
+        return True, None
 
     def _cli_revision_gates_passed(
         self,

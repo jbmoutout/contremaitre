@@ -1981,6 +1981,11 @@ def _render_guardrail(event: dict[str, Any]):
         # Each retry attempt is a "we're trying again" cue — warn-style
         # so the operator notices but knows the run hasn't given up.
         style = f"bold {_PAL_WARN}"
+    elif kind == "cli_review_loop_resync":
+        # A CI writer advanced the PR branch; the host is rebasing the
+        # revision onto it and retrying the push. Warn-style: the run
+        # is recovering, not failing.
+        style = f"bold {_PAL_WARN}"
     elif any(k in kind for k in ("recovery", "orphan", "sqlite", "cap")):
         style = f"bold {_PAL_WARN}"
     elif kind == "published":
@@ -2015,12 +2020,21 @@ def _render_guardrail(event: dict[str, Any]):
         body.append("✓ ", style=style)
     elif kind == "hard_gates_checked":
         body.append("✓ " if event.get("passed") else "✗ ", style=style)
+    elif kind == "cli_review_loop_resync":
+        body.append("↻ ", style=style)
 
     body.append(kind, style=style)
 
-    for field in ("role", "outcome", "round", "verdict", "recovered_chars"):
+    for field in ("role", "outcome", "round", "attempt", "verdict", "recovered_chars"):
         if field in event:
             body.append(f"  {field}={event[field]}", style="dim")
+    # `reason` carries the *why* for a blocked/resync step — the operator
+    # needs it to tell a rebase conflict from an exhausted-retry from a
+    # plain push failure. Match the line's style so a blocked reason reads
+    # red and a resync target reads warn, rather than hiding dim.
+    reason = event.get("reason")
+    if reason:
+        body.append(f"  {reason}", style=style if "blocked" in kind else "dim")
     if kind == "check_completed":
         cmd = event.get("cmd", "")
         if cmd:

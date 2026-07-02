@@ -257,6 +257,15 @@ POST-PUBLISH CLI REVIEW LOOP  (only when --cli-reviewer != none)
         clean_worktree (git status clean except .contremaitre/*), draft_only
         (always passes post-publish); push HEAD → branch only if all pass,
         then next round
+    - resync on divergence: if the revision push is rejected non-fast-forward
+        (a concurrent writer — e.g. a CI auto-formatter — advanced
+        origin/<branch> during the reviewer round), the host fetches that tip,
+        rebases the revision onto it, re-runs L0+L1 on the merged tree (its
+        diff, and thus diff_hash, legitimately grows to include the remote's
+        commits), and retries the now-fast-forward push. Bounded to
+        MAX_PUSH_ATTEMPTS (=3); force-push stays forbidden. Emits
+        cli_review_loop_resync per rebase. A rebase conflict / fetch failure /
+        exhausted retries aborts to PR_NEEDS_HUMAN with the specific reason.
     - revision gate or push failure after publication → PR_NEEDS_HUMAN;
         existing PR remains published for human follow-up
     - max_cli_review_rounds exhausted without all-LOOKS_GOOD → PR_NEEDS_HUMAN;
