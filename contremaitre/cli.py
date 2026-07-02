@@ -480,6 +480,38 @@ def build_parser() -> argparse.ArgumentParser:
     eval_all.add_argument("--runs-root", **eval_runs_root_kwargs)
     eval_all.set_defaults(func=_eval_all_cmd)
 
+    eval_ab = eval_sub.add_parser(
+        "ab",
+        help=(
+            "Head-to-head A/B: run two configs on one pinned case (interleaved) "
+            "and build an HTML comparison report"
+        ),
+    )
+    eval_ab.add_argument("case_id")
+    eval_ab.add_argument(
+        "--config-a",
+        required=True,
+        help="Arm A config name under golden_cases/<case_id>/configs/",
+    )
+    eval_ab.add_argument(
+        "--config-b",
+        required=True,
+        help="Arm B config name under golden_cases/<case_id>/configs/",
+    )
+    eval_ab.add_argument("--n", type=int, default=3, help="Runs per arm (default: 3)")
+    eval_ab.add_argument("--runs-root", **eval_runs_root_kwargs)
+    eval_ab.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Skip launching; rebuild the report from the latest n runs per config on disk",
+    )
+    eval_ab.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the report in the default browser",
+    )
+    eval_ab.set_defaults(func=_eval_ab_cmd)
+
     eval_show = eval_sub.add_parser(
         "show", help="Pretty-print the scorecard for a (case, config) (no side effects)"
     )
@@ -1936,6 +1968,21 @@ def _eval_all_cmd(args: argparse.Namespace) -> int:
         config_name=args.config,
         runs_root=args.runs_root.resolve(),
         n=args.n,
+    )
+
+
+def _eval_ab_cmd(args: argparse.Namespace) -> int:
+    from .eval import cmd_ab
+
+    return cmd_ab(
+        project_root=_eval_project_root(),
+        case_id=args.case_id,
+        config_a=args.config_a,
+        config_b=args.config_b,
+        n=args.n,
+        runs_root=args.runs_root.resolve(),
+        report_only=args.report_only,
+        open_report=args.open,
     )
 
 

@@ -400,7 +400,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`costs.py`](../contremaitre/costs.py) — recorded-cost extraction from JSONL streams; provider-side limits remain the real guardrail.
 - [`diffscan.py`](../contremaitre/diffscan.py) — deterministic forbidden-path scanner against the working diff.
 - [`envfile.py`](../contremaitre/envfile.py) — dependency-free `.env` loader; shell env wins, never overwritten.
-- [`eval.py`](../contremaitre/eval.py) — v0 regression canary against `golden_cases/<id>/`. Subprocess-invokes `contremaitre run --agent opencode` so the production launch path is canaried as-is. Extracts a two-layer scorecard (headline + diagnostic) from artifacts the orchestrator already writes, aggregates n samples into a cell, compares against the (case, config) baseline. Generalizable methodology principles: [golden_cases/README.md](../golden_cases/README.md#methodology-notes).
+- [`eval.py`](../contremaitre/eval.py) — v0 regression canary against `golden_cases/<id>/`. Subprocess-invokes `contremaitre run --agent opencode` so the production launch path is canaried as-is. Extracts a two-layer scorecard (headline + diagnostic) from artifacts the orchestrator already writes, aggregates n samples into a cell, compares against the (case, config) baseline. Also owns `cmd_ab` — the two-config head-to-head: launches both arms interleaved (A,B,A,B,…) so provider drift spreads across arms, then delegates the comparison report to `viewer/ab.py`. Generalizable methodology principles: [golden_cases/README.md](../golden_cases/README.md#methodology-notes).
 - [`evaluator.py`](../contremaitre/evaluator.py) — gate-first PR-eval writer + non-blocking flow-use observability. `executable_confidence` is `null` (not `0.0`) when no `--check-cmd` is configured.
 - [`events.py`](../contremaitre/events.py) — guardrail-event name constants. Single source of truth so writer + reader stay aligned at import time.
 - [`extract.py`](../contremaitre/extract.py) — post-run artifact extraction: subagent markdown files (one per `task` tool-use), files written via `write` / `edit` / `apply_patch`, edit-accumulation `.edits.md` files, scaffold salvage.
@@ -420,7 +420,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
 - [`tui.py`](../contremaitre/tui.py) — read-only Textual TUI tailing JSONL artifacts. 7-phase footer (init → exploring → grilling → implementing → reviewing → cli_review → done) + SIM reviewer status glyphs + CLI review loop status + warning tokens + subscription-window usage (codex rollout snapshots / claude statusLine snapshots) + verdict badge.
 - [`verdicts.py`](../contremaitre/verdicts.py) — strict SIM verdict parser (fence-tolerant JSON extraction) and `diff_hash()` used by the diff-hash gate.
-- [`viewer/`](../contremaitre/viewer/) — single-file run viewer (`viewer.html`) over the JSONL artifacts (transcript, timeline, sub-agents, written files, guardrail events, eval reports). Built by the orchestrator's `finally` so it lands on success and failure. Companion [`viewer/index.py`](../contremaitre/viewer/index.py) scans a runs root for `viewer.html` files and emits `index.html` — one summary card per run (verdict, models, PR link, cost, duration), newest first — rebuilt at the end of every run so the dashboard is always current.
+- [`viewer/`](../contremaitre/viewer/) — single-file run viewer (`viewer.html`) over the JSONL artifacts (transcript, timeline, sub-agents, written files, guardrail events, eval reports). Built by the orchestrator's `finally` so it lands on success and failure. Companion [`viewer/index.py`](../contremaitre/viewer/index.py) scans a runs root for `viewer.html` files and emits `index.html` — one summary card per run (verdict, models, PR link, cost, duration), newest first — rebuilt at the end of every run so the dashboard is always current. [`viewer/ab.py`](../contremaitre/viewer/ab.py) renders the `eval ab` head-to-head report (`ab--<case>--<a>-vs-<b>.html` at the runs root): provenance + validity checklist, every `check_run` scorecard metric with median [min–max] + per-run values + a range-separation signal (infra-failed runs badged in the roster, excluded from metric vectors), per-run cards linking into each run's viewer.
 
 ## Artifact contract
 
@@ -475,7 +475,7 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 - `run_config.json` — provenance manifest ([manifest.py](../contremaitre/manifest.py))
 - `viewer.html` — self-contained run viewer (built in orchestrator's `finally`; lands on success and failure)
 
-The runs root also gets a top-level **`index.html`** rebuilt on each run, summarising every run under it ([viewer/index.py](../contremaitre/viewer/index.py)).
+The runs root also gets a top-level **`index.html`** rebuilt on each run, summarising every run under it ([viewer/index.py](../contremaitre/viewer/index.py)), and — when the operator runs `eval ab` — one **`ab--<case>--<a>-vs-<b>.html`** head-to-head comparison per config pair ([viewer/ab.py](../contremaitre/viewer/ab.py)).
 
 ## Runtime image
 

@@ -76,7 +76,26 @@ contremaitre eval run <case_id> --config qwen_sim --n 3
 contremaitre eval promote <case_id> --config qwen_sim
 ```
 
-`default.toml`'s baseline stays intact. Future comparisons are within-config (`compare --config qwen_sim` vs `baselines/qwen_sim.json`); cross-config comparison is a deliberate manual operator action for v0.
+`default.toml`'s baseline stays intact. Future comparisons are within-config (`compare --config qwen_sim` vs `baselines/qwen_sim.json`); for cross-config comparison, use `eval ab` (below).
+
+## Head-to-head (A/B) comparison
+
+To compare two configs of the same case scientifically — same pinned task, one model variable moved — run:
+
+```bash
+contremaitre eval ab <case_id> --config-a default --config-b qwen_sim --n 3
+# report only, from runs already on disk:
+contremaitre eval ab <case_id> --config-a default --config-b qwen_sim --report-only --open
+```
+
+The two arms launch **interleaved** (A,B,A,B,…) so provider load and time-of-day drift spread across both instead of confounding one; on provider quota exhaustion the batch aborts (unequal-n arms in different time windows aren't a comparison) and the report is still written over what completed.
+
+Output is a self-contained `ab--<case_id>--<a>-vs-<b>.html` under the runs root:
+
+- **Provenance + validity checklist** — base-SHA pinning verified per run, judge parity (`cli_reviewer` must match across arms or judge metrics are flagged non-comparable), environment uniformity (contremaitre code/prompts/image/skills identical across all runs), clean-tree and sample-size checks.
+- **Every scorecard metric head to head** — the same `check_run` extraction that gates baselines, shown as median [min–max] plus every per-run value. Infra-failed runs (`FAILED_INFRA`, `QUOTA_EXHAUSTED`) stay visible in the roster but are excluded from the metric vectors.
+- **Range-separation signal, no p-values** — at n=3 per arm an arm "separates" only when all its values lie strictly beyond the other arm's (one-sided rank-sum p ≈ 0.05); everything else is labelled *overlap*. Win attribution only on metrics with a defensible better-direction; scope metrics (LoC, files, rounds) render as *differs*.
+- **Per-run cards** — verdict, PR link, cost/duration/diffstat/token pills, embedded final diff + cli_review body, and a link into each run's `viewer.html` for the full trace.
 
 ## What's measured
 

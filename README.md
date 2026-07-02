@@ -97,6 +97,7 @@ The full flag reference lives in [docs/control-plane.md#cli-reference](docs/cont
 - `contremaitre index [<runs-root>] [--open]` — rebuild `index.html` across every run under the root: one summary card per run (verdict, models, PR link, cost, duration), newest first, each linking to its viewer. Auto-rebuilt at the end of every run.
 - `contremaitre tui attach <run-dir>` — read-only TUI over a finished run.
 - `contremaitre eval {run|check|compare|promote|all|show} <case_id>` — v0 regression canary. See [golden_cases/README.md](golden_cases/README.md).
+- `contremaitre eval ab <case_id> --config-a <a> --config-b <b> [--n 3] [--report-only] [--open]` — head-to-head A/B: runs two configs interleaved (A,B,A,B,…) against the case's pinned target+SHA, then writes a self-contained `ab--<case>--<a>-vs-<b>.html` comparison under the runs root — provenance + validity checklist, every scorecard metric with median [min–max], per-run values, a range-separation signal, and per-run cards (final diff, cli_review body) linking into each run's `viewer.html`. `--report-only` rebuilds the report from runs already on disk.
 - `contremaitre image build [--variant base|rust|go]` — build the runtime image. The default-variant image auto-builds on first opencode-mode run and auto-rebuilds when the Dockerfile changes.
 - `contremaitre fixture init <path>` — create a tiny git repo for fake-actor smoke runs.
 

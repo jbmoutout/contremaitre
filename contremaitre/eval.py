@@ -514,13 +514,6 @@ def _read_json_safe(path: Path) -> Any:
     return _read_json(path) if path.exists() else None
 
 
-def _count_lines(path: Path) -> int:
-    if not path.exists():
-        return 0
-    with path.open("r", encoding="utf-8") as fp:
-        return sum(1 for line in fp if line.strip())
-
-
 def _parse_cli_review(run_dir: Path, cli_reviewer: str) -> dict[str, Any]:
     """Extract verdict key + finding counts from the cli_reviewer output.
 
@@ -1704,6 +1697,114 @@ def cmd_all(*, project_root: Path, config_name: str, runs_root: Path, n: int) ->
         if rc_cmp == 1:
             any_regression = True
     return 1 if any_regression else 0
+
+
+def cmd_ab(
+    *,
+    project_root: Path,
+    case_id: str,
+    config_a: str,
+    config_b: str,
+    n: int,
+    runs_root: Path,
+    report_only: bool = False,
+    open_report: bool = False,
+) -> int:
+    """Two-arm head-to-head: run configs A and B on one pinned case, then
+    build the `ab--<case>--<a>-vs-<b>.html` comparison report.
+
+    Launches interleaved (A,B,A,B,…) rather than arm-by-arm so provider load
+    and time-of-day drift spread evenly across both arms instead of
+    confounding one. Aborts the remaining launches on provider quota
+    exhaustion — continuing would give the arms unequal n in different time
+    windows — but still writes the report over whatever completed, with the
+    validity checklist flagging the short sample.
+
+    `report_only=True` skips launching and rebuilds the report from the
+    latest n runs per config already on disk.
+    """
+
+    case_dir = case_dir_for(project_root, case_id)
+    case = load_case(case_dir)
+    if config_a == config_b:
+        print(
+            f"contremaitre eval: --config-a and --config-b are both {config_a!r}; "
+            "an A/B needs two different configs",
+            file=sys.stderr,
+        )
+        return 2
+    cfg_a = load_config(case_dir, config_a)
+    cfg_b = load_config(case_dir, config_b)
+
+    aborted = False
+    if not report_only:
+        print(
+            f"contremaitre eval: A/B on case={case.case_id} — "
+            f"A={config_a} vs B={config_b}, n={n} per arm, interleaved",
+            file=sys.stderr,
+        )
+        for i in range(n):
+            if aborted:
+                break
+            for label, cfg in (("A", cfg_a), ("B", cfg_b)):
+                try:
+                    run_dir = run_case(case, cfg, runs_root=runs_root, rep_index=i + 1)
+                except RuntimeError as exc:
+                    print(
+                        f"  [{label}{i + 1}/{n}] FAILED to launch: {exc}",
+                        file=sys.stderr,
+                    )
+                    aborted = True
+                    break
+                report = check_run(case, cfg, run_dir)
+                write_canary_report(report, run_dir)
+                h = report.headline
+                print(
+                    f"  [{label}{i + 1}/{n}] {'OK' if report.ok else 'FAIL'} "
+                    f"terminal={h.get('terminal_verdict')} "
+                    f"cli_review={h.get('cli_review_verdict_key')} dir={run_dir}",
+                    file=sys.stderr,
+                )
+                if h.get("terminal_verdict") == "QUOTA_EXHAUSTED":
+                    print(
+                        "\ncontremaitre eval: ABORTING A/B — provider quota "
+                        "exhausted. Continuing would give the arms unequal n in "
+                        "different time windows. Re-run after the reset with "
+                        f"`eval ab {case_id} --config-a {config_a} --config-b "
+                        f"{config_b} --n {n}`.",
+                        file=sys.stderr,
+                    )
+                    aborted = True
+                    break
+
+    # Lazy import — viewer.ab imports this module for check_run/load_case;
+    # importing it at module top would be circular.
+    from .viewer.ab import build_ab_report
+
+    have_a = latest_n_runs_for_case(runs_root, case_id, config_a, n)
+    have_b = latest_n_runs_for_case(runs_root, case_id, config_b, n)
+    if not have_a or not have_b:
+        print(
+            f"contremaitre eval: nothing to compare — {len(have_a)} run(s) for "
+            f"{config_a}, {len(have_b)} for {config_b}",
+            file=sys.stderr,
+        )
+        return 2
+
+    out = build_ab_report(
+        project_root=project_root,
+        runs_root=runs_root,
+        case_id=case_id,
+        config_a=config_a,
+        config_b=config_b,
+        n=n,
+    )
+    print(f"contremaitre eval: wrote {out}", file=sys.stderr)
+    if open_report:
+        import webbrowser
+
+        webbrowser.open(out.resolve().as_uri())
+    return 1 if aborted else 0
 
 
 # ---------------------------------------------------------------------------
