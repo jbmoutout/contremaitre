@@ -957,6 +957,20 @@ def test_latest_pending_tool_completed_returns_none():
         ),
         # hard_gates_checked passed=True → ✓.
         (events.HARD_GATES_CHECKED, {"passed": True}, ["✓"]),
+        # Resync step: ↻ icon + the attempt and rebase target so the operator
+        # sees the loop recovering from a concurrent-writer divergence.
+        (
+            events.CLI_REVIEW_LOOP_RESYNC,
+            {"round": 1, "attempt": 2, "onto": "b75ed27abcd"},
+            ["↻", "attempt=2"],
+        ),
+        # Blocked step must surface the *why* — the specific cause, not just
+        # the event name — so PR_NEEDS_HUMAN is legible in the feed.
+        (
+            events.CLI_REVIEW_LOOP_BLOCKED,
+            {"round": 1, "reason": "resync rebase conflict"},
+            ["resync rebase conflict"],
+        ),
         # actor_start surfaces the role so the operator sees agent/sim/review.
         (events.ACTOR_START, {"role": "review"}, ["role=review"]),
         (events.WORK_SESSION_END, {"role": "agent"}, ["role=agent"]),

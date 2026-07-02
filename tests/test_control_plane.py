@@ -44,6 +44,72 @@ class RecordingGitRepo(GitRepo):
         return super().run(*args, check=check)
 
 
+# A real non-fast-forward rejection (a concurrent writer advanced the branch).
+_NON_FF_STDERR = (
+    " ! [rejected]        HEAD -> branch (fetch first)\n"
+    "error: failed to push some refs to 'origin'\n"
+    "hint: Updates were rejected because the remote contains work that you do not\n"
+    "hint: have locally.\n"
+)
+# A rejection that is NOT a divergence (protected branch / server hook). Must
+# not trigger the fetch-rebase-retry path.
+_PROTECTED_STDERR = (
+    " ! [remote rejected] HEAD -> branch (pre-receive hook declined)\n"
+    "error: failed to push some refs to 'origin'\n"
+)
+
+
+class ScriptedGitRepo(GitRepo):
+    """`RecordingGitRepo` with scriptable push outcomes + faked resync git ops.
+
+    `push_results` is consumed one entry per push as `(returncode, stderr)`;
+    once exhausted, further pushes succeed. `fetch`/`rebase` return the
+    configured return codes so the fetch-rebase-retry path can be exercised
+    without a real divergent remote, and `rev-parse FETCH_HEAD` is faked
+    (nothing real populates it). Every other git op runs for real against the
+    fixture worktree.
+    """
+
+    def __init__(
+        self,
+        cwd: Path,
+        log_path: Path | None = None,
+        *,
+        push_results: list[tuple[int, str]] | None = None,
+        fetch_rc: int = 0,
+        rebase_rc: int = 0,
+    ):
+        super().__init__(cwd, log_path)
+        self._push_results = list(push_results or [])
+        self._fetch_rc = fetch_rc
+        self._rebase_rc = rebase_rc
+        self.pushes: list[list[str]] = []
+        self.fetches: list[list[str]] = []
+        self.rebases: list[list[str]] = []
+
+    def _canned(self, args: tuple[str, ...], rc: int, stderr: str, stdout: str = "") -> GitResult:
+        return GitResult(
+            args=["git", *args], cwd=self.cwd, returncode=rc, stdout=stdout, stderr=stderr
+        )
+
+    def run(self, *args: str, check: bool = True) -> GitResult:
+        op = args[0] if args else ""
+        if op == "push":
+            self.pushes.append(list(args))
+            rc, stderr = self._push_results.pop(0) if self._push_results else (0, "")
+            return self._canned(args, rc, stderr)
+        if op == "fetch":
+            self.fetches.append(list(args))
+            return self._canned(args, self._fetch_rc, "fetch failed" if self._fetch_rc else "")
+        if op == "rebase":
+            self.rebases.append(list(args))
+            stderr = "CONFLICT (content): merge conflict in README.md" if self._rebase_rc else ""
+            return self._canned(args, self._rebase_rc, stderr)
+        if op == "rev-parse" and args and args[-1] == "FETCH_HEAD":
+            return self._canned(args, 0, "", stdout="0123456789abcdef\n")
+        return super().run(*args, check=check)
+
+
 class ControlPlaneTest(unittest.TestCase):
     def test_approved_run_writes_artifacts_and_stub_pr(self):
         result, runs_root = self._run_fixture(run_slug="approved")
@@ -570,6 +636,127 @@ class CliReviewRevisionGateTest(unittest.TestCase):
 
         self.assertEqual(verdict, TerminalVerdict.READY_FOR_DRAFT_PR)
         self.assertEqual(worktree_git.pushes, [["push", "origin", f"HEAD:{branch}"]])
+
+    # ----- resync on a concurrent writer (CI bot pushed to the PR branch) -----
+
+    def _revision_agent(self, orch: Orchestrator):
+        """A revision that edits a tracked file and drops the completion marker."""
+
+        def agent_revision(_actor, _message):
+            (orch.paths.worktree / "README.md").write_text(
+                "# Contremaitre fixture\n\nCLI revision applied.\n",
+                encoding="utf-8",
+            )
+            self._write_marker(orch)
+            return "revision complete"
+
+        return agent_revision
+
+    def _run_revision_loop(self, orch, scripted, branch, outcome, reviews):
+        with (
+            mock.patch.object(
+                orch, "_run_one_cli_reviewer", side_effect=lambda **_kw: (next(reviews), None)
+            ),
+            mock.patch.object(orch, "_agent_turn", side_effect=self._revision_agent(orch)),
+            mock.patch.object(orch, "_post_cli_review_status"),
+            mock.patch("contremaitre.cli_reviewer.post_comment", return_value=(True, "posted")),
+        ):
+            return orch._run_cli_review_loop(
+                worktree_git=scripted, branch=branch, outcome=outcome, actor=object()
+            )
+
+    def test_cli_revision_resyncs_and_pushes_after_non_fast_forward_reject(self):
+        # A CI writer advances origin/<branch> during the reviewer round, so the
+        # first push is non-fast-forward. The loop fetches + rebases + re-gates,
+        # the retry pushes clean, and the run reaches READY_FOR_DRAFT_PR.
+        orch, _rec, branch = self._prepared_orchestrator()
+        outcome = self._published_outcome(orch, branch)
+        scripted = ScriptedGitRepo(
+            orch.paths.worktree, orch.paths.git_log, push_results=[(1, _NON_FF_STDERR)]
+        )
+        reviews = iter([self.MUST_FIX_REVIEW, self.LOOKS_GOOD_REVIEW])
+
+        verdict, _reason = self._run_revision_loop(orch, scripted, branch, outcome, reviews)
+
+        self.assertEqual(verdict, TerminalVerdict.READY_FOR_DRAFT_PR)
+        self.assertEqual(len(scripted.pushes), 2)  # reject, then fast-forward retry
+        self.assertEqual(len(scripted.fetches), 1)
+        self.assertTrue(scripted.rebases)
+        guardrails = self._read_jsonl(orch.paths.guardrail_events)
+        resyncs = [g for g in guardrails if g.get("event") == events.CLI_REVIEW_LOOP_RESYNC]
+        self.assertEqual(len(resyncs), 1)
+        self.assertEqual(resyncs[0]["attempt"], 1)
+        self.assertFalse(any(g.get("event") == events.CLI_REVIEW_LOOP_BLOCKED for g in guardrails))
+
+    def test_cli_revision_rebase_conflict_needs_human_with_specific_reason(self):
+        # The remote's commit touches the same lines the agent edited: the
+        # rebase conflicts, is aborted, and the run degrades to PR_NEEDS_HUMAN
+        # carrying the specific cause (not a generic "was blocked").
+        orch, _rec, branch = self._prepared_orchestrator()
+        outcome = self._published_outcome(orch, branch)
+        scripted = ScriptedGitRepo(
+            orch.paths.worktree,
+            orch.paths.git_log,
+            push_results=[(1, _NON_FF_STDERR)],
+            rebase_rc=1,
+        )
+        reviews = iter([self.MUST_FIX_REVIEW])
+
+        verdict, reason = self._run_revision_loop(orch, scripted, branch, outcome, reviews)
+
+        self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        self.assertIn("resync rebase conflict", reason)
+        self.assertEqual(len(scripted.pushes), 1)  # no retry after a conflict
+        self.assertTrue(scripted.rebases)  # rebase attempted (then aborted)
+        guardrails = self._read_jsonl(orch.paths.guardrail_events)
+        blocked = [g for g in guardrails if g.get("event") == events.CLI_REVIEW_LOOP_BLOCKED]
+        self.assertEqual(blocked[-1]["reason"], "resync rebase conflict")
+        self.assertFalse(any(g.get("event") == events.CLI_REVIEW_LOOP_RESYNC for g in guardrails))
+
+    def test_cli_revision_push_gives_up_after_max_resync_attempts(self):
+        # A bot that pushes on every push can't be out-raced; the loop is
+        # bounded and degrades to PR_NEEDS_HUMAN instead of spinning forever.
+        from contremaitre.orchestrator import MAX_PUSH_ATTEMPTS
+
+        orch, _rec, branch = self._prepared_orchestrator()
+        outcome = self._published_outcome(orch, branch)
+        scripted = ScriptedGitRepo(
+            orch.paths.worktree,
+            orch.paths.git_log,
+            push_results=[(1, _NON_FF_STDERR)] * MAX_PUSH_ATTEMPTS,
+        )
+        reviews = iter([self.MUST_FIX_REVIEW])
+
+        verdict, reason = self._run_revision_loop(orch, scripted, branch, outcome, reviews)
+
+        self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        self.assertIn(f"after {MAX_PUSH_ATTEMPTS} resync attempts", reason)
+        self.assertEqual(len(scripted.pushes), MAX_PUSH_ATTEMPTS)
+        guardrails = self._read_jsonl(orch.paths.guardrail_events)
+        resyncs = [g for g in guardrails if g.get("event") == events.CLI_REVIEW_LOOP_RESYNC]
+        self.assertEqual(len(resyncs), MAX_PUSH_ATTEMPTS - 1)
+
+    def test_cli_revision_non_divergent_push_error_does_not_resync(self):
+        # A protected-branch / hook rejection is a real failure, not a
+        # divergence — the loop must not fetch-rebase-retry, and must surface
+        # the plain "push failed".
+        orch, _rec, branch = self._prepared_orchestrator()
+        outcome = self._published_outcome(orch, branch)
+        scripted = ScriptedGitRepo(
+            orch.paths.worktree, orch.paths.git_log, push_results=[(1, _PROTECTED_STDERR)]
+        )
+        reviews = iter([self.MUST_FIX_REVIEW])
+
+        verdict, reason = self._run_revision_loop(orch, scripted, branch, outcome, reviews)
+
+        self.assertEqual(verdict, TerminalVerdict.PR_NEEDS_HUMAN)
+        self.assertIn("push failed", reason)
+        self.assertEqual(len(scripted.pushes), 1)
+        self.assertEqual(scripted.fetches, [])  # never attempted a resync
+        self.assertEqual(scripted.rebases, [])
+        guardrails = self._read_jsonl(orch.paths.guardrail_events)
+        blocked = [g for g in guardrails if g.get("event") == events.CLI_REVIEW_LOOP_BLOCKED]
+        self.assertEqual(blocked[-1]["reason"], "push failed")
 
     def _prepared_orchestrator(
         self,

@@ -200,12 +200,21 @@ class CompareMetricTest(unittest.TestCase):
 
     def test_infra_runs_are_excluded_from_vectors(self):
         healthy = _write_run_dir(
-            self.runs_root, ts="20260701-010000", config_name="arm_a", rep=1,
-            agent_model="opencode/alpha", wall=100.0,
+            self.runs_root,
+            ts="20260701-010000",
+            config_name="arm_a",
+            rep=1,
+            agent_model="opencode/alpha",
+            wall=100.0,
         )
         infra = _write_run_dir(
-            self.runs_root, ts="20260701-020000", config_name="arm_a", rep=2,
-            agent_model="opencode/alpha", wall=9999.0, verdict="FAILED_INFRA",
+            self.runs_root,
+            ts="20260701-020000",
+            config_name="arm_a",
+            rep=2,
+            agent_model="opencode/alpha",
+            wall=9999.0,
+            verdict="FAILED_INFRA",
         )
         rows = [
             collect_run_row(_CASE, _CFG_A, healthy),
@@ -218,17 +227,31 @@ class CompareMetricTest(unittest.TestCase):
     def test_num_metric_produces_summary_delta_and_separation(self):
         rows_a = [
             collect_run_row(
-                _CASE, _CFG_A,
-                _write_run_dir(self.runs_root, ts=f"20260701-0{i}0000", config_name="arm_a",
-                               rep=i, agent_model="opencode/alpha", wall=100.0 + i),
+                _CASE,
+                _CFG_A,
+                _write_run_dir(
+                    self.runs_root,
+                    ts=f"20260701-0{i}0000",
+                    config_name="arm_a",
+                    rep=i,
+                    agent_model="opencode/alpha",
+                    wall=100.0 + i,
+                ),
             )
             for i in (1, 2)
         ]
         rows_b = [
             collect_run_row(
-                _CASE, _CFG_B,
-                _write_run_dir(self.runs_root, ts=f"20260701-1{i}0000", config_name="arm_b",
-                               rep=i, agent_model="opencode/beta", wall=300.0 + i),
+                _CASE,
+                _CFG_B,
+                _write_run_dir(
+                    self.runs_root,
+                    ts=f"20260701-1{i}0000",
+                    config_name="arm_b",
+                    rep=i,
+                    agent_model="opencode/beta",
+                    wall=300.0 + i,
+                ),
             )
             for i in (1, 2)
         ]
@@ -241,9 +264,15 @@ class CompareMetricTest(unittest.TestCase):
 
     def test_bool_metric_produces_rates(self):
         row = collect_run_row(
-            _CASE, _CFG_A,
-            _write_run_dir(self.runs_root, ts="20260701-050000", config_name="arm_a",
-                           rep=1, agent_model="opencode/alpha"),
+            _CASE,
+            _CFG_A,
+            _write_run_dir(
+                self.runs_root,
+                ts="20260701-050000",
+                config_name="arm_a",
+                rep=1,
+                agent_model="opencode/alpha",
+            ),
         )
         pr_metric = next(m for m in METRICS if m.key == "pr_landed")
         rec = compare_metric(pr_metric, [row], [row])
@@ -268,21 +297,37 @@ class ValidityChecksTest(unittest.TestCase):
         rows_a = [self._row(ts=f"20260701-0{i}0000", rep=i) for i in (1, 2, 3)]
         rows_b = [
             collect_run_row(
-                _CASE, _CFG_B,
-                _write_run_dir(self.runs_root, ts=f"20260701-1{i}0000", config_name="arm_b",
-                               rep=i, agent_model="opencode/beta"),
+                _CASE,
+                _CFG_B,
+                _write_run_dir(
+                    self.runs_root,
+                    ts=f"20260701-1{i}0000",
+                    config_name="arm_b",
+                    rep=i,
+                    agent_model="opencode/beta",
+                ),
             )
             for i in (1, 2, 3)
         ]
         checks = validity_checks(_CASE, _CFG_A, _CFG_B, rows_a, rows_b)
-        for prefix in ("base pinned", "same judge", "single variable",
-                       "environment uniform", "clean contremaitre", "all runs healthy",
-                       "sample size"):
+        for prefix in (
+            "base pinned",
+            "same judge",
+            "single variable",
+            "environment uniform",
+            "clean contremaitre",
+            "all runs healthy",
+            "sample size",
+        ):
             self.assertEqual(self._check(checks, prefix)["status"], "pass", prefix)
 
     def test_judge_mismatch_fails(self):
-        cfg_b = ConfigDef(name="arm_b", agent_model="opencode/beta",
-                          sim_model="opencode/judgey", cli_reviewer="claude")
+        cfg_b = ConfigDef(
+            name="arm_b",
+            agent_model="opencode/beta",
+            sim_model="opencode/judgey",
+            cli_reviewer="claude",
+        )
         checks = validity_checks(_CASE, _CFG_A, cfg_b, [], [])
         self.assertEqual(self._check(checks, "same judge")["status"], "fail")
 
@@ -290,9 +335,17 @@ class ValidityChecksTest(unittest.TestCase):
         rows_a = [self._row(ts="20260701-010000", rep=1, git_sha="cafe")]
         rows_b = [
             collect_run_row(
-                _CASE, _CFG_B,
-                _write_run_dir(self.runs_root, ts="20260701-110000", config_name="arm_b",
-                               rep=1, agent_model="opencode/beta", git_sha="beef", dirty=True),
+                _CASE,
+                _CFG_B,
+                _write_run_dir(
+                    self.runs_root,
+                    ts="20260701-110000",
+                    config_name="arm_b",
+                    rep=1,
+                    agent_model="opencode/beta",
+                    git_sha="beef",
+                    dirty=True,
+                ),
             )
         ]
         checks = validity_checks(_CASE, _CFG_A, _CFG_B, rows_a, rows_b)
@@ -321,20 +374,42 @@ class BuildAbReportTest(unittest.TestCase):
         self.runs_root.mkdir()
         _write_case_dir(self.project_root)
         for i in (1, 2, 3):
-            _write_run_dir(self.runs_root, ts=f"20260701-0{i}0000", config_name="arm_a",
-                           rep=i, agent_model="opencode/alpha", wall=100.0 + i)
-            _write_run_dir(self.runs_root, ts=f"20260701-1{i}0000", config_name="arm_b",
-                           rep=i, agent_model="opencode/beta", wall=300.0 + i,
-                           cli_verdict_line="MUST_FIX - broken")
+            _write_run_dir(
+                self.runs_root,
+                ts=f"20260701-0{i}0000",
+                config_name="arm_a",
+                rep=i,
+                agent_model="opencode/alpha",
+                wall=100.0 + i,
+            )
+            _write_run_dir(
+                self.runs_root,
+                ts=f"20260701-1{i}0000",
+                config_name="arm_b",
+                rep=i,
+                agent_model="opencode/beta",
+                wall=300.0 + i,
+                cli_verdict_line="MUST_FIX - broken",
+            )
         # A fourth arm_b attempt that infra-failed — must appear in the roster
         # badge'd, and stay out of the metric vectors.
-        _write_run_dir(self.runs_root, ts="20260701-140000", config_name="arm_b",
-                       rep=4, agent_model="opencode/beta", verdict="FAILED_INFRA")
+        _write_run_dir(
+            self.runs_root,
+            ts="20260701-140000",
+            config_name="arm_b",
+            rep=4,
+            agent_model="opencode/beta",
+            verdict="FAILED_INFRA",
+        )
 
     def test_report_is_written_with_arms_links_and_badges(self):
         out = build_ab_report(
-            project_root=self.project_root, runs_root=self.runs_root,
-            case_id="case_x", config_a="arm_a", config_b="arm_b", n=3,
+            project_root=self.project_root,
+            runs_root=self.runs_root,
+            case_id="case_x",
+            config_a="arm_a",
+            config_b="arm_b",
+            n=3,
         )
         self.assertEqual(out.name, "ab--case_x--arm_a-vs-arm_b.html")
         html = out.read_text(encoding="utf-8")
@@ -351,13 +426,17 @@ class BuildAbReportTest(unittest.TestCase):
         # and the roster pill reads added/deleted from diff_detail (the fixture
         # diff is +1/−1 over 1 file — a net delta of 0 must not render "+0 −0").
         self.assertIn("diff size (median)", html)
-        self.assertIn("<b>1</b> files · " '<span style="color:var(--success)">+1</span>', html)
+        self.assertIn('<b>1</b> files · <span style="color:var(--success)">+1</span>', html)
         self.assertIn("generated by <code>contremaitre eval ab</code>", html)
 
     def test_assemble_excludes_infra_from_vectors_but_keeps_roster(self):
         data = assemble_ab_data(
-            project_root=self.project_root, runs_root=self.runs_root,
-            case_id="case_x", config_a="arm_a", config_b="arm_b", n=3,
+            project_root=self.project_root,
+            runs_root=self.runs_root,
+            case_id="case_x",
+            config_a="arm_a",
+            config_b="arm_b",
+            n=3,
         )
         self.assertEqual(len(data["rows_b"]), 3)
         self.assertEqual(sum(1 for r in data["rows_b"] if r["healthy"]), 2)
@@ -367,18 +446,26 @@ class BuildAbReportTest(unittest.TestCase):
 
     def test_cmd_ab_report_only(self):
         rc = cmd_ab(
-            project_root=self.project_root, case_id="case_x",
-            config_a="arm_a", config_b="arm_b", n=3,
-            runs_root=self.runs_root, report_only=True,
+            project_root=self.project_root,
+            case_id="case_x",
+            config_a="arm_a",
+            config_b="arm_b",
+            n=3,
+            runs_root=self.runs_root,
+            report_only=True,
         )
         self.assertEqual(rc, 0)
         self.assertTrue((self.runs_root / "ab--case_x--arm_a-vs-arm_b.html").is_file())
 
     def test_cmd_ab_rejects_same_config(self):
         rc = cmd_ab(
-            project_root=self.project_root, case_id="case_x",
-            config_a="arm_a", config_b="arm_a", n=3,
-            runs_root=self.runs_root, report_only=True,
+            project_root=self.project_root,
+            case_id="case_x",
+            config_a="arm_a",
+            config_b="arm_a",
+            n=3,
+            runs_root=self.runs_root,
+            report_only=True,
         )
         self.assertEqual(rc, 2)
 
@@ -386,9 +473,13 @@ class BuildAbReportTest(unittest.TestCase):
         empty = self.project_root / "empty_runs"
         empty.mkdir()
         rc = cmd_ab(
-            project_root=self.project_root, case_id="case_x",
-            config_a="arm_a", config_b="arm_b", n=3,
-            runs_root=empty, report_only=True,
+            project_root=self.project_root,
+            case_id="case_x",
+            config_a="arm_a",
+            config_b="arm_b",
+            n=3,
+            runs_root=empty,
+            report_only=True,
         )
         self.assertEqual(rc, 2)
 

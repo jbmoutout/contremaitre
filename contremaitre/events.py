@@ -88,6 +88,10 @@ CLI_REVIEW_LOOP_REVISION = "cli_review_loop_revision"
 CLI_REVIEW_LOOP_DONE = "cli_review_loop_done"
 CLI_REVIEW_LOOP_EXHAUSTED = "cli_review_loop_exhausted"
 CLI_REVIEW_LOOP_BLOCKED = "cli_review_loop_blocked"
+# A concurrent writer advanced origin/<branch> between publish and the
+# revision push; the host fetched + rebased the revision onto the remote
+# tip and re-gated before retrying the (now fast-forward) push.
+CLI_REVIEW_LOOP_RESYNC = "cli_review_loop_resync"
 
 # ----- Cleanup -----
 
