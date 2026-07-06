@@ -6,7 +6,15 @@ them as module-level constants.
 
 Files:
   - `initial_prompt.md`        — sent to the agent on turn 1 of the WORK session.
+  - `initial_prompt_adr.md`    — ADR-seeded variant of the above (`--adr`): skips
+                                 the skill's exploration/candidate phases, fact-checks
+                                 the ADR, enters the grilling loop. `{adr_path}`
+                                 placeholder resolved by `initial_prompt()`.
   - `sim_tooled_persona.md`    — sent to the SIM on its first turn of the WORK session.
+  - `sim_adr_seed.md`          — host note inserted into the SIM's first turn on
+                                 ADR-seeded runs, pointing it at the ADR file so its
+                                 knowledge of the design never routes through the
+                                 agent's restatement. `{adr_path}` placeholder.
   - `sim_review_prompt.md`     — sent to the SIM in the single-shot REVIEW pass.
   - `cli_reviewer_prompt.md`   — sent to the local CLI reviewer (claude / codex)
                                  post-publish; reads host context at `/review`.
@@ -27,14 +35,44 @@ if TYPE_CHECKING:
 _HERE = Path(__file__).resolve().parent
 
 INITIAL_PROMPT: str = (_HERE / "initial_prompt.md").read_text(encoding="utf-8")
+INITIAL_PROMPT_ADR: str = (_HERE / "initial_prompt_adr.md").read_text(encoding="utf-8")
 SIM_TOOLED_PERSONA: str = (_HERE / "sim_tooled_persona.md").read_text(encoding="utf-8")
+SIM_ADR_SEED: str = (_HERE / "sim_adr_seed.md").read_text(encoding="utf-8")
 SIM_REVIEW_PROMPT: str = (_HERE / "sim_review_prompt.md").read_text(encoding="utf-8")
 CLI_REVIEWER_PROMPT: str = (_HERE / "cli_reviewer_prompt.md").read_text(encoding="utf-8")
 
 
-def sim_first_turn(agent_text: str) -> str:
-    """Build the SIM's first WORK-session turn: persona preamble + agent message."""
+def initial_prompt(adr_path: str | None = None) -> str:
+    """Return the agent's first WORK-session message.
 
+    `adr_path` set → the ADR-seeded variant with the path substituted
+    (`str.replace`, not `str.format` — prompt bodies are free to contain
+    braces). None → the classic full-flow prompt, byte-identical to
+    `INITIAL_PROMPT`.
+    """
+
+    if adr_path is None:
+        return INITIAL_PROMPT
+    return INITIAL_PROMPT_ADR.replace("{adr_path}", adr_path)
+
+
+def sim_first_turn(agent_text: str, *, adr_path: str | None = None) -> str:
+    """Build the SIM's first WORK-session turn: persona preamble + agent message.
+
+    On ADR-seeded runs a host note pointing at the ADR file sits between the
+    persona and the agent's message — the SIM reads the primary source rather
+    than trusting the agent's restatement of it.
+    """
+
+    adr_note = (
+        (
+            "─── HOST NOTE ───\n"
+            f"{SIM_ADR_SEED.replace('{adr_path}', adr_path)}"
+            "─── END HOST NOTE ───\n\n"
+        )
+        if adr_path
+        else ""
+    )
     return (
         "You are about to act as the SIM persona described below for the "
         "remainder of this conversation. Read it, internalise it, and respond "
@@ -42,6 +80,7 @@ def sim_first_turn(agent_text: str) -> str:
         "─── PERSONA ───\n"
         f"{SIM_TOOLED_PERSONA}\n"
         "─── END PERSONA ───\n\n"
+        f"{adr_note}"
         "The architecture agent's latest message is below. Respond as the SWE.\n\n"
         "AGENT:\n"
         f"{agent_text}"
@@ -102,8 +141,11 @@ def cli_revision_followup(
 
 __all__ = [
     "INITIAL_PROMPT",
+    "INITIAL_PROMPT_ADR",
     "SIM_TOOLED_PERSONA",
+    "SIM_ADR_SEED",
     "SIM_REVIEW_PROMPT",
+    "initial_prompt",
     "sim_first_turn",
     "sim_subsequent_turn",
     "revision_followup",

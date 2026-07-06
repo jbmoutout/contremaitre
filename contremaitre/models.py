@@ -295,6 +295,13 @@ class RunConfig:
     branch_prefix: str = "refactor"
     fork: str | None = None
     upstream: str | None = None
+    # Repo-relative path to an ADR committed on `base`. When set, the run is
+    # ADR-seeded: the agent skips the skill's exploration/candidate phases,
+    # fact-checks the ADR against the tree (correcting factual drift in
+    # place), and enters the grilling loop with the ADR as the plan under
+    # grill. The SIM gets a host-injected note pointing at the same file so
+    # its knowledge of the design never depends on the agent's restatement.
+    adr_path: str | None = None
     agent_model: str = ""
     sim_model: str = ""
     # CLI reviewer drives a post-PR revision loop: reviews the PR, posts a

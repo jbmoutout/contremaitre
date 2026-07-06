@@ -29,7 +29,8 @@ Check in this order — SETTLED faithfulness first, hygiene last. Walk all of th
 3. No new abstractions appear that aren't in SETTLED.
 4. Constraints raised during grilling and reflected in SETTLED are honored.
 5. No drift into unrelated changes.
-6. No forbidden paths touched (see below).
+6. If the diff modifies a pre-existing ADR (architecture decision record), the edits stay within factual context — Context / current-state sections. A changed Decision, rationale, or Consequences section in an existing ADR is drift → `CHANGES_REQUESTED`. (New ADR files offered during grilling are legitimate; on ADR-seeded runs, SETTLED records which factual corrections were sanctioned — check the edits against that list.)
+7. No forbidden paths touched (see below).
 
 ## Before emitting APPROVED
 

@@ -154,6 +154,9 @@ def build_manifest(config: RunConfig) -> dict[str, Any]:
         "docker_image": config.docker_image,
         "target_url": config.upstream or config.fork or str(config.repo),
         "base": config.base,
+        # Input-side, like base/target_url: which ADR (if any) seeded the run.
+        # Stays out of manifest_digest — it varies per run, not per system.
+        "adr_path": config.adr_path,
         # The raw per-runtime fields stay for provenance / debugging; identity
         # is owned by the *_model spec dicts above.
         "actor_mode": config.actor_mode.value,
@@ -194,8 +197,8 @@ def manifest_digest(manifest: dict[str, Any]) -> str:
     `cli_reviewer` lives in `input_digest` instead (in eval.py) — it's
     treated as the judge choice, not the SUT.
 
-    Target-side fields (`base_sha`, `target_url`) stay out; those vary
-    per case, not per system.
+    Target-side fields (`base_sha`, `target_url`, `adr_path`) stay out;
+    those vary per case, not per system.
     """
 
     agent = ModelSpec.from_record(manifest.get("agent_model"))

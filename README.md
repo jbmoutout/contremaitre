@@ -53,6 +53,8 @@ Inside one multi-turn session — driven by an opencode model or a subscription 
 
 A fresh reviewer container then reads the diff + SETTLED and emits a strict-JSON verdict. `APPROVED` → host hard gates (diff scan, hash match, clean worktree, plus any `--check-cmd`) → `gh pr create --draft`. `CHANGES_REQUESTED` clears the marker and loops back to WORK (up to 3 rounds). If the agent never writes the marker, or any hard gate fails, the run terminates without a PR.
 
+**ADR-seeded runs** (`--adr docs/adr/0003-foo.md`) skip step 1: the design candidate is pre-chosen, recorded as an ADR committed on `--base` (validated at startup — an uncommitted draft fails fast). The agent first fact-checks the ADR against the tree — correcting factual drift in place, never touching the Decision — then enters the grill with the ADR as the plan; contested claims become the first grilling questions. The SIM is pointed at the ADR file directly, so it grills the primary source rather than the agent's restatement. The ADR's factual corrections ship in the same PR as the implementation.
+
 State machine, all six terminal verdicts, and the artifact contract: [docs/control-plane.md](docs/control-plane.md).
 
 ## Configuration
@@ -64,6 +66,7 @@ The launcher takes the same flags whether you call `make run …` or `python3 -m
 - `--base main` *(required)* — branch the worktree is sourced from and the PR target.
 - `--fork git@github.com:<you>/<repo>.git` *(required for real PRs)* — push remote for the run branch.
 - `--upstream …` + `--gh-repo <owner>/<repo>` — when `--fork` is *your* fork and you want the PR opened on the upstream repo.
+- `--adr <relpath>` — seed the run from an ADR committed on `--base` (repo-relative path). Skips the explore/candidate phase; the agent fact-checks the ADR, then grills it as the settled-to-be design. See "ADR-seeded runs" above.
 - `--agent claude|codex|opencode|fake` — per-run **agent** runtime. `opencode` = a live model (see `--agent-model`); `claude` / `codex` = a subscription CLI headless; `fake` = smoke fixture.
 - `--sim claude|codex|opencode` — override the **SIM** runtime, enabling a mixed run (e.g. `--agent codex --sim opencode`). Omit to mirror `--agent`.
 - `--agent-model` / `--sim-model` — OpenRouter model slug, or an OpenCode Zen model, for an opencode role. Omit to pick interactively (TTY) or set in the Makefile; in headless opencode-agent runs, an omitted `--sim-model` mirrors `--agent-model`.

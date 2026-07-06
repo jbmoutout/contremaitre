@@ -34,3 +34,6 @@ MAX_CLI_REVIEW_ROUNDS := 3
 MAX_REVIEW_ROUNDS     := 3
 
 # MAX_COST_USD  := 5
+
+# ── ADR-seeded run (usually per-run on the command line instead) ────────
+# ADR := docs/adr/0003-foo.md

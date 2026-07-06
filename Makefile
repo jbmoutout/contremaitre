@@ -8,6 +8,12 @@
 # BASE  target branch             e.g. main
 # FORK  push remote URL           e.g. git@github.com:you/repo.git
 
+# ── Optional per run ──────────────────────────────────────────────────────────
+# ADR: repo-relative path to an ADR committed on BASE → ADR-seeded run: skips
+# the explore/candidate phases; the agent fact-checks the ADR, then grills it.
+# Per-run input, so prefer the command line: make run ADR=docs/adr/0003-foo.md
+ADR :=
+
 # ── Who drives each role ─────────────────────────────────────────────────────
 # AGENT: claude | codex | opencode | fake
 AGENT        := claude
@@ -83,9 +89,10 @@ _sim_flag      := $(if $(SIM),--sim $(SIM))
 _egress_flag   := $(if $(ALLOW_OPEN_EGRESS),--allow-open-egress)
 _upstream_flag := $(if $(UPSTREAM),--upstream $(UPSTREAM))
 _ghrepo_flag   := $(if $(GH_REPO),--gh-repo $(GH_REPO))
+_adr_flag      := $(if $(ADR),--adr $(ADR))
 
 _run_flags = \
-    --base $(BASE) --fork $(FORK) $(_upstream_flag) $(_ghrepo_flag) \
+    --base $(BASE) --fork $(FORK) $(_upstream_flag) $(_ghrepo_flag) $(_adr_flag) \
     --agent $(AGENT) $(_sim_flag) \
     $(_cmodel_flag) --claude-effort $(CLAUDE_EFFORT) \
     --codex-model $(CODEX_MODEL) --codex-effort $(CODEX_EFFORT) \

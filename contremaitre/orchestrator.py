@@ -169,6 +169,7 @@ class Orchestrator:
             enforce_preflight(self.config, self.paths)
             self._transition(State.INIT, "creating worktree")
             self._create_worktree(repo, branch)
+            self._validate_adr_seed()
             self._ensure_pristine_deps_volume()
             self._provision_run_deps_volume()
             self._assert_deps_offline()
@@ -353,7 +354,7 @@ class Orchestrator:
         """
 
         if review_round == 1:
-            first_message = prompts.INITIAL_PROMPT
+            first_message = prompts.initial_prompt(self.config.adr_path)
         else:
             first_message = prompts.revision_followup(
                 required_changes,
@@ -369,7 +370,7 @@ class Orchestrator:
         sim_first = True
         for turn in range(2, self.config.caps.max_turns + 1):
             sim_message = (
-                prompts.sim_first_turn(agent_text)
+                prompts.sim_first_turn(agent_text, adr_path=self.config.adr_path)
                 if sim_first
                 else prompts.sim_subsequent_turn(agent_text)
             )
@@ -1375,7 +1376,9 @@ class Orchestrator:
     def _prepare_run_dir(self) -> None:
         self.paths.run_dir.mkdir(parents=True, exist_ok=False)
         self.paths.eval_dir.mkdir(parents=True, exist_ok=True)
-        self.paths.initial_prompt.write_text(prompts.INITIAL_PROMPT, encoding="utf-8")
+        self.paths.initial_prompt.write_text(
+            prompts.initial_prompt(self.config.adr_path), encoding="utf-8"
+        )
         self.paths.transcript.write_text(
             f"# Contremaitre transcript - {self.run_id}\n", encoding="utf-8"
         )
@@ -1388,6 +1391,28 @@ class Orchestrator:
             self.paths.run_dir / "run_config.json",
             build_manifest(self.config),
         )
+
+    def _validate_adr_seed(self) -> None:
+        """Fail fast at INIT when `--adr` doesn't resolve inside the worktree.
+
+        Runs right after `_create_worktree`, so the check is against the
+        `origin/<base>` checkout — the ADR must be committed on the base
+        branch (remote-tracking refs are the only source of truth); an
+        operator's uncommitted local draft doesn't count. Failing here costs
+        seconds; failing after the agent burns turns costs a run.
+        """
+
+        if not self.config.adr_path:
+            return
+        worktree = self.paths.worktree.resolve()
+        target = (worktree / self.config.adr_path).resolve()
+        if not target.is_relative_to(worktree):
+            raise RuntimeError(f"--adr escapes the worktree: {self.config.adr_path!r}")
+        if not target.is_file():
+            raise RuntimeError(
+                f"--adr {self.config.adr_path!r} not found on origin/{self.config.base} — "
+                "the ADR must be committed to the base branch before an ADR-seeded run"
+            )
 
     def _create_worktree(self, repo: GitRepo, branch: str) -> None:
         if self.paths.worktree.exists():

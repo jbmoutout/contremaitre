@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from .envfile import load_dotenv_defaults
@@ -128,6 +128,22 @@ def _shared_run_doctor_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _adr_relpath(value: str) -> str:
+    """argparse type for `--adr`: a repo-relative path that can't escape the worktree.
+
+    Existence is checked later at INIT, against the `origin/<base>` checkout —
+    the ADR must be committed on the base branch, so probing the operator's
+    local tree here would validate the wrong ref.
+    """
+
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise argparse.ArgumentTypeError(
+            f"--adr must be a repo-relative path without '..' (got {value!r})"
+        )
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="contremaitre",
@@ -146,6 +162,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--upstream", default=None, help="Canonical (read-only) remote, mounted as `upstream`."
     )
     run_p.add_argument("--branch-prefix", default="refactor")
+    run_p.add_argument(
+        "--adr",
+        type=_adr_relpath,
+        default=None,
+        metavar="RELPATH",
+        help=(
+            "Repo-relative path to an ADR committed on --base (e.g. "
+            "docs/adr/0003-foo.md). Seeds the run from that ADR: the agent "
+            "skips the skill's exploration/candidate phases, fact-checks the "
+            "ADR against the tree (correcting factual drift in place), then "
+            "enters the grilling loop with the ADR as the plan under grill."
+        ),
+    )
     run_p.add_argument(
         "--agent-model",
         default="",
@@ -1507,6 +1536,7 @@ def _config_from_args(args: argparse.Namespace, *, repo: Path) -> RunConfig:
         branch_prefix=getattr(args, "branch_prefix", "refactor"),
         fork=getattr(args, "fork", None),
         upstream=getattr(args, "upstream", None),
+        adr_path=getattr(args, "adr", None),
         agent_model=getattr(args, "agent_model", ""),
         sim_model=getattr(args, "sim_model", ""),
         cli_reviewer=getattr(args, "cli_reviewer", "none"),

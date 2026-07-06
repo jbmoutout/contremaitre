@@ -179,6 +179,19 @@ WORK SESSION (one opencode session — `agent_turn → sim_turn → agent_turn �
   Loop termination: marker present, cap trip (`turn_cap` / `wall_cap` /
   `recorded_cost_cap` / `no_progress_cap` events), or max_turns reached.
 
+  ADR-seeded variant (`--adr <relpath>`): the Explore / HTML cards / Pick
+  gate rows are skipped — the candidate is pre-chosen, recorded as an ADR
+  committed on `origin/<base>` (validated at INIT; missing → fail fast, no
+  containers). The agent's first turn fact-checks the ADR against the tree
+  (initial_prompt_adr.md: confirmed / drifted → corrected in place /
+  contested → carried into grilling; facts only, never the Decision), then
+  opens the Grill with the ADR as the plan under grill. The SIM's first turn
+  carries a host-injected note (sim_adr_seed.md) pointing at the ADR file —
+  it reads the primary source, not the agent's restatement, and polices the
+  facts-only boundary. From Grill onward the flow is identical; the agent
+  records the seed + its factual corrections in SETTLED_DESIGN.md so the
+  review pass sees the ADR edits as sanctioned rather than drift.
+
                               │
                               ▼
 
@@ -424,7 +437,7 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
 - [`paths.py`](../contremaitre/paths.py) — slug validation, run-id generation, contained-path builder (prevents escape outside `run_dir`).
 - [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + CLI runs, validated as the per-role union plus the post-publish CLI reviewer: repo/base ref, Docker image, `:ro` mount, network policy (CLI defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), codex / claude auth checks for active CLI tools, CLI freshness vs npm (active CLI tools, WARN-only). See [Preflight](#preflight).
-- [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `sim_tooled_persona.md` (SIM's first turn), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
+- [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `initial_prompt_adr.md` (ADR-seeded variant, `--adr`), `sim_tooled_persona.md` (SIM's first turn), `sim_adr_seed.md` (host note in the SIM's first turn on ADR-seeded runs), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
 - [`publisher.py`](../contremaitre/publisher.py) — publication boundary: `StubPublisher` (dry-run) vs `GhPublisher` (real `gh pr create --draft`). PR title + body derived from `.contremaitre/SETTLED_DESIGN.md` + SIM verdict summary; `--pr-title` / `--pr-body` override.
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
 - [`tui.py`](../contremaitre/tui.py) — read-only Textual TUI tailing JSONL artifacts. 7-phase footer (init → exploring → grilling → implementing → reviewing → cli_review → done) + SIM reviewer status glyphs + CLI review loop status + warning tokens + subscription-window usage (codex rollout snapshots / claude statusLine snapshots) + verdict badge.
@@ -628,6 +641,7 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `--upstream URL` | — | Canonical (read-only) remote, mounted as `upstream`. Preferred over `--fork` for cloning when set. |
 | `--gh-repo OWNER/REPO` | — | Override the `gh pr create --repo` target (cross-fork PRs). |
 | `--branch-prefix STR` | `refactor` | Prefix for generated branch names. |
+| `--adr RELPATH` | — | ADR-seeded run: repo-relative path to an ADR committed on `--base`. Skips the skill's exploration/candidate phases; the agent fact-checks the ADR against the tree (correcting factual drift in place, never the Decision), then enters the grilling loop with the ADR as the plan under grill. The SIM gets a host-injected note pointing at the file. Validated at INIT against the `origin/<base>` checkout — missing → fail fast, no containers. |
 | `--agent fake\|opencode\|claude\|codex` | `fake` | Per-run **agent** runtime. `fake` = smoke fixture; `opencode` = live model; `claude` / `codex` = subscription CLI headless. |
 | `--sim opencode\|claude\|codex` | (same as `--agent`) | Override the **SIM** runtime, enabling mixed runs (e.g. `--agent codex --sim opencode`). |
 | `--agent-model SLUG` | — | OpenRouter / OpenCode model slug for an opencode agent role. Omit to pick interactively on TTY. |
