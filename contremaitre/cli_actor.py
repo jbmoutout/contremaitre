@@ -246,7 +246,7 @@ def _claude_model_arg(model: str, default: str = "") -> list[str]:
 def _claude_effort_arg(effort: str) -> list[str]:
     """`--effort <level>` for a claude turn, or [] when unset.
 
-    A per-turn flag (low|medium|high|max), so it pins effort on every turn
+    A per-turn flag (low|medium|high|xhigh|max), so it pins effort on every turn
     including `--resume`. The codex analog is the `-c model_reasoning_effort`
     override.
     """

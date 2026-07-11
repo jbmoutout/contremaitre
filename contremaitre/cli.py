@@ -236,7 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--claude-effort",
-        choices=["low", "medium", "high", "max"],
+        choices=["low", "medium", "high", "xhigh", "max"],
         default="high",
         help="claude effort (--effort) for a claude role",
     )
