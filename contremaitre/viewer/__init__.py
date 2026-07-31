@@ -24,6 +24,7 @@ from typing import Any
 
 from ..jsonlog import ts_to_ms
 from ..models import ModelSpec, RunPaths
+from ..pr_outcomes import outcome_for_run
 from ..run_artifacts import RunArtifacts
 
 _HERE = Path(__file__).resolve().parent
@@ -33,7 +34,7 @@ _RENDERER_PATH = _HERE / "_renderer.js"
 VIEWER_FILENAME = "viewer.html"
 
 
-def build_viewer(paths: RunPaths) -> Path:
+def build_viewer(paths: RunPaths, *, refresh_index: bool = True) -> Path:
     """Assemble DATA from run artifacts and write `<run_dir>/viewer.html`.
 
     Returns the written path. Raises if `stats.json` is missing — every
@@ -54,6 +55,9 @@ def build_viewer(paths: RunPaths) -> Path:
     # Lazy import — index.py imports VIEWER_FILENAME from this module, so a
     # top-level import here would be circular.
     try:
+        if not refresh_index:
+            return out
+
         from .index import build_index
 
         build_index(paths.run_dir.parent)
@@ -91,6 +95,7 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
     extracted_files = _read_dir(paths.extracted_files_dir)
 
     pr = _read_json(paths.pr_json, default=None)
+    pr_outcome = outcome_for_run(paths.run_dir)
 
     eval_blob: dict[str, Any] = {}
     for src in (
@@ -151,6 +156,7 @@ def _assemble_data(paths: RunPaths) -> dict[str, Any]:
         "sub_agents": sub_agents,
         "extracted_files": extracted_files,
         "pr": pr,
+        "pr_outcome": pr_outcome,
         "eval": eval_blob or None,
         "guardrails": guardrails,
         "recoveries": recoveries,

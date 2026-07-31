@@ -129,6 +129,50 @@ class ViewerTest(unittest.TestCase):
         # not corrupt the data the renderer reads.
         _extract_data_payload(html)
 
+    def test_embeds_eventual_pr_outcome(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("accepted"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "READY_FOR_DRAFT_PR"})
+        write_json(
+            paths.pr_json,
+            {
+                "kind": "PUBLISHED",
+                "url": "https://github.com/acme/widgets/pull/7",
+                "dry_run": False,
+            },
+        )
+        write_json(
+            paths.run_dir / "pr_outcome.json",
+            {
+                "schema_version": 1,
+                "outcome": "ACCEPTED",
+                "accepted": True,
+                "score": 1.0,
+            },
+        )
+
+        data = _extract_data_payload(build_viewer(paths).read_text(encoding="utf-8"))
+
+        self.assertEqual(data["pr_outcome"]["outcome"], "ACCEPTED")
+        self.assertIs(data["pr_outcome"]["accepted"], True)
+        self.assertEqual(data["pr_outcome"]["label"], "accepted PR")
+        self.assertEqual(data["pr_outcome"]["tier"], "tier-green")
+
+    def test_batch_rebuild_can_skip_recursive_index_refresh(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        paths = build_run_paths(root / "runs", new_run_id("batch"))
+        paths.run_dir.mkdir(parents=True)
+        write_json(paths.stats, {"run_id": paths.run_id, "verdict": "FAILED_INFRA"})
+
+        build_viewer(paths, refresh_index=False)
+
+        self.assertFalse((paths.run_dir.parent / "index.html").exists())
+
     def test_surfaces_per_round_cli_review_artifacts(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

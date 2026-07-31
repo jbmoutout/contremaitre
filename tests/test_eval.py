@@ -6,6 +6,7 @@ from contremaitre.eval import (
     CaseDef,
     ConfigDef,
     _sim_verdicts_parse_ok,
+    aggregate_cell,
     check_run,
     load_config,
 )
@@ -60,7 +61,24 @@ extra_reviewer_model = "opencode/big-pickle"
                 "duration_seconds": 12.0,
             },
         )
-        write_json(run_dir / "pr.json", {"kind": "PUBLISHED"})
+        write_json(
+            run_dir / "pr.json",
+            {
+                "kind": "PUBLISHED",
+                "url": "https://github.com/x/y/pull/7",
+                "dry_run": False,
+            },
+        )
+        write_json(
+            run_dir / "pr_outcome.json",
+            {
+                "schema_version": 1,
+                "pr_url": "https://github.com/x/y/pull/7",
+                "outcome": "ACCEPTED",
+                "accepted": True,
+                "score": 1.0,
+            },
+        )
         (run_dir / "review_cycles.jsonl").write_text(
             '{"verdict":"APPROVED","confidence":0.9}\n',
             encoding="utf-8",
@@ -113,6 +131,14 @@ extra_reviewer_model = "opencode/big-pickle"
         self.assertTrue(report.ok)
         self.assertEqual(report.headline["terminal_verdict"], "PR_NEEDS_HUMAN")
         self.assertEqual(report.headline["terminal_score"], 0.5)
+        self.assertEqual(report.headline["pr_outcome"], "ACCEPTED")
+        self.assertEqual(report.headline["pr_outcome_label"], "accepted PR")
+        self.assertEqual(report.headline["pr_outcome_tier"], "tier-green")
+        self.assertIs(report.headline["accepted_pr"], True)
+        self.assertEqual(report.headline["accepted_pr_score"], 1.0)
+        cell = aggregate_cell([report])
+        self.assertEqual(cell.headline["accepted_pr_rate"], 1.0)
+        self.assertEqual(cell.headline["pr_outcome_mix"], {"ACCEPTED": 1})
 
 
 class SimVerdictsParseOkTest(unittest.TestCase):

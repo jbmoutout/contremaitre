@@ -24,6 +24,7 @@ from contremaitre.viewer.index import (
     _summarize_run,
     _tokens_pill,
     _verdict_tier,
+    build_index,
 )
 
 
@@ -280,6 +281,36 @@ def test_collect_pairings_excludes_infra_from_rates(tmp_path):
     assert pairings[0]["infra_n"] == 1
 
 
+def test_collect_pairings_reports_accepted_pr_rate_with_coverage(tmp_path):
+    runs = tmp_path / "runs"
+    accepted = runs / "20260101-000310-run"
+    rejected = runs / "20260101-000311-run"
+    _make_run(runs, accepted.name, agent="p/a", sim="p/b")
+    _make_run(runs, rejected.name, agent="p/a", sim="p/b")
+    _write_json(
+        accepted / "pr_outcome.json",
+        {
+            "schema_version": 1,
+            "outcome": "ACCEPTED",
+            "accepted": True,
+            "score": 1.0,
+        },
+    )
+    _write_json(
+        rejected / "pr_outcome.json",
+        {
+            "schema_version": 1,
+            "outcome": "REJECTED",
+            "accepted": False,
+            "score": 0.0,
+        },
+    )
+
+    pairings = _collect_pipeline_pairings(runs)
+
+    assert pairings[0]["pr_accept"] == (0.5, 2)
+
+
 def test_infra_only_pairing_is_dropped_but_surfaced(tmp_path):
     from contremaitre.viewer.index import _infra_only_pairings
 
@@ -374,6 +405,34 @@ def test_summarize_run_carries_whole_run_token_rollup(tmp_path):
     _make_run(tmp_path, "20260101-000000-run", agent="o", sim="s", output_tokens=300)
     row = _summarize_run(tmp_path / "20260101-000000-run")
     assert row["tokens"] == {"input": 10, "output": 300, "reasoning": 0, "cache_read": 0}
+
+
+def test_archive_renders_accepted_pr_outcome_for_run(tmp_path):
+    run_dir = tmp_path / "20260101-000000-run"
+    _make_run(tmp_path, run_dir.name, agent="o", sim="s")
+    _write_json(
+        run_dir / "pr.json",
+        {
+            "kind": "PUBLISHED",
+            "url": "https://github.com/acme/widgets/pull/7",
+            "dry_run": False,
+        },
+    )
+    _write_json(
+        run_dir / "pr_outcome.json",
+        {
+            "schema_version": 1,
+            "outcome": "ACCEPTED",
+            "accepted": True,
+            "score": 1.0,
+        },
+    )
+    (run_dir / "viewer.html").write_text("<html></html>", encoding="utf-8")
+
+    html = build_index(tmp_path).read_text(encoding="utf-8")
+
+    assert "accepted PR" in html
+    assert "<b>1</b> accepted" in html
 
 
 def test_tokens_pill_formats_and_folds_reasoning():

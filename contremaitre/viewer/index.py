@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from ..costs import sum_token_usage_in_events
 from ..models import ModelSpec
+from ..pr_outcomes import PrOutcome, outcome_for_run
 from ..run_artifacts import RunArtifacts
 from . import VIEWER_FILENAME
 
@@ -80,6 +81,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
     arts = RunArtifacts.from_run_dir(run_dir)
     diffstat = arts.diffstat()
     tokens = arts.token_usage_all()
+    pr_outcome = outcome_for_run(run_dir)
 
     return {
         "run_id": run_dir.name,
@@ -103,6 +105,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "pr_url": (pr or {}).get("url") if isinstance(pr, dict) else None,
         "pr_title": (pr or {}).get("title") if isinstance(pr, dict) else None,
         "pr_branch": (pr or {}).get("branch") if isinstance(pr, dict) else None,
+        "pr_outcome": pr_outcome,
         "cli_reviews": cli_reviews,
     }
 
@@ -390,6 +393,16 @@ def _cli_review_tier(verdict: str | None) -> str:
     if verdict == "MUST_FIX":
         return "tier-red"
     return "tier-unknown"
+
+
+def _pr_outcome_pill(outcome: dict[str, Any]) -> str:
+    key = str(outcome.get("outcome") or PrOutcome.UNKNOWN.value)
+    label = str(outcome.get("label") or key)
+    tier = str(outcome.get("tier") or "tier-unknown")
+    return (
+        f'<span class="score-pill"><span class="sim-dot {tier}"></span>'
+        f"<b>{_escape(label)}</b></span>"
+    )
 
 
 def _verdict_label(verdict: str) -> str:
@@ -704,6 +717,7 @@ def _pipeline_run_metrics(run_dir: Path) -> dict[str, Any] | None:
         "sim_rt": sim_rt,
         "infra": False,
         "lands_pr": str(stats.get("verdict") or "") in {"READY_FOR_DRAFT_PR", "PR_NEEDS_HUMAN"},
+        "accepted_pr": outcome_for_run(run_dir).get("accepted"),
         "turns": stats.get("turns"),
         "duration": stats.get("duration_seconds"),
         "design_rounds": phases.get("grilling_exchanges"),
@@ -780,6 +794,7 @@ def _collect_pipeline_pairings(runs_root: Path) -> list[dict[str, Any]]:
                 "n": len(real),
                 "infra_n": infra_n,
                 "pr_land": sum(1 for r in real if r["lands_pr"]) / len(real),
+                "pr_accept": _rate(real, "accepted_pr"),
                 "design": _avg(real, "design_rounds"),
                 "impl": _avg(real, "impl_turns"),
                 "turns": _avg(real, "turns"),
@@ -961,6 +976,8 @@ def _render_pipeline_table(
             f"{_model_html(p['sim'], p['sim_rt'])}"
         )
         land_tier = _rate_tier(p["pr_land"])
+        accept_rate = p["pr_accept"][0]
+        accept_tier = _rate_tier(accept_rate) if accept_rate is not None else "tier-unknown"
         pr_fail_text = _fmt_pct(p["pr_fail"])
         if (p["pr_fail"][0] or 0) >= 0.5:
             pr_fail_text += " ⚠"
@@ -987,6 +1004,12 @@ def _render_pipeline_table(
             # outcome
             f'<td class="num cell grp-start"><span class="sim-dot {land_tier}"></span>'
             f"{p['pr_land'] * 100:.0f}%</td>"
+            + _cell(
+                p["pr_accept"],
+                _fmt_pct(p["pr_accept"]),
+                n,
+                sev="" if accept_rate is None else f" {accept_tier}",
+            )
             + infra_cell
             # exchange
             + _cell(p["design"], _fmt_num(p["design"]), n, group=True)
@@ -1023,6 +1046,7 @@ def _render_pipeline_table(
         f'<p class="cov-note">{total_n} real runs · {len(pairings)} pairings '
         f"({excluded} excluded). "
         f"coverage — exchange phases {_cov_pct('design')} · "
+        f"accepted PR {_cov_pct('pr_accept')} · "
         f"sim review {_cov_pct('sim_changes')} · "
         f"PR review {_cov_pct('pr_fail')} · tokens {_cov_pct('out_tokens')}. "
         "Dimmed cells = partial coverage (hover for k/n). "
@@ -1047,7 +1071,7 @@ def _render_pipeline_table(
     <thead>
       <tr class="grp-row">
         <th colspan="2"></th>
-        <th class="grp-head grp-start" colspan="2">outcome</th>
+        <th class="grp-head grp-start" colspan="3">outcome</th>
         <th class="grp-head grp-start" colspan="4">exchange</th>
         <th class="grp-head grp-start" colspan="4">review gates</th>
         <th class="grp-head grp-start" colspan="4">code output</th>
@@ -1056,6 +1080,7 @@ def _render_pipeline_table(
         <th>pairing (agent × sim)</th>
         <th class="num" title="real runs the metrics are computed over (infra failures excluded)">runs</th>
         <th class="num grp-start" title="% of real runs that reached a draft PR">PR%</th>
+        <th class="num" title="% of scoreable runs whose PR was ultimately merged; open/draft/unknown excluded">accepted</th>
         <th class="num" title="runs that died in infra (docker/clone/preflight/quota) — counted here, excluded from every other column">infra</th>
         <th class="num grp-start" title="design/grilling exchanges before code (flow_use)">design</th>
         <th class="num" title="agent turns implementing after SETTLED_DESIGN">impl</th>
@@ -1093,6 +1118,10 @@ def _render_body(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
     n_pr = sum(1 for r in rows if r["pr_kind"] == "PUBLISHED")
     n_failed = sum(1 for r in rows if r["verdict"] == "FAILED_INFRA")
     n_no_pr = sum(1 for r in rows if str(r["verdict"]).startswith("NO_PR"))
+    outcome_counts = {
+        outcome.value: sum(1 for row in rows if row["pr_outcome"].get("outcome") == outcome.value)
+        for outcome in PrOutcome
+    }
 
     header = f"""
 <div class="topbar">
@@ -1109,6 +1138,9 @@ def _render_body(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
   <span class="item"><span class="sim-dot tier-green"></span><b>{n_pr}</b> PR published</span>
   <span class="item"><span class="sim-dot tier-yellow"></span><b>{n_no_pr}</b> no PR</span>
   <span class="item"><span class="sim-dot tier-red"></span><b>{n_failed}</b> failed infra</span>
+  <span class="item"><span class="sim-dot tier-green"></span><b>{outcome_counts[PrOutcome.ACCEPTED.value]}</b> accepted</span>
+  <span class="item"><span class="sim-dot tier-red"></span><b>{outcome_counts[PrOutcome.REJECTED.value]}</b> rejected</span>
+  <span class="item"><span class="sim-dot tier-yellow"></span><b>{outcome_counts[PrOutcome.PENDING.value]}</b> pending</span>
 </div>
 """
 
@@ -1121,6 +1153,7 @@ def _render_body(rows: list[dict[str, Any]], *, runs_root: Path) -> str:
   <b>verdict</b> · the orchestrator's terminal verdict (READY_FOR_DRAFT_PR / PR_NEEDS_HUMAN / NO_PR_* / FAILED_INFRA).
   <b>models</b> · agent / sim (provider prefix stripped).
   <b>PR</b> · published PR title + link, or the kind if no PR (NO_PR, DRY_RUN, …).
+  <b>accepted PR</b> · eventual GitHub outcome: merged, rejected, pending, or unavailable.
   Click any row to open that run's <code>viewer.html</code>.
 </div>
 """
@@ -1242,6 +1275,7 @@ def _render_row(r: dict[str, Any]) -> str:
         f"{cost_pill}"
         f"{_diffstat_pill(r['diffstat'])}"
         f"{_tokens_pill(r.get('tokens'))}"
+        f"{_pr_outcome_pill(r['pr_outcome'])}"
     )
 
     verdict_display = _verdict_label(r["verdict"])

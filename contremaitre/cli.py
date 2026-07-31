@@ -451,6 +451,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Open the index in the default browser",
     )
+    index_p.add_argument(
+        "--refresh-pr-outcomes",
+        action="store_true",
+        help="Refresh eventual GitHub PR outcomes and rebuild every archived viewer",
+    )
     index_p.set_defaults(func=_index_cmd)
 
     eval_p = sub.add_parser("eval", help="v0 regression canary (see golden_cases/)")
@@ -1930,6 +1935,42 @@ def _index_cmd(args: argparse.Namespace) -> int:
     if not runs_root.is_dir():
         print(f"contremaitre index: not a directory: {runs_root}", file=sys.stderr)
         return 1
+
+    if args.refresh_pr_outcomes:
+        from .paths import build_run_paths
+        from .pr_outcomes import refresh_run_outcomes
+
+        summary = refresh_run_outcomes(runs_root)
+        rebuilt = 0
+        for run_dir in sorted(runs_root.iterdir()):
+            if (
+                run_dir.is_dir()
+                and not run_dir.name.startswith("_")
+                and (run_dir / VIEWER_FILENAME).is_file()
+                and (run_dir / "stats.json").is_file()
+            ):
+                build_viewer(build_run_paths(runs_root, run_dir.name), refresh_index=False)
+                rebuilt += 1
+        counts = ", ".join(
+            f"{key}={value}"
+            for key, value in summary.items()
+            if key not in {"errors", "failures"} and value
+        )
+        errors = summary["errors"]
+        print(
+            f"refreshed PR outcomes: {counts or 'no runs'}; "
+            f"errors={errors}; viewers={rebuilt}"
+        )
+        for failure in summary["failures"]:
+            print(
+                f"  {failure['pr_url']}: {failure['error']}",
+                file=sys.stderr,
+            )
+        if errors > len(summary["failures"]):
+            print(
+                f"  … {errors - len(summary['failures'])} more lookup failure(s)",
+                file=sys.stderr,
+            )
 
     out = build_index(runs_root)
     print(f"wrote {out}")

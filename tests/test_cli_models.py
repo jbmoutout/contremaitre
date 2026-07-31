@@ -9,6 +9,7 @@ from contremaitre.cli import (
     _DEFAULT_ZEN_MODEL,
     _fetch_free_models,
     _fetch_openrouter_catalog,
+    _index_cmd,
     _normalize_openrouter_slug,
     _pick_zen_model_interactive,
     _run_cmd,
@@ -212,3 +213,42 @@ def test_pick_zen_model_catalog_unavailable_uses_zen_fallback():
 def test_pick_zen_model_empty_catalog_uses_zen_fallback():
     with patch("contremaitre.cli._fetch_free_models", return_value=[]):
         assert _pick_zen_model_interactive("agent") == _DEFAULT_ZEN_MODEL
+
+
+def test_index_accepts_pr_outcome_refresh_flag():
+    args = build_parser().parse_args(["index", "--refresh-pr-outcomes"])
+
+    assert args.refresh_pr_outcomes is True
+
+
+def test_index_reports_pr_outcome_refresh_failure_details(tmp_path, capsys):
+    args = SimpleNamespace(
+        runs_root=tmp_path,
+        refresh_pr_outcomes=True,
+        open=False,
+    )
+    summary = {
+        "accepted": 1,
+        "rejected": 0,
+        "pending": 0,
+        "no_pr": 0,
+        "dry_run": 0,
+        "unknown": 1,
+        "errors": 1,
+        "failures": [
+            {
+                "pr_url": "https://github.com/acme/widgets/pull/7",
+                "error": "gh auth required",
+            }
+        ],
+    }
+
+    with (
+        patch("contremaitre.pr_outcomes.refresh_run_outcomes", return_value=summary),
+        patch("contremaitre.cli.build_index", return_value=tmp_path / "index.html"),
+    ):
+        assert _index_cmd(args) == 0
+
+    captured = capsys.readouterr()
+    assert "errors=1" in captured.out
+    assert "https://github.com/acme/widgets/pull/7: gh auth required" in captured.err

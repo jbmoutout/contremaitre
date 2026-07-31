@@ -437,12 +437,13 @@ Every `.py` under [contremaitre/](../contremaitre/). One line each — the code 
 - [`orchestrator.py`](../contremaitre/orchestrator.py) — state machine, caps, worktree lifecycle, WORK loop, review loop, host-side commit (with SETTLED-derived title + body), publication gate, label-driven cleanup, SIGTERM emergency-flush, post-publish CLI review hook (incl. worst-of-N commit-status projection).
 - [`paths.py`](../contremaitre/paths.py) — slug validation, run-id generation, contained-path builder (prevents escape outside `run_dir`).
 - [`preflight.py`](../contremaitre/preflight.py) — operational checks for live opencode + CLI runs, validated as the per-role union plus the post-publish CLI reviewer: repo/base ref, Docker image, `:ro` mount, network policy (CLI defaults to locked, `--allow-open-egress` overrides), OpenRouter key bounds (opencode), codex / claude auth checks for active CLI tools, CLI freshness vs npm (active CLI tools, WARN-only). See [Preflight](#preflight).
+- [`pr_outcomes.py`](../contremaitre/pr_outcomes.py) — the eventual PR-outcome Module. Keeps mutable human disposition separate from publication-time `pr.json`, maps merged / closed / open GitHub states to accepted / rejected / pending, and performs explicit best-effort host-side refreshes through `gh`. Actor containers never receive GitHub credentials.
 - [`prompts/`](../contremaitre/prompts/) — `initial_prompt.md` (agent's first turn), `initial_prompt_adr.md` (ADR-seeded variant, `--adr`), `sim_tooled_persona.md` (SIM's first turn), `sim_adr_seed.md` (host note in the SIM's first turn on ADR-seeded runs), `sim_review_prompt.md` (single-shot review), `cli_reviewer_prompt.md` (post-publish review). Markdown is the source; `prompts/__init__.py` loads them.
 - [`publisher.py`](../contremaitre/publisher.py) — publication boundary: `StubPublisher` (dry-run) vs `GhPublisher` (real `gh pr create --draft`). PR title + body derived from `.contremaitre/SETTLED_DESIGN.md` + SIM verdict summary; `--pr-title` / `--pr-body` override.
 - [`runtime_image.py`](../contremaitre/runtime_image.py) — lockhash-keyed deps caching (see below).
 - [`tui.py`](../contremaitre/tui.py) — read-only Textual TUI tailing JSONL artifacts. 7-phase footer (init → exploring → grilling → implementing → reviewing → cli_review → done) + SIM reviewer status glyphs + CLI review loop status + warning tokens + subscription-window usage (codex rollout snapshots / claude statusLine snapshots) + verdict badge.
 - [`verdicts.py`](../contremaitre/verdicts.py) — strict SIM verdict parser (fence-tolerant JSON extraction) and `diff_hash()` used by the diff-hash gate.
-- [`viewer/`](../contremaitre/viewer/) — single-file run viewer (`viewer.html`) over the JSONL artifacts (transcript, timeline, sub-agents, written files, guardrail events, eval reports). Built by the orchestrator's `finally` so it lands on success and failure. Companion [`viewer/index.py`](../contremaitre/viewer/index.py) scans a runs root for `viewer.html` files and emits `index.html` — one summary card per run (verdict, models, PR link, cost, duration), newest first — rebuilt at the end of every run so the dashboard is always current. [`viewer/ab.py`](../contremaitre/viewer/ab.py) renders the `eval ab` head-to-head report (`ab--<case>--<a>-vs-<b>.html` at the runs root): provenance + validity checklist, every `check_run` scorecard metric with median [min–max] + per-run values + a range-separation signal (infra-failed runs badged in the roster, excluded from metric vectors), per-run cards linking into each run's viewer.
+- [`viewer/`](../contremaitre/viewer/) — single-file run viewer (`viewer.html`) over the JSONL artifacts (transcript, timeline, sub-agents, written files, guardrail events, eval reports, eventual PR outcome). Built by the orchestrator's `finally` so it lands on success and failure. Companion [`viewer/index.py`](../contremaitre/viewer/index.py) scans a runs root for `viewer.html` files and emits `index.html` — one summary card per run (verdict, models, PR link/outcome, cost, duration), newest first — rebuilt locally at the end of every run so the dashboard is always current. An explicit `contremaitre index --refresh-pr-outcomes` host-side refresh backfills mutable GitHub state and then rebuilds every archived viewer plus the index once. [`viewer/ab.py`](../contremaitre/viewer/ab.py) renders the `eval ab` head-to-head report (`ab--<case>--<a>-vs-<b>.html` at the runs root): provenance + validity checklist, every `check_run` scorecard metric with median [min–max] + per-run values + a range-separation signal (infra-failed runs badged in the roster, excluded from metric vectors), per-run cards linking into each run's viewer.
 
 ## Artifact contract
 
@@ -472,6 +473,7 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 - `guardrail_events.jsonl` — per-turn lifecycle + `check_started`/`_completed`, `host_commit_created`, `review_verdict`, `hard_gates_checked`, `published`/`publication_blocked`, `cli_review_started`/`_completed`/`_failed`/`_status`, `worktree_removed`
 - `recoveries.jsonl` — sqlite-recovery / SIGTERM-emergency events
 - `pr.json` — publication outcome
+- `pr_outcome.json` — versioned, refreshable eventual GitHub outcome. `ACCEPTED` means merged; `REJECTED` means closed without merge; open/draft is `PENDING`; no-PR and dry-run remain distinct. Missing/unavailable GitHub data is `UNKNOWN`; a failed refresh may retain the prior successful GitHub record under `last_known_outcome` for provenance, but that nested history is not scored. Written only by explicit host-side archive refresh.
 
 ### Extracted from agent activity
 
@@ -491,6 +493,13 @@ Every opencode-mode run writes to `<runs_root>/<run-id>/`. The control plane is 
 - `eval/cost_report.json`
 - `eval/preflight_report.json`
 - `eval/canary.json` — only when driven by `contremaitre eval run`
+
+The canary headline reads `pr_outcome.json` through the same local fallback as
+the viewers and exposes `accepted_pr_score` (`1.0` merged, `0.0`
+closed-unmerged/no-PR, null pending/dry-run/unknown), `accepted_pr`, and the
+categorical outcome mix. Because this signal is delayed, mutable, and
+human-dependent, it is informational and does not currently gate baseline
+comparison.
 
 ### Provenance + viewer
 
@@ -612,7 +621,7 @@ The dozen most-used flags live in [README.md](../README.md#flags-worth-knowing).
 | `tui run -- <run-args>` | Spawn `contremaitre run` and attach the live TUI. |
 | `tui attach <run-dir>` | Read-only TUI over a finished run. |
 | `viewer <run-dir> [--open]` | Rebuild `viewer.html` for an existing run. |
-| `index [<runs-root>] [--open]` | Build `index.html` over all runs under a root. |
+| `index [<runs-root>] [--open] [--refresh-pr-outcomes]` | Build `index.html` over all runs under a root, optionally refreshing eventual GitHub outcomes first. |
 | `eval {run\|check\|compare\|promote\|all\|show} <case_id> [--config <name>] [--n 3]` | v0 regression canary. See [golden_cases/README.md](../golden_cases/README.md). |
 
 ### Shared flags (`run` + `doctor`)

@@ -8,8 +8,10 @@ baseline.
 
 The scorecard has two layers:
 
-- **Headline** (drives pass/fail): cli_review_score, terminal_score,
-  files_changed, loc_net_delta, review_rounds, cost_usd, wall_seconds.
+- **Headline**: cli_review_score, terminal_score, accepted_pr_score,
+  files_changed, loc_net_delta, review_rounds, cost_usd, wall_seconds. The
+  delayed human acceptance signal is informational and does not drive the
+  regression gate.
 - **Diagnostic** (per-tier rollups, informational): format compliance,
   discipline, review depth, cli_review finding breakdown, efficiency.
 
@@ -46,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from .manifest import manifest_digest
+from .pr_outcomes import outcome_for_run
 from .run_artifacts import RunArtifacts
 
 
@@ -856,6 +859,7 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
     cli = _parse_cli_review(run_dir, config.cli_reviewer)
     diff = _diff_stats(run_dir)
     depth = _review_depth(run_dir)
+    pr_outcome = outcome_for_run(run_dir)
 
     terminal = stats.get("verdict") or pr_eval.get("verdict")
     terminal_score = _TERMINAL_TO_SCORE.get(terminal) if terminal else None
@@ -893,6 +897,11 @@ def check_run(case: CaseDef, config: ConfigDef, run_dir: Path) -> CanaryReport:
         "agent_discipline_score": agent_discipline,
         "terminal_score": terminal_score,
         "terminal_verdict": terminal,
+        "accepted_pr_score": pr_outcome.get("score"),
+        "accepted_pr": pr_outcome.get("accepted"),
+        "pr_outcome": pr_outcome.get("outcome"),
+        "pr_outcome_label": pr_outcome.get("label"),
+        "pr_outcome_tier": pr_outcome.get("tier"),
         "files_changed": diff["files_changed"],
         "loc_net_delta": diff["loc_net_delta"],
         "review_rounds": depth["rounds"],
@@ -1100,6 +1109,9 @@ def aggregate_cell(reports: list[CanaryReport]) -> Cell:
         "agent_discipline_score": _median_range(headline_panel("agent_discipline_score")),
         "terminal_score": _median_range(headline_panel("terminal_score")),
         "terminal_verdict_mix": _mix(headline_panel("terminal_verdict")),
+        "accepted_pr_score": _median_range(headline_panel("accepted_pr_score")),
+        "accepted_pr_rate": _rate(headline_panel("accepted_pr")),
+        "pr_outcome_mix": _mix(headline_panel("pr_outcome")),
         "files_changed": _median_range(headline_panel("files_changed")),
         "loc_net_delta": _median_range(headline_panel("loc_net_delta")),
         "review_rounds": _median_range(headline_panel("review_rounds")),
@@ -1888,6 +1900,11 @@ def format_cell_report(
     )
     lines.append(f"  terminal_score          {_fmt_range(h.get('terminal_score'), prec=2)}")
     lines.append(f"    terminal_mix          {_fmt_mix(h.get('terminal_verdict_mix'))}")
+    lines.append(
+        f"  accepted_pr_score       {_fmt_range(h.get('accepted_pr_score'), prec=2)}   (merged=1 · rejected/no-PR=0 · pending=—)"
+    )
+    lines.append(f"    accepted_pr_rate      {_fmt_rate(h.get('accepted_pr_rate'))}")
+    lines.append(f"    pr_outcome_mix        {_fmt_mix(h.get('pr_outcome_mix'))}")
     lines.append(f"  files_changed           {_fmt_range(h.get('files_changed'))}")
     lines.append(f"  loc_net_delta           {_fmt_range(h.get('loc_net_delta'))}")
     lines.append(f"  review_rounds           {_fmt_range(h.get('review_rounds'))}")

@@ -140,6 +140,8 @@ Generalizable principles surfaced by running cells under this canary on real mod
 
 - **Self-reported / heuristic metrics can be structurally zero-pinned.** A flow_use matcher requiring a verbatim ≥20-char grep-output line in the SIM verdict was 0.0 for every SIM ever, because SIMs are prompted to paraphrase. Audit any "low-variance, drop from the gate" recommendation against the *unfiltered* run set before committing it.
 
+- **Human outcomes are delayed and right-censored.** A merged PR is the strongest available acceptance signal, but an open draft is not a rejection. Record merged as `1.0`, closed-unmerged/no-PR as `0.0`, and leave open/draft/unknown unscored. Keep the result informational until comparisons use a declared maturity window; otherwise a later merge rewrites the apparent baseline without any system change.
+
 ## Known limits (v0)
 
 - **n=3 floor is metric-dependent** (L1): continuous panels stabilize, 3-state verdicts don't. `agent_discipline_score` reproduces cleanly A/A; `cli_review_score` median is more variable.

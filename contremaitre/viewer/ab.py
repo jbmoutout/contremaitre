@@ -232,6 +232,35 @@ METRICS: tuple[Metric, ...] = (
         "pr_landed", "draft PR landed", "outcome", "higher", "bool", hl=True, get=_x("pr_landed")
     ),
     Metric(
+        "pr_outcome",
+        "eventual PR outcome",
+        "outcome",
+        "context",
+        "cat",
+        hl=True,
+        get=_h("pr_outcome"),
+    ),
+    Metric(
+        "accepted_pr",
+        "accepted PR",
+        "outcome",
+        "higher",
+        "bool",
+        note="merged=true · closed/no-PR=false · open/draft=—",
+        hl=True,
+        get=_h("accepted_pr"),
+    ),
+    Metric(
+        "accepted_pr_score",
+        "accepted PR score",
+        "outcome",
+        "higher",
+        "num",
+        "num2",
+        note="merged=1.0 · closed/no-PR=0.0 · open/draft=—",
+        get=_h("accepted_pr_score"),
+    ),
+    Metric(
         "hard_gates_passed",
         "hard gates passed",
         "outcome",
@@ -1256,6 +1285,7 @@ def _render_metric_row(rec: dict[str, Any]) -> str:
 # that matters. Net delta stays in the table, next to added/deleted.
 _SCOREBOARD_KEYS = (
     ("terminal_verdict", "outcome"),
+    ("accepted_pr", "accepted PR"),
     ("cli_review_verdict", "judge verdict"),
     ("cli_review_score", "judge score"),
     ("cli_findings_weighted", "findings (weighted)"),
@@ -1420,6 +1450,8 @@ def _render_run_card(row: dict[str, Any]) -> str:
         _pill("cost", _fmt_value(h.get("cost_usd"), "usd")),
         _pill("rounds", str(h.get("review_rounds") if h.get("review_rounds") is not None else "—")),
     ]
+    outcome_label = h.get("pr_outcome_label") or h.get("pr_outcome") or "PR outcome unknown"
+    pills.append(f'<span class="score-pill"><b>{_escape(outcome_label)}</b></span>')
     # added/deleted live in the diagnostic diff_detail panel, not the headline
     # (the headline carries only files_changed + the net delta).
     diff_detail = report.diagnostic.get("diff_detail", {})

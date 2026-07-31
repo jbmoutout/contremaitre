@@ -134,6 +134,9 @@
     .map(([k, v]) => `<span class="pill ${esc(k)}">${esc(k)}:${v}</span>`).join(" ");
 
   const pr = DATA.pr;
+  const prOutcome = DATA.pr_outcome || {};
+  const prOutcomeLabel = prOutcome.label || prOutcome.outcome || "PR outcome unknown";
+  const prOutcomeTier = prOutcome.tier || "tier-unknown";
   const prRow = pr ? `
     <div class="k">publication outcome</div>
     <div class="v">
@@ -143,6 +146,12 @@
       ${pr.dry_run ? ` <span class="pill">dry-run</span>` : ""}
     </div>
   ` : "";
+  const prOutcomeRow = `
+    <div class="k">eventual PR outcome</div>
+    <div class="v"><span class="sim-dot ${prOutcomeTier}"></span><b>${esc(prOutcomeLabel)}</b>
+      ${prOutcome.source === "github" && prOutcome.checked_at ? ` · checked <code>${esc(prOutcome.checked_at)}</code>` : ""}
+    </div>
+  `;
 
   document.getElementById("overview").innerHTML = `
     <h2>run metadata</h2>
@@ -163,6 +172,7 @@
       ${stats.files_changed != null ? `<div class="k">net diff</div><div class="v"><b>${fmt(stats.files_changed)}</b> file${stats.files_changed === 1 ? "" : "s"} · <span style="color:var(--success)">+${fmt(stats.lines_added)}</span> / <span style="color:#F87171">−${fmt(stats.lines_removed)}</span></div>` : ""}
       <div class="k">recorded cost</div><div class="v">$<b>${(stats.cost_usd ?? 0).toFixed(4)}</b></div>
       ${prRow}
+      ${prOutcomeRow}
     </div>
 
     ${cli ? cliReviewBlock(cli, null) : ""}
