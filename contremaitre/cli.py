@@ -1957,10 +1957,7 @@ def _index_cmd(args: argparse.Namespace) -> int:
             if key not in {"errors", "failures"} and value
         )
         errors = summary["errors"]
-        print(
-            f"refreshed PR outcomes: {counts or 'no runs'}; "
-            f"errors={errors}; viewers={rebuilt}"
-        )
+        print(f"refreshed PR outcomes: {counts or 'no runs'}; errors={errors}; viewers={rebuilt}")
         for failure in summary["failures"]:
             print(
                 f"  {failure['pr_url']}: {failure['error']}",
