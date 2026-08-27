@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from contremaitre import prompts
-from contremaitre.actors import build_docker_command
+from contremaitre.container import DockerContainerLifecycle
 from contremaitre.git_utils import GitRepo
 from contremaitre.models import ActorMode, DepsVolume, PublishMode, RunConfig
 from contremaitre.orchestrator import Orchestrator
@@ -75,7 +75,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 http_proxy=None,
             )
 
-            cmd, _ = build_docker_command(
+            cmd, _ = DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -125,7 +125,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
             opencode_config=cfg,
         )
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "k"}, clear=False):
-            build_docker_command(
+            DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -168,7 +168,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
                     runtime_env=(("VIRTUAL_ENV", "/app/.venv"),),
                 ),
             )
-            cmd, _ = build_docker_command(
+            cmd, _ = DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -231,7 +231,7 @@ class OpencodeBoundaryTest(unittest.TestCase):
                 http_proxy="http://proxy.local:8080",
             )
 
-            cmd, env = build_docker_command(
+            cmd, env = DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,
@@ -406,7 +406,8 @@ class OpencodeBoundaryTest(unittest.TestCase):
             settled_dir = orch.paths.worktree / ".contremaitre"
             settled_dir.mkdir(exist_ok=True)
             (settled_dir / "SETTLED_DESIGN.md").write_text(
-                "# Settled design — Consolidate Prisma seam\n\n## What\n\nDelete the duplicate singleton.\n",
+                "# Settled design — Consolidate Prisma seam\n"
+                "\n## What\n\nDelete the duplicate singleton.\n",
                 encoding="utf-8",
             )
 
@@ -527,8 +528,6 @@ class ZenKeyClassificationTest(unittest.TestCase):
     Zen-only run that passes preflight would fail here at launch (F1)."""
 
     def _build(self, model: str):
-        from contremaitre.actors import build_docker_command
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths = build_run_paths(root / "runs", f"20260606-{root.name}")
@@ -543,7 +542,7 @@ class ZenKeyClassificationTest(unittest.TestCase):
                 actor_mode=ActorMode.OPENCODE,
                 docker_image="img",
             )
-            return build_docker_command(
+            return DockerContainerLifecycle().build_argv(
                 config=config,
                 paths=paths,
                 worktree=worktree,

@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from contremaitre.actors import CompositeActorRunner, make_actor_runner
+from contremaitre.container import ContainerResult
 from contremaitre.cli_actor import (
     _CLAUDE_OAUTH_ENV,
     CliActorRunner,
@@ -1452,7 +1453,8 @@ class CliActorStartEventTest(unittest.TestCase):
             runner, paths = _make_runner(Path(tmp), allow_open_egress=True)
             runner.driver.parse_events = lambda *a, **k: ("ok", None, None, None)
             with patch(
-                "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
+                "contremaitre.container.DockerContainerLifecycle.run_detached",
+                return_value=ContainerResult(0, "", None),
             ):
                 runner.agent_turn("hello")
             starts = [e for e in self._guardrails(paths) if e.get("event") == "actor_start"]
@@ -1470,7 +1472,8 @@ class CliActorStartEventTest(unittest.TestCase):
             sd.write_text("design")
             runner.driver.parse_events = lambda *a, **k: ("LOOKS_GOOD", None, None, None)
             with patch(
-                "contremaitre.cli_actor._run_detached_container", return_value=(0, "", None)
+                "contremaitre.container.DockerContainerLifecycle.run_detached",
+                return_value=ContainerResult(0, "", None),
             ):
                 runner.sim_review(
                     diff_file=d,
@@ -1508,10 +1511,11 @@ class CliActorStartEventTest(unittest.TestCase):
                         + "\n",
                         encoding="utf-8",
                     )
-                return (0, "", None)
+                return ContainerResult(0, "", None)
 
             with patch(
-                "contremaitre.cli_actor._run_detached_container", side_effect=_fake_run_container
+                "contremaitre.container.DockerContainerLifecycle.run_detached",
+                side_effect=_fake_run_container,
             ) as run_container:
                 runner.agent_turn("hello")
                 # Join the background initial-probe thread while the patch is still
@@ -1560,9 +1564,12 @@ class CliReviewerWorktreeTest(unittest.TestCase):
 
             def _fake(**kwargs):
                 captured["cmd"] = kwargs["cmd"]
-                return (0, "", None)
+                return ContainerResult(0, "", None)
 
-            with patch("contremaitre.cli_actor._run_detached_container", side_effect=_fake):
+            with patch(
+                "contremaitre.container.DockerContainerLifecycle.run_detached",
+                side_effect=_fake,
+            ):
                 runner.cli_reviewer_turn(
                     prompt="p", raw_export=paths.raw_export, round_n=1, review_dir=review_dir
                 )

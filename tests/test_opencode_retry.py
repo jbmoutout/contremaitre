@@ -28,8 +28,10 @@ from contremaitre.actors import (
     OpencodeActorRunner,
     _classify_fast_fail_marker,
     _count_jsonl_events,
-    _detect_provider_fast_fail,
     _latest_error_after_text_count,
+)
+from contremaitre.container import (
+    _detect_provider_fast_fail,
     _latest_internal_log_size,
 )
 from contremaitre.fixture import init_fixture
